@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import unittest
-from datetime import time
+from datetime import date, time
 from uuid import uuid4
 
-from time_tl.domain.schedule import Lesson, ScheduleProfile, ScheduleRule
+from time_tl.domain.schedule import DateOverride, Lesson, ScheduleProfile, ScheduleRule
 from time_tl.infrastructure.db.accounts import AsyncPostgresAccountRepository
 from time_tl.infrastructure.db.admin import AsyncPostgresAdminRepository
 from time_tl.infrastructure.db.engine import create_engine
@@ -27,9 +27,13 @@ class ReverseCodec:
 class AddOnlySession:
     def __init__(self):
         self.rows = []
+        self.flush_batches = []
 
     def add(self, row):
         self.rows.append(row)
+
+    async def flush(self):
+        self.flush_batches.append(tuple(type(row).__name__ for row in self.rows))
 
 
 class FakeConnection:
@@ -78,7 +82,7 @@ class LinkFactory:
 
 
 class AdapterContractTests(unittest.IsolatedAsyncioTestCase):
-    def test_account_profile_encrypts_lesson_link(self):
+    async def test_account_profile_encrypts_lesson_link(self):
         codec = ReverseCodec()
         repo = AsyncPostgresAccountRepository(None, codec)  # type: ignore[arg-type]
         profile = ScheduleProfile(
@@ -90,14 +94,26 @@ class AdapterContractTests(unittest.IsolatedAsyncioTestCase):
                     0, (Lesson(time(9), time(10), "Math", join_url="https://example.test/join"),)
                 ),
             ),
+            overrides=(
+                DateOverride(
+                    day=date(2026, 9, 23),
+                    day_off=False,
+                    lessons=(Lesson(time(11), time(12), "Science"),),
+                ),
+            ),
         )
         session = AddOnlySession()
-        repo._add_profile(session, uuid4(), profile)  # type: ignore[arg-type]
+        await repo._add_profile(session, uuid4(), profile)  # type: ignore[arg-type]
+        self.assertEqual(session.flush_batches[0], ("ScheduleProfile",))
+        self.assertEqual(session.flush_batches[1][-1], "ScheduleRule")
+        self.assertNotIn("RuleLesson", session.flush_batches[1])
+        self.assertEqual(session.flush_batches[2][-1], "DateOverride")
+        self.assertNotIn("OverrideLesson", session.flush_batches[2])
         lesson = next(row for row in session.rows if isinstance(row, RuleLesson))
         self.assertNotIn(b"https://", lesson.join_url_ciphertext)
         self.assertEqual(codec.decrypt(lesson.join_url_ciphertext), "https://example.test/join")
 
-    def test_account_profile_fails_closed_without_link_codec(self):
+    async def test_account_profile_fails_closed_without_link_codec(self):
         repo = AsyncPostgresAccountRepository(None)  # type: ignore[arg-type]
         profile = ScheduleProfile(
             "p",
@@ -110,7 +126,7 @@ class AdapterContractTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         with self.assertRaisesRegex(RuntimeError, "encryption adapter"):
-            repo._add_profile(AddOnlySession(), uuid4(), profile)  # type: ignore[arg-type]
+            await repo._add_profile(AddOnlySession(), uuid4(), profile)  # type: ignore[arg-type]
 
     async def test_dedicated_lease_acquire_renew_release(self):
         connection = FakeConnection()

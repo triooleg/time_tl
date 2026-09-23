@@ -138,7 +138,7 @@ class AsyncPostgresAccountRepository:
         for public_id, profile in desired.items():
             row = existing.pop(public_id, None)
             if row is None:
-                self._add_profile(session, user_id, profile)
+                await self._add_profile(session, user_id, profile)
                 continue
             current = await self._load_profile(session, row)
             metadata_changed = (
@@ -219,6 +219,7 @@ class AsyncPostgresAccountRepository:
             rule_row.valid_from = rule.valid_from
             rule_row.valid_to = rule.valid_to
             rule_row.position = position
+            await session.flush()
             await self._sync_rule_lessons(session, rule_row.id, rule.lessons)
         unused_rule_ids = [
             item.id for item in existing_rules if item.id not in used_rule_ids
@@ -248,6 +249,7 @@ class AsyncPostgresAccountRepository:
                 session.add(override_row)
             used_override_ids.add(override_row.id)
             override_row.day_off = override.day_off
+            await session.flush()
             await self._sync_override_lessons(session, override_row.id, override.lessons)
         unused_override_ids = [
             item.id for item in existing_overrides if item.id not in used_override_ids
@@ -484,7 +486,7 @@ class AsyncPostgresAccountRepository:
             ),
         )
 
-    def _add_profile(
+    async def _add_profile(
         self,
         session: AsyncSession,
         user_id: UUID,
@@ -502,9 +504,10 @@ class AsyncPostgresAccountRepository:
             version=version,
         )
         session.add(row)
-        self._add_profile_contents(session, row.id, profile)
+        await session.flush()
+        await self._add_profile_contents(session, row.id, profile)
 
-    def _add_profile_contents(
+    async def _add_profile_contents(
         self, session: AsyncSession, profile_id: UUID, profile: ScheduleProfile
     ) -> None:
         for rp, rule in enumerate(profile.rules):
@@ -519,6 +522,7 @@ class AsyncPostgresAccountRepository:
                 position=rp,
             )
             session.add(rr)
+            await session.flush()
             for lp, lesson in enumerate(rule.lessons):
                 session.add(
                     RuleLesson(
@@ -537,6 +541,7 @@ class AsyncPostgresAccountRepository:
                 id=uuid4(), profile_id=profile_id, day=override.day, day_off=override.day_off
             )
             session.add(oo)
+            await session.flush()
             for lp, lesson in enumerate(override.lessons):
                 session.add(
                     OverrideLesson(
