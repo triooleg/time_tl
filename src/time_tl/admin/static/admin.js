@@ -1,12 +1,23 @@
 (()=>{
-  const button=document.getElementById('refresh');
-  const updated=document.getElementById('updated');
-  let timer;
   const textMetric=(name,m)=>{
     if(!m||m.value===null||m.value===undefined)return `${name}: Метрики недоступні`;
     const value=Array.isArray(m.value)?m.value.join(' / '):m.value;
     return `${name}: ${value} ${m.unit||''}`.trim();
   };
+  const storageMetric=(name,m)=>{
+    if(!m||!Array.isArray(m.value)||m.value.length<2)return `${name}: Метрики недоступні`;
+    const used=Number(m.value[0]);
+    const total=Number(m.value[1]);
+    const reportedPercent=Number(m.value[2]);
+    if(!Number.isFinite(used)||!Number.isFinite(total)||used<0||total<=0)return `${name}: Метрики недоступні`;
+    const percent=Number.isFinite(reportedPercent)&&reportedPercent>=0?reportedPercent:(used/total)*100;
+    const gibibyte=1024**3;
+    return `${name}: ${(used/gibibyte).toFixed(2)} / ${(total/gibibyte).toFixed(2)} ГБ (${percent.toFixed(1)}%)`;
+  };
+  if(typeof module!=='undefined'&&module.exports){module.exports={storageMetric};return;}
+  const button=document.getElementById('refresh');
+  const updated=document.getElementById('updated');
+  let timer;
   const setText=(node,value)=>{if(node)node.textContent=value;};
   const count=(values,key)=>{
     if(!values||!Object.prototype.hasOwnProperty.call(values,key))return null;
@@ -59,8 +70,8 @@
     const cards=document.querySelectorAll('#metrics article');
     const host=data.host||{};
     setText(cards[0],textMetric('CPU',host.cpu));
-    setText(cards[1],textMetric('RAM',host.ram));
-    setText(cards[2],textMetric('Disk',host.disk));
+    setText(cards[1],storageMetric('RAM',host.ram));
+    setText(cards[2],storageMetric('Disk',host.disk));
     setText(cards[3],textMetric('Load',host.load));
     setText(document.getElementById('metrics-heartbeat'),host.source_status==='available'?'Heartbeat отримано':'Метрики недоступні');
 
