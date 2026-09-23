@@ -1,0 +1,81 @@
+version = 1
+max_parallel_workers = 3
+child_spawning = "orchestrator_only"
+self_approval = false
+
+[environments]
+local = "write_allowed"
+simulation = "write_allowed"
+staging = "explicit_user_approval"
+production = "explicit_user_approval"
+
+[safety]
+official_alert_source_only = true
+silence_means_clear = false
+api_failure_means_clear = false
+restart_means_clear = false
+live_messages_default = false
+production_deploy_default = false
+
+[[agents]]
+id = "time_tl_orchestrator"
+config = ".codex/agents/time_tl_orchestrator.toml"
+owns = [".planning/**", "AGENTS.md", ".agents/**"]
+reviewers = ["safety_reviewer"]
+
+[[agents]]
+id = "schedule_engineer"
+config = ".codex/agents/schedule_engineer.toml"
+owns = ["src/time_tl/domain/schedule/**", "tests/schedule/**"]
+reviewers = ["safety_reviewer"]
+
+[[agents]]
+id = "telegram_ux_builder"
+config = ".codex/agents/telegram_ux_builder.toml"
+owns = ["src/time_tl/bot/**", "tests/bot/**"]
+reviewers = ["time_tl_orchestrator"]
+
+[[agents]]
+id = "alert_integration_engineer"
+config = ".codex/agents/alert_integration_engineer.toml"
+owns = ["src/time_tl/domain/alerts/**", "src/time_tl/integrations/alerts/**", "tests/alerts/**"]
+reviewers = ["safety_reviewer", "time_tl_orchestrator"]
+
+[[agents]]
+id = "backend_data_engineer"
+config = ".codex/agents/backend_data_engineer.toml"
+owns = ["src/time_tl/persistence/**", "src/time_tl/workers/**", "migrations/**", "tests/persistence/**"]
+reviewers = ["safety_reviewer"]
+
+[[agents]]
+id = "portainer_operator"
+config = ".codex/agents/portainer_operator.toml"
+owns = ["Dockerfile", "compose*.yml", "docker-compose*.yml", "docs/deployment/**"]
+reviewers = ["safety_reviewer", "time_tl_orchestrator"]
+
+[[agents]]
+id = "safety_reviewer"
+config = ".codex/agents/safety_reviewer.toml"
+owns = []
+reviewers = []
+
+[[agents]]
+id = "docs_release_curator"
+config = ".codex/agents/docs_release_curator.toml"
+owns = ["docs/**", ".planning/STATE.md"]
+reviewers = ["time_tl_orchestrator"]
+
+[[gates]]
+id = "alert-safety"
+required_reviewers = ["safety_reviewer", "time_tl_orchestrator"]
+evidence = ["state-machine-tests", "outage-tests", "dedupe-tests", "region-hierarchy-tests"]
+
+[[gates]]
+id = "schedule-sharing"
+required_reviewers = ["safety_reviewer", "time_tl_orchestrator"]
+evidence = ["schema-version-tests", "preview-confirmation-tests", "sensitive-field-exclusion-tests", "independent-copy-tests"]
+
+[[gates]]
+id = "deployment"
+required_reviewers = ["safety_reviewer", "time_tl_orchestrator"]
+evidence = ["explicit-user-approval", "server-readiness", "backup-restore", "rollback-plan", "healthcheck"]

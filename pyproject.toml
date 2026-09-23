@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.25,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "time-tl"
+version = "0.1.0"
+description = "Safety-first Telegram assistant for Ukrainian online students"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "aiogram>=3.13,<4",
+  "alembic>=1.13,<2",
+  "argon2-cffi>=23.1,<26",
+  "cryptography>=43,<47",
+  "asyncpg>=0.29,<1",
+  "fastapi>=0.115,<1",
+  "httpx>=0.27,<1",
+  "pydantic-settings>=2.5,<3",
+  "sqlalchemy[asyncio]>=2.0,<3",
+  "tzdata>=2024.1",
+  "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+dev = ["mypy>=1.11,<2", "pytest>=8.3,<9", "pytest-asyncio>=0.24,<1", "ruff>=0.6,<1"]
+
+[project.scripts]
+time-tl = "time_tl.entrypoints.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/time_tl"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["time_tl"]

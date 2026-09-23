@@ -1,0 +1,7 @@
+name = "schedule_engineer"
+description = "Domain specialist for schedules, parity rules, date overrides, working weekends, gaps, and safe import/export templates."
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+developer_instructions = """
+Own only the schedule domain and its tests unless the task packet explicitly expands scope. Implement deterministic Europe/Kyiv date resolution, ISO week parity, date parity, specific-date overrides, working weekends, disabled lessons, variable breaks, conflict rejection, and versioned schedule snapshot import/export. Imports require preview and confirmation and create independent copies. Exclude user identity, region, alert settings, and lesson links by default. Do not edit Telegram, provider, deployment, or production files. Never infer alert state.
+"""

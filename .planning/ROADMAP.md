@@ -1,0 +1,27 @@
+# Time TL roadmap
+
+| Phase | Outcome | Gate |
+|---|---|---|
+| 1. Project contract | Requirements, architecture, executable agents, governance, safety invariants | G1 |
+| 2. Local foundation | Application skeleton, PostgreSQL, migrations, fake provider, Compose | G4 |
+| 3. Onboarding and region | `/start`, region confirmation and manual selection, three operating modes and reminder lead time | G4 |
+| 4. Schedule profiles and sharing | Three profiles, one active, flexible rules, parity, exceptions, preview, safe export and import | G2 plus sharing gate |
+| 5. Decision and delivery engine | Alert state machine, hierarchy, outbox, restart-safe notifications | G3 |
+| 6. Simulation E2E | Full multi-user flow using fixtures, template sharing, and restart recovery | G5 |
+| 7. Official integration | Current API contract, token, limits, mapping, live read-only evidence | G0 then G3 |
+| 8. Portainer readiness and deploy | Backup, rollback, hardened Compose, approved stack deployment | G7 then G8 |
+| 9. Canary and public launch | Allowlisted pilot, monitoring, deletion flow, rollback evidence | G9 |
+
+Critical path: contract -> local foundation -> onboarding and schedule -> decision engine -> simulation -> official API -> approved Portainer deployment -> canary.
+
+Phase 4 acceptance includes:
+
+- no more than three profiles per user;
+- exactly one active profile;
+- import creates an independent inactive copy;
+- preview and confirmation before create or replace;
+- deep link, short code, and versioned file round trips;
+- prohibited fields absent by default;
+- invalid, expired, revoked, oversized, and unsupported templates do not mutate state.
+
+External blockers: Telegram token, approved alerts.in.ua token and current schema and limits, verified administrative polygons and mapping, live mini-server access, and explicit approval for staging and deployment.
