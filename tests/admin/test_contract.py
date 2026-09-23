@@ -45,11 +45,30 @@ class AdminContractTests(unittest.TestCase):
             "read-only host exporter",
             "Возобновить отправку",
             "Отмена",
+            "Налаштування проєкту",
+            "TELEGRAM_BOT_TOKEN",
+            "ALERTS_IN_UA_TOKEN",
+            "TEST_CHAT_ALLOWLIST",
+            "LESSON_LINK_FERNET_KEY",
+            "ADMIN_IP_HASH_KEY",
+            "SIMULATION",
+            "STAGING",
+            "PRODUCTION",
+            "ручний вибір",
+            "schedule-worker",
+            "sender-worker",
         ]:
             self.assertIn(copy, page)
+        self.assertIn('id="project-setup"', page)
+        self.assertIn('aria-labelledby="project-setup-title"', page)
+        self.assertIn('<ol class="setup-steps">', page)
+        self.assertNotIn('type="password"', page)
         self.assertNotIn("https://", page)
         self.assertNotIn("docker.sock", page)
         self.assertNotIn("TELEGRAM_BOT_TOKEN=", page)
+        self.assertNotIn("ALERTS_IN_UA_TOKEN=", page)
+        self.assertNotIn("LESSON_LINK_FERNET_KEY=", page)
+        self.assertNotIn("ADMIN_IP_HASH_KEY=", page)
         for aggregate in (
             "aggregates.users",
             "aggregates.profiles",

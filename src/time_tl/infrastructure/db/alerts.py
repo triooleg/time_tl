@@ -352,6 +352,12 @@ class PostgresAlertRepository:
         row.processed_update_ids = sorted(snapshot.processed_update_ids)[-self.PROCESSED_ID_LIMIT :]
         row.pending_clear_candidate = snapshot.pending_clear_candidate
         row.updated_at = datetime.now(UTC)
+        # ``AlertEpisode`` references ``alert_snapshots.scope_id``. The
+        # mappers intentionally do not expose an ORM relationship, so the unit
+        # of work cannot infer their dependency order when both rows are new.
+        # Persist the parent explicitly before adding any child episodes while
+        # keeping all writes inside the caller's transaction.
+        await session.flush((row,))
         await session.execute(delete(AlertEpisode).where(AlertEpisode.scope_id == scope_id))
         for item in snapshot.active_episodes:
             session.add(
