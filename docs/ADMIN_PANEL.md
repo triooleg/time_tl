@@ -9,8 +9,10 @@ RAM, disk, load, network и uptime запрашиваются у отдельн�
 `node-exporter`; Docker socket панели не передаётся.
 
 Dockerfile включает `docs/`, поэтому встроенные ссылки на `SETUP_BOT.md` и этот
-файл доступны в container image. Реализация и локальные тесты существуют, но панель
-ещё не запускалась на мини-сервере и не имеет live PostgreSQL/host-metrics evidence.
+файл доступны в container image. Панель запущена на мини-сервере только в режиме
+SIMULATION: PostgreSQL и healthchecks проверены, `node-exporter` работает, а порт
+панели доступен только на server loopback `127.0.0.1:8081`. Это не staging и не
+production.
 
 ## Доступ и bootstrap
 
@@ -43,7 +45,23 @@ time-tl bootstrap-admin --output .secrets\admin-bootstrap.txt
 Действует до: VALUE_FROM_ARTIFACT
 ```
 
-Сейчас URL и пароль не созданы; документация намеренно их не придумывает.
+Сгенерированный пароль намеренно не приводится в документации. Получайте его только
+из защищённого bootstrap artifact на сервере и удалите artifact после обязательной
+смены пароля.
+
+## Как открыть панель
+
+Панель SIMULATION не опубликована в локальную сеть или Интернет. На доверенном
+компьютере, имеющем доступ к мини-серверу, запустите:
+
+```bash
+ssh -N -L 8081:127.0.0.1:8081 trio@<MINI_SERVER_HOST>
+```
+
+Не закрывая SSH-сеанс, откройте `http://127.0.0.1:8081` и войдите как `admin`.
+SSH-пароль и пароль панели в эту команду, документацию, чат или скриншоты не
+добавляются. Для будущего внешнего доступа сначала нужны проверенные HTTPS,
+reverse proxy и точные `ADMIN_TRUSTED_PROXY_CIDRS`.
 
 ## Защита входа
 
@@ -99,9 +117,9 @@ Worker processes записывают heartbeat в PostgreSQL. Панель ра
 instance IDs и свободные details не раскрываются.
 
 `node-exporter` подключён в Compose к отдельной internal metrics network и read-only
-host mounts. Это реализация, но не live proof: после deployment нужно сопоставить
-filesystem/memory/CPU значения с самим хостом и проверить недоступность exporter
-извне.
+host mounts. В SIMULATION он запущен; перед staging всё равно нужно сопоставить
+filesystem/memory/CPU значения с самим хостом и повторно проверить, что exporter не
+доступен извне.
 
 ### Настройки
 
@@ -160,7 +178,9 @@ allowlist, production требует G8/G9 и явного схвалення т
 
 ## Текущий release status
 
-Локальные security/aggregate/heartbeat/node-exporter контракты проверены тестами.
-Нет доказательства server start, TLS, live metrics, PostgreSQL restart recovery,
-backup/restore или staging Telegram. Поэтому панель не имеет выданного production
-URL и credentials.
+Для exact commit `4ea3b1bedfc31142ae2c53d32e550e4e8a20dcff` проверены
+SIMULATION stack start, migration `0003`, PostgreSQL restart/fault E2E,
+backup/restore, restart persistence и loopback-доступ к панели. Используются fake
+provider и отключённый Telegram; реальных пользователей и токенов нет. G2-G5
+пройдены только для SIMULATION. G6-G9, Telegram staging, HTTPS и production URL
+остаются заблокированными.

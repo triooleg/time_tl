@@ -1,14 +1,32 @@
 # Portainer deployment runbook
 
-This runbook describes a future exact-version deployment. It is not approval and
-does not record a deployment. As of 2026-09-23 no Time TL stack, migration, admin
-bootstrap or Telegram delivery has been run on the mini-server.
+This runbook records the verified exact-version **SIMULATION** deployment and the
+additional gates for any future Telegram staging or production release. Simulation
+success is not staging or production approval.
+
+## Verified simulation deployment
+
+- source commit: `4ea3b1bedfc31142ae2c53d32e550e4e8a20dcff`;
+- image digest:
+  `sha256:08eaa3d06e7ca5d97f11d760c44e67bc085ac395cba196f04a05839d2658da21`;
+- server directory: `/home/trio/time-tl-bot`;
+- Alembic revision: `0003`;
+- `admin-web`, `bot`, `alert-worker`, `schedule-worker`, `sender-worker` and
+  `postgres` healthy; `node-exporter` running;
+- PostgreSQL 16 fault/restart E2E: `1 passed`;
+- isolated backup/restore drill: passed;
+- restart persistence: passed;
+- admin listener: `127.0.0.1:8081` only.
+
+The deployed configuration uses `ALERT_PROVIDER=fake`, disabled Telegram transport,
+no real tokens and no real users. Schedule and sender are inert. Do not change those
+properties in place and then describe the resulting stack as reviewed staging.
 
 ## Current release boundary
 
-Local G2, G3 and G4 evidence passes. G5 is blocked pending real PostgreSQL
-fault/restart evidence; G6 and later gates are blocked. These runtime capabilities
-remain false and must not be patched at deployment time:
+G2-G5 pass for SIMULATION. G6-G9 remain blocked for Telegram staging/production.
+These runtime capabilities remain false and must not be patched directly on the
+server:
 
 - `production_oblast_scope_release`;
 - `reviewed_region_resolver`;
@@ -32,13 +50,13 @@ Record all of the following in one approval packet:
 7. backup checksum plus successful isolated restore evidence;
 8. previous image/schema compatibility and rollback procedure.
 
-The project Git repository has not yet been prepared as a release source, so there
-is currently no exact version eligible for approval.
+The simulation commit and image above are immutable evidence, but they are not an
+approved staging or production release.
 
 ## Stack shape
 
-- planned stack name: `time-tl-bot`;
-- planned server directory: `/home/trio/time-tl-bot`;
+- stack name: `time-tl-bot`;
+- server directory: `/home/trio/time-tl-bot`;
 - eight Compose services: bot, alert-worker, schedule-worker, sender-worker,
   admin-web, migrate, node-exporter and postgres;
 - PostgreSQL remains on the internal `database` network and has no published port;
@@ -137,6 +155,22 @@ verified. The fixed username is `admin`; no password exists in this repository.
 Never place the one-time password in Stack variables or logs. Verify mandatory
 password change and artifact deletion/expiry before handing the URL to the owner.
 
+## Access to the simulation admin panel
+
+The panel is intentionally not published on the LAN or Internet. From a trusted
+operator workstation that can reach the mini-server, open a local SSH tunnel:
+
+```bash
+ssh -N -L 8081:127.0.0.1:8081 trio@<MINI_SERVER_HOST>
+```
+
+While that session remains open, visit `http://127.0.0.1:8081`. Use the fixed login
+`admin` and obtain the generated one-time password only from the protected bootstrap
+artifact on the server. Never paste the password into this document, chat, command
+history, logs or screenshots. This HTTP URL is acceptable only through the local SSH
+tunnel; staging/production browser access requires separately verified HTTPS and
+trusted-proxy settings.
+
 ## Rollback
 
 Stop outbound delivery before rollback when code/schema compatibility is uncertain.
@@ -145,11 +179,12 @@ overwriting the only copy. Use the previous immutable image only after schema
 compatibility is confirmed. Restart, rollback or missing data leaves alerts
 `UNKNOWN/STALE`; it never proves all-clear.
 
-## Still unverified
+## Still unverified for staging/production
 
-- live container build and healthchecks on the mini-server;
-- PostgreSQL process-kill/commit fault injection and restart recovery;
-- Portainer volumes, backup/restore and rollback rehearsal;
+- dedicated Telegram and alerts.in.ua credentials plus allowlisted test chat IDs;
+- official-provider and live Telegram paths;
+- privacy-reviewed coordinate resolver (manual oblast confirmation is the current
+  boundary);
 - reverse proxy, TLS and trusted-proxy mapping;
-- admin bootstrap/password and live node-exporter metrics;
+- staging rollback rehearsal and exact-release approval;
 - allowlisted Telegram staging and canary.

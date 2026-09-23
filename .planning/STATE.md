@@ -1,7 +1,7 @@
 # Project state
 
-Updated: 2026-09-23. This document separates verified local evidence from staging,
-server and production evidence.
+Updated: 2026-09-23. This document separates verified local and server simulation
+evidence from Telegram staging and production evidence.
 
 ## Implemented
 
@@ -25,11 +25,12 @@ server and production evidence.
   eight services: bot, alert-worker, schedule-worker, sender-worker, admin-web,
   migrate, node-exporter and PostgreSQL.
 
-## Verified evidence (LOCAL only)
+## Verified evidence
 
-The following evidence was recorded on 2026-09-23:
+The following LOCAL evidence was recorded on 2026-09-23 for exact commit
+`4ea3b1bedfc31142ae2c53d32e550e4e8a20dcff`:
 
-- `pytest`: 241 passed, one opt-in PostgreSQL E2E skipped;
+- `pytest`: 242 passed, one opt-in PostgreSQL E2E skipped;
 - `unittest discover`: 233 run, one opt-in PostgreSQL E2E skipped;
 - Ruff: passed;
 - strict mypy: 66 source files passed;
@@ -38,8 +39,23 @@ The following evidence was recorded on 2026-09-23:
 - Compose YAML: eight services parsed;
 - admin JavaScript syntax check: passed.
 
-These checks do not prove a container build, live PostgreSQL restart/fault recovery,
-Telegram delivery, server readiness, Portainer deployment or public safety.
+The exact source was then built as immutable image
+`sha256:08eaa3d06e7ca5d97f11d760c44e67bc085ac395cba196f04a05839d2658da21`
+and installed as a permanent **SIMULATION** stack at `/home/trio/time-tl-bot`.
+On the mini-server:
+
+- the real PostgreSQL 16 E2E fault/restart harness passed: `1 passed`;
+- Alembic reached revision `0003`;
+- `admin-web`, `bot`, `alert-worker`, `schedule-worker`, `sender-worker` and
+  `postgres` were healthy; `node-exporter` was running;
+- PostgreSQL backup into an isolated target and restore verification passed;
+- restart persistence verification passed;
+- the admin endpoint was bound only to `127.0.0.1:8081`.
+
+The deployed environment deliberately uses the fake provider and disabled Telegram
+transport. It has no real provider/bot tokens or users. Schedule and sender remain
+inert under the closed simulation capability gates. This is not Telegram staging or
+production evidence.
 
 ## Gate status
 
@@ -48,12 +64,12 @@ Telegram delivery, server readiness, Portainer deployment or public safety.
 | G0 SOURCE | REVIEW | Official 27-oblast endpoint/schema and limits reviewed; a project token and pre-staging recheck are still required. |
 | G1 SPEC | PASS | Product modes, schedule semantics, privacy and release boundaries are documented. |
 | G2 SCHEDULE | PASS | Local decision-table and integration tests cover parity, weekends, overrides, gaps and disabled lessons. |
-| G3 ALERT SAFETY | PASS (LOCAL) | Local fail-closed, atomic cursor, stale, replay, ordering and sender recheck tests pass. This is not production evidence. |
+| G3 ALERT SAFETY | PASS (SIMULATION) | Local fail-closed tests and the real PostgreSQL 16 fault/restart harness pass. No official-provider or production claim is implied. |
 | G4 LOCAL QUALITY | PASS | Evidence list above. |
-| G5 SIMULATION E2E | BLOCKED | Deterministic simulation exists, but the gate still requires real PostgreSQL transaction fault injection and process-restart recovery evidence. |
+| G5 SIMULATION E2E | PASS | Exact-image server simulation, PostgreSQL fault/restart E2E, migration, backup/restore and persistence checks passed with fake provider and disabled Telegram. |
 | G6 TELEGRAM STAGING | BLOCKED | Requires a separate bot token, alerts.in.ua token, approved test chat allowlist and live-bot capability review. |
-| G7 SERVER READINESS | BLOCKED | No exact stack has been built or run on the mini-server; backup/restore, volumes, resources and rollback remain unverified. |
-| G8 DEPLOY APPROVAL | BLOCKED | No approval has been recorded for an exact commit/image digest/Compose revision. |
+| G7 SERVER READINESS | BLOCKED | The simulation stack, storage, restart and backup/restore are verified, but staging readiness still requires secrets handling, rollback evidence and the approved access/TLS boundary. |
+| G8 DEPLOY APPROVAL | BLOCKED | Approval covered the exact simulation deployment only; no staging or production release has been approved. |
 | G9 CANARY | BLOCKED | Requires G6-G8 and approved canary accounts. |
 
 ## Deliberately closed capabilities
@@ -71,14 +87,12 @@ persisted. This does not yet satisfy the requested geolocation experience.
 
 1. Obtain dedicated Telegram and alerts.in.ua tokens without reusing unrelated
    project secrets; approve staging chat IDs.
-2. Run real PostgreSQL fault injection and restart tests for alert cursor/snapshot,
-   outbox, worker lease and sender authorization.
-3. Review and approve a privacy-safe coordinate-to-oblast resolver, or explicitly
+2. Review and approve a privacy-safe coordinate-to-oblast resolver, or explicitly
    approve manual oblast selection as the release scope.
-4. Produce an immutable image and record commit, digest, migration revision and
-   exact Compose file.
-5. Verify server backup/restore and rollback before requesting G8 approval.
-6. Run allowlisted Telegram staging, then a separately approved canary.
+3. Verify staging secrets injection, access/TLS boundary and rollback without
+   exposing credentials, then request an exact staging approval.
+4. Run allowlisted Telegram staging, then a separately approved canary.
 
-No deployment, Portainer mutation, production password generation or real-user
-message delivery has been performed.
+An isolated permanent SIMULATION deployment has been performed. No Telegram staging,
+production deployment, official-provider polling or real-user message delivery has
+been performed.

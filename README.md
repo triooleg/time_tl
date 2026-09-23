@@ -11,16 +11,21 @@ The schedule engine, Telegram menus, PostgreSQL persistence, one global official
 alert poller, transactional outbox, schedule/sender workers and owner admin dashboard
 are implemented and locally tested.
 
-This is not a deployed production release. Coordinate resolution is deliberately
-closed; users can only confirm an oblast manually. Production/provider and worker
-capability gates remain false until PostgreSQL restart/fault evidence, allowlisted
-Telegram staging, server backup/restore and exact-version approval are complete.
+This is not a staging or production release. An exact immutable SIMULATION stack is
+running on the mini-server with the fake provider and Telegram disabled. Coordinate
+resolution remains closed; users can only confirm an oblast manually. Production,
+provider and worker capability gates remain false pending allowlisted Telegram
+staging and a separately approved exact release.
 
-Verified LOCAL evidence recorded 2026-09-23: 241 pytest tests and one opt-in
+Verified LOCAL evidence recorded 2026-09-23: 242 pytest tests and one opt-in
 PostgreSQL E2E skip; unittest ran 233 tests with the same one skip,
 Ruff, strict mypy for 66 source files, compileall, Alembic offline SQL, an eight-
-service Compose parse and admin JavaScript syntax all passed. No Portainer deployment,
-live admin password or real-user Telegram delivery has been performed.
+service Compose parse and admin JavaScript syntax all passed. The server simulation
+for commit `4ea3b1bedfc31142ae2c53d32e550e4e8a20dcff` and image
+`sha256:08eaa3d06e7ca5d97f11d760c44e67bc085ac395cba196f04a05839d2658da21`
+also passed real PostgreSQL 16 fault/restart E2E, migration `0003`, backup/restore
+and restart persistence checks. No official-provider polling, live Telegram staging,
+production release or real-user delivery has been performed.
 
 ## Documentation
 
