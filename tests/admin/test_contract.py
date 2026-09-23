@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from pydantic import ValidationError
 
@@ -45,23 +46,13 @@ class AdminContractTests(unittest.TestCase):
             "read-only host exporter",
             "Возобновить отправку",
             "Отмена",
-            "Налаштування проєкту",
-            "TELEGRAM_BOT_TOKEN",
-            "ALERTS_IN_UA_TOKEN",
-            "TEST_CHAT_ALLOWLIST",
-            "LESSON_LINK_FERNET_KEY",
-            "ADMIN_IP_HASH_KEY",
+            "Майстер налаштування сервісу",
+            "bootstrap-only",
             "SIMULATION",
-            "STAGING",
-            "PRODUCTION",
-            "ручний вибір",
             "schedule-worker",
             "sender-worker",
         ]:
             self.assertIn(copy, page)
-        self.assertIn('id="project-setup"', page)
-        self.assertIn('aria-labelledby="project-setup-title"', page)
-        self.assertIn('<ol class="setup-steps">', page)
         self.assertNotIn('type="password"', page)
         self.assertNotIn("https://", page)
         self.assertNotIn("docker.sock", page)
@@ -69,6 +60,34 @@ class AdminContractTests(unittest.TestCase):
         self.assertNotIn("ALERTS_IN_UA_TOKEN=", page)
         self.assertNotIn("LESSON_LINK_FERNET_KEY=", page)
         self.assertNotIn("ADMIN_IP_HASH_KEY=", page)
+
+        configured = _dashboard_html(
+            "csrf",
+            "simulation",
+            15,
+            120,
+            owner_setup=SimpleNamespace(
+                revision=1,
+                activation_state="DRAFT",
+                active_revision=None,
+                environment="staging",
+                alert_provider="alerts_in_ua",
+                telegram_transport="live",
+                poll_interval_seconds=15,
+                stale_after_seconds=120,
+                staging_allowlist=(1,),
+                telegram_token_configured=True,
+                alerts_in_ua_token_configured=True,
+                ready_for_activation=True,
+                validation_issues=(),
+            ),
+        )
+        self.assertIn('name="telegram_token"', configured)
+        self.assertIn('name="alerts_in_ua_token"', configured)
+        self.assertNotRegex(configured, r'name="telegram_token"[^>]*\svalue=')
+        self.assertNotRegex(configured, r'name="alerts_in_ua_token"[^>]*\svalue=')
+        self.assertNotIn("docker.sock", configured)
+        self.assertNotIn("https://", configured)
         for aggregate in (
             "aggregates.users",
             "aggregates.profiles",

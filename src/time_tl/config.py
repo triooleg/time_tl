@@ -34,6 +34,11 @@ class AdminBackend(StrEnum):
     POSTGRES = "postgres"
 
 
+class OwnerConfigSource(StrEnum):
+    ENVIRONMENT = "environment"
+    DATABASE = "database"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -83,6 +88,18 @@ class Settings(BaseSettings):
     )
     admin_backend: AdminBackend = Field(default=AdminBackend.DISABLED, alias="ADMIN_BACKEND")
     admin_ip_hash_key: SecretStr | None = Field(default=None, alias="ADMIN_IP_HASH_KEY")
+    owner_telegram_fernet_key: SecretStr | None = Field(
+        default=None, alias="OWNER_TELEGRAM_FERNET_KEY"
+    )
+    owner_alerts_fernet_key: SecretStr | None = Field(
+        default=None, alias="OWNER_ALERTS_FERNET_KEY"
+    )
+    owner_config_source: OwnerConfigSource = Field(
+        default=OwnerConfigSource.ENVIRONMENT, alias="OWNER_CONFIG_SOURCE"
+    )
+    owner_config_revision: int | None = Field(
+        default=None, ge=1, alias="OWNER_CONFIG_REVISION"
+    )
     host_metrics_url: str | None = Field(default=None, alias="HOST_METRICS_URL")
     admin_host: str = Field(default="127.0.0.1", alias="ADMIN_HOST")
     admin_port: int = Field(default=8081, ge=1024, le=65535, alias="ADMIN_PORT")
@@ -124,6 +141,20 @@ class Settings(BaseSettings):
                 raise ValueError("ADMIN_IP_HASH_KEY must contain at least 32 bytes")
         return value
 
+    @field_validator("owner_telegram_fernet_key", "owner_alerts_fernet_key")
+    @classmethod
+    def validate_owner_fernet_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if not _has_secret(value):
+            return value
+        assert value is not None
+        try:
+            decoded = base64.urlsafe_b64decode(value.get_secret_value().encode("ascii"))
+        except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+            raise ValueError("owner settings key must be a Fernet base64 key") from exc
+        if len(decoded) != 32:
+            raise ValueError("owner settings key must decode to exactly 32 bytes")
+        return value
+
     @property
     def test_chat_allowlist(self) -> tuple[int, ...]:
         try:
@@ -151,16 +182,19 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_safety_boundaries(self) -> Settings:
         local = self.environment in {Environment.LOCAL, Environment.SIMULATION}
+        database_managed = self.owner_config_source is OwnerConfigSource.DATABASE
         if (
             self.alert_provider is AlertProvider.FAKE
             and not local
             and self.service_role in {"alert-worker", "unspecified"}
+            and not database_managed
         ):
             raise ValueError("fake alert provider is restricted to local/simulation")
         if (
             self.service_role in {"alert-worker", "unspecified"}
             and self.alert_provider is AlertProvider.ALERTS_IN_UA
             and not _has_secret(self.alerts_in_ua_token)
+            and not database_managed
         ):
             raise ValueError("alerts.in.ua provider requires ALERTS_IN_UA_TOKEN")
         messaging_role = self.service_role in {"bot", "sender-worker", "unspecified"}
@@ -168,18 +202,20 @@ class Settings(BaseSettings):
             messaging_role
             and self.telegram_transport is TelegramTransport.LIVE
             and not _has_secret(self.telegram_bot_token)
+            and not database_managed
         ):
             raise ValueError("live Telegram transport requires TELEGRAM_BOT_TOKEN")
         if self.service_role in {"bot", "schedule-worker", "sender-worker"} and not local:
             if not _has_secret(self.lesson_link_fernet_key):
                 raise ValueError("production bot/workers require stable LESSON_LINK_FERNET_KEY")
-        if self.telegram_transport is TelegramTransport.LIVE and local:
+        if self.telegram_transport is TelegramTransport.LIVE and local and not database_managed:
             raise ValueError("live Telegram transport is forbidden in local/simulation")
         if (
             self.environment is Environment.STAGING
             and self.telegram_transport is TelegramTransport.LIVE
             and messaging_role
             and not self.test_chat_allowlist
+            and not database_managed
         ):
             raise ValueError("staging live Telegram transport requires TEST_CHAT_ALLOWLIST")
         if not local:
@@ -204,10 +240,25 @@ class Settings(BaseSettings):
             if (
                 self.service_role in {"alert-worker", "unspecified"}
                 and self.alert_provider is not AlertProvider.ALERTS_IN_UA
+                and not database_managed
             ):
                 raise ValueError("production alert worker requires the alerts.in.ua provider")
-            if messaging_role and self.telegram_transport is not TelegramTransport.LIVE:
+            if (
+                messaging_role
+                and self.telegram_transport is not TelegramTransport.LIVE
+                and not database_managed
+            ):
                 raise ValueError("production messaging service requires live Telegram transport")
+        if database_managed and self.service_role in {"bot", "sender-worker"}:
+            if not _has_secret(self.owner_telegram_fernet_key):
+                raise ValueError(
+                    "database-managed messaging requires OWNER_TELEGRAM_FERNET_KEY"
+                )
+        if database_managed and self.service_role == "alert-worker":
+            if not _has_secret(self.owner_alerts_fernet_key):
+                raise ValueError(
+                    "database-managed alerts require OWNER_ALERTS_FERNET_KEY"
+                )
         if self.alert_stale_after_seconds <= self.alert_poll_interval_seconds:
             raise ValueError("stale threshold must exceed the provider poll interval")
         return self

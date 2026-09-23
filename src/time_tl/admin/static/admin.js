@@ -69,7 +69,8 @@
       const name=row.cells[0]?.textContent;
       if(!name||name==='metrics collector')return;
       const worker=byName.get(name);
-      setText(row.cells[1],worker?.heartbeat_at?`${worker.status} · ${age(worker.heartbeat_at)}`:'Немає heartbeat');
+      const revision=worker?.applied_config_revision?` · конфіг v${worker.applied_config_revision}`:' · версію конфігурації не підтверджено';
+      setText(row.cells[1],worker?.heartbeat_at?`${worker.status} · ${age(worker.heartbeat_at)}${revision}`:'Немає heartbeat');
     });
   };
   async function refresh(){

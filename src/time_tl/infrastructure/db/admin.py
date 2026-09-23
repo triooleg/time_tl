@@ -18,6 +18,11 @@ from time_tl.admin.security import (
     new_token,
     token_hash,
 )
+from time_tl.admin.settings import (
+    OwnerSettingsBundle,
+    OwnerSettingsConflictError,
+    reject_sensitive_generic_settings,
+)
 
 from .models import (
     AdminAccount,
@@ -43,6 +48,11 @@ class AdminAccountRecord:
 
 
 class AsyncPostgresAdminRepository:
+    _OWNER_LOCK_KEY = 0x54494D45544C4346
+    _OWNER_STATE_KEY = "owner_configuration_state"
+    _OWNER_DRAFT_KEY = "owner_configuration_draft"
+    _OWNER_ACTIVE_KEY = "owner_configuration_active"
+
     def __init__(self, factory: async_sessionmaker[AsyncSession], *, ip_hash_key: bytes) -> None:
         if len(ip_hash_key) < 32:
             raise ValueError("admin IP hash key must contain at least 32 bytes")
@@ -231,6 +241,7 @@ class AsyncPostgresAdminRepository:
             return row.value if row else default
 
     async def set_settings(self, values: dict[str, Any], owner: str, action: str) -> None:
+        reject_sensitive_generic_settings(values)
         async with self._factory() as session:
             async with session.begin():
                 before = {}
@@ -257,6 +268,204 @@ class AsyncPostgresAdminRepository:
                         redacted_details={key: "changed" for key in values},
                     )
                 )
+
+    async def owner_settings_bundle(self) -> OwnerSettingsBundle:
+        async with self._factory() as session:
+            async with session.begin():
+                await self._lock_owner_settings(session)
+                return await self._owner_settings_bundle(session)
+
+    async def save_owner_settings_draft(
+        self, payload: dict[str, Any], expected_revision: int, actor: str
+    ) -> OwnerSettingsBundle:
+        async with self._factory() as session:
+            async with session.begin():
+                await self._lock_owner_settings(session)
+                state_row = (
+                    await session.execute(
+                        select(RuntimeSetting)
+                        .where(RuntimeSetting.key == self._OWNER_STATE_KEY)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                state = dict(state_row.value) if state_row else {}
+                latest = int(state.get("latest_revision", 0))
+                if latest != expected_revision:
+                    raise OwnerSettingsConflictError(
+                        "Конфигурация была изменена. Обновите страницу."
+                    )
+                previous_row = await session.get(RuntimeSetting, self._OWNER_DRAFT_KEY)
+                previous = dict(previous_row.value) if previous_row is not None else {}
+                revision = latest + 1
+                draft = dict(payload)
+                draft["revision"] = revision
+                audit_names = {
+                    "environment": "environment",
+                    "alert_provider": "alert_provider",
+                    "telegram_transport": "telegram_transport",
+                    "poll_interval_seconds": "poll_interval_seconds",
+                    "stale_after_seconds": "stale_after_seconds",
+                    "staging_allowlist": "staging_allowlist_presence",
+                    "telegram_token_ciphertext": "telegram_token_presence",
+                    "alerts_in_ua_token_ciphertext": "alerts_in_ua_token_presence",
+                }
+                changed_fields = [
+                    audit_name
+                    for field, audit_name in audit_names.items()
+                    if previous.get(field) != draft.get(field)
+                ]
+                await self._upsert_runtime_setting(
+                    session, self._OWNER_DRAFT_KEY, draft, actor
+                )
+                state.update(
+                    {
+                        "latest_revision": revision,
+                        "pending_revision": None,
+                        "active_revision": state.get("active_revision"),
+                    }
+                )
+                await self._upsert_runtime_setting(
+                    session, self._OWNER_STATE_KEY, state, actor
+                )
+                session.add(
+                    AuditLog(
+                        actor=actor,
+                        action="owner_configuration_saved",
+                        result="success",
+                        target_type="owner_configuration",
+                        target_id=str(revision),
+                        redacted_details={"changed_fields": changed_fields},
+                    )
+                )
+        return await self.owner_settings_bundle()
+
+    async def request_owner_settings_activation(
+        self, expected_revision: int, actor: str
+    ) -> OwnerSettingsBundle:
+        async with self._factory() as session:
+            async with session.begin():
+                await self._lock_owner_settings(session)
+                state_row = (
+                    await session.execute(
+                        select(RuntimeSetting)
+                        .where(RuntimeSetting.key == self._OWNER_STATE_KEY)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if state_row is None:
+                    raise OwnerSettingsConflictError("Сначала сохраните конфигурацию.")
+                state = dict(state_row.value)
+                latest = int(state.get("latest_revision", 0))
+                draft = await session.get(RuntimeSetting, self._OWNER_DRAFT_KEY)
+                if (
+                    latest != expected_revision
+                    or draft is None
+                    or int(draft.value.get("revision", 0)) != expected_revision
+                ):
+                    raise OwnerSettingsConflictError(
+                        "Конфигурация была изменена. Обновите страницу."
+                    )
+                state["pending_revision"] = expected_revision
+                state_row.value = state
+                state_row.updated_by = actor
+                session.add(
+                    AuditLog(
+                        actor=actor,
+                        action="owner_configuration_activation_requested",
+                        result="success",
+                        target_type="owner_configuration",
+                        target_id=str(expected_revision),
+                        redacted_details={},
+                    )
+                )
+        return await self.owner_settings_bundle()
+
+    async def mark_owner_settings_active(
+        self, revision: int, actor: str, evidence_id: str
+    ) -> OwnerSettingsBundle:
+        """Operator-only gate; the browser has no route to this method."""
+
+        async with self._factory() as session:
+            async with session.begin():
+                await self._lock_owner_settings(session)
+                state_row = (
+                    await session.execute(
+                        select(RuntimeSetting)
+                        .where(RuntimeSetting.key == self._OWNER_STATE_KEY)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                draft = await session.get(RuntimeSetting, self._OWNER_DRAFT_KEY)
+                if state_row is None or draft is None:
+                    raise OwnerSettingsConflictError("Нет конфигурации для активации.")
+                state = dict(state_row.value)
+                if (
+                    state.get("pending_revision") != revision
+                    or int(draft.value.get("revision", 0)) != revision
+                ):
+                    raise OwnerSettingsConflictError("Версия не ожидает активации.")
+                await self._upsert_runtime_setting(
+                    session, self._OWNER_ACTIVE_KEY, dict(draft.value), actor
+                )
+                state["active_revision"] = revision
+                state["pending_revision"] = None
+                state_row.value = state
+                state_row.updated_by = actor
+                session.add(
+                    AuditLog(
+                        actor=actor,
+                        action="owner_configuration_activated",
+                        result="success",
+                        target_type="owner_configuration",
+                        target_id=str(revision),
+                        redacted_details={
+                            "evidence_id_sha256": hashlib.sha256(
+                                evidence_id.encode("utf-8")
+                            ).hexdigest()
+                        },
+                    )
+                )
+        return await self.owner_settings_bundle()
+
+    @staticmethod
+    async def _lock_owner_settings(session: AsyncSession) -> None:
+        await session.execute(
+            select(func.pg_advisory_xact_lock(AsyncPostgresAdminRepository._OWNER_LOCK_KEY))
+        )
+
+    @staticmethod
+    async def _upsert_runtime_setting(
+        session: AsyncSession, key: str, value: Any, actor: str
+    ) -> None:
+        row = await session.get(RuntimeSetting, key)
+        if row is None:
+            session.add(RuntimeSetting(key=key, value=value, updated_by=actor))
+        else:
+            row.value = value
+            row.updated_by = actor
+
+    async def _owner_settings_bundle(self, session: AsyncSession) -> OwnerSettingsBundle:
+        state_row = await session.get(RuntimeSetting, self._OWNER_STATE_KEY)
+        draft_row = await session.get(RuntimeSetting, self._OWNER_DRAFT_KEY)
+        active_row = await session.get(RuntimeSetting, self._OWNER_ACTIVE_KEY)
+        state = dict(state_row.value) if state_row else {}
+        return OwnerSettingsBundle(
+            draft=dict(draft_row.value) if draft_row else None,
+            active=dict(active_row.value) if active_row else None,
+            latest_revision=int(state.get("latest_revision", 0)),
+            pending_revision=(
+                int(state["pending_revision"])
+                if state.get("pending_revision") is not None
+                else None
+            ),
+            active_revision=(
+                int(state["active_revision"])
+                if state.get("active_revision") is not None
+                else None
+            ),
+            updated_by=draft_row.updated_by if draft_row else None,
+            updated_at=draft_row.updated_at if draft_row else None,
+        )
 
     async def dashboard_aggregates(self) -> dict[str, Any]:
         async with self._factory() as session:

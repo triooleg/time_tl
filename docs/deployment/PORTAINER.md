@@ -82,14 +82,17 @@ Git or build arguments.
 | `DATABASE_URL` | internal `postgresql+asyncpg://` URL |
 | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | matching private database credentials |
 | `ALERT_PROVIDER` | `alerts_in_ua` |
-| `ALERTS_IN_UA_TOKEN` | dedicated Time TL token |
+| `OWNER_CONFIG_SOURCE` | `database` only after an owner configuration revision is operator-activated |
+| `OWNER_TELEGRAM_FERNET_KEY` | stable Fernet key only for the Telegram token; back it up and never expose it in the panel |
+| `OWNER_ALERTS_FERNET_KEY` | separate stable Fernet key only for the alerts.in.ua token; never reuse the Telegram key |
+| `ALERTS_IN_UA_TOKEN` | legacy env mode only; database-managed mode accepts it write-only in the owner panel |
 | `ALERT_POLL_INTERVAL_SECONDS` | at least 15 |
 | `ALERT_STALE_AFTER_SECONDS` | greater than poll; release default 120 |
 | `ALERT_RATE_LIMIT_PER_MINUTE` | at most 5 |
 | `ALERT_RATE_LIMIT_BURST` | exactly 1 |
 | `TELEGRAM_TRANSPORT` | `live` only in approved staging/production |
-| `TELEGRAM_BOT_TOKEN` | dedicated bot token |
-| `TEST_CHAT_ALLOWLIST` | mandatory numeric IDs in staging |
+| `TELEGRAM_BOT_TOKEN` | legacy env mode only; database-managed mode accepts it write-only in the owner panel |
+| `TEST_CHAT_ALLOWLIST` | legacy env mode only; database-managed mode accepts it write-only in the owner panel |
 | `LESSON_LINK_FERNET_KEY` | stable 32-byte Fernet key encoded for the application |
 | `SENDER_TRANSPORT_TIMEOUT_SECONDS` | 8 seconds; allowed range >0 through 10 |
 | `ADMIN_BACKEND` | `postgres` |

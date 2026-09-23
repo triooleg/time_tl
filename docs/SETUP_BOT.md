@@ -132,11 +132,9 @@ Staging допускается только с отдельным ботом и 
 
 ```dotenv
 TIME_TL_ENV=staging
-ALERT_PROVIDER=alerts_in_ua
-ALERTS_IN_UA_TOKEN=SECRET
-TELEGRAM_TRANSPORT=live
-TELEGRAM_BOT_TOKEN=SECRET
-TEST_CHAT_ALLOWLIST=APPROVED_NUMERIC_IDS
+OWNER_CONFIG_SOURCE=database
+OWNER_TELEGRAM_FERNET_KEY=SECRET_FERNET_KEY_FOR_TELEGRAM
+OWNER_ALERTS_FERNET_KEY=DIFFERENT_SECRET_FERNET_KEY_FOR_ALERTS
 DATABASE_URL=postgresql+asyncpg://...
 LESSON_LINK_FERNET_KEY=SECRET
 ADMIN_BACKEND=postgres
@@ -146,6 +144,12 @@ ADMIN_COOKIE_SECURE=true
 ALLOW_SCAFFOLD_SERVICES=false
 SENDER_TRANSPORT_TIMEOUT_SECONDS=8
 ```
+
+Telegram Bot Token, alerts.in.ua token, poll/stale и staging allowlist после
+bootstrap вводятся только в owner panel. Сохраните draft и запросите активацию.
+Оператор сверяет exact version/evidence, активирует конкретную revision и
+контролируемо перезапускает worker-контейнеры. Панель никогда не показывает токены
+повторно и не активирует реальную доставку одним сохранением формы.
 
 Наличие переменных не открывает закрытые capability gates. До G6 нужно:
 

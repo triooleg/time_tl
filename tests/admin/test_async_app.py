@@ -6,10 +6,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
+from tests.admin.test_owner_settings import MemoryOwnerSettingsStore
 from time_tl.admin.async_app import create_async_admin_app
 from time_tl.admin.security import Session, hash_password, new_token, utcnow
+from time_tl.admin.settings import OwnerSettingsService
 from time_tl.config import Settings
 
 
@@ -124,7 +127,10 @@ class FakeAsyncRepository:
                     "instance_id": "private-instance",
                     "status": "healthy",
                     "heartbeat_at": "2026-01-01T00:00:00+00:00",
-                    "details": {"token": "must-not-leak"},
+                    "details": {
+                        "token": "must-not-leak",
+                        "applied_config_revision": 7,
+                    },
                 }
             ],
             "telegram_user_ids": [123],
@@ -143,7 +149,18 @@ class AsyncEndpointTests(unittest.TestCase):
                 "ADMIN_COOKIE_SECURE": False,
             }
         )
-        self.client = TestClient(create_async_admin_app(self.settings, self.repo, FakeMetrics()))
+        self.owner_store = MemoryOwnerSettingsStore()
+        self.owner_settings = OwnerSettingsService(
+            self.owner_store, Fernet.generate_key(), Fernet.generate_key()
+        )
+        self.client = TestClient(
+            create_async_admin_app(
+                self.settings,
+                self.repo,
+                FakeMetrics(),
+                owner_settings=self.owner_settings,
+            )
+        )
 
     @staticmethod
     def csrf(page: str) -> str:
@@ -210,6 +227,7 @@ class AsyncEndpointTests(unittest.TestCase):
         self.assertEqual(api.json()["provider"]["freshness"], "unavailable")
         self.assertEqual(api.json()["provider"]["fetch_revision"], 42)
         self.assertEqual(api.json()["aggregates"]["outbox_delivered"], 7)
+        self.assertEqual(api.json()["workers"][0]["applied_config_revision"], 7)
         self.assertEqual(api.json()["provider"]["settings_apply_state"], "next_cycle")
         self.assertNotIn("provider-secret-must-not-leak", raw)
 
@@ -219,9 +237,8 @@ class AsyncEndpointTests(unittest.TestCase):
             data={"csrf": self.csrf(page.text), "poll": "20", "stale": "60"},
             follow_redirects=False,
         )
-        self.assertEqual(saved.status_code, 303)
-        self.assertEqual(self.repo.settings, {"poll": 20, "stale": 60})
-        self.assertEqual(self.repo.audit_calls[-1][2], "provider_settings")
+        self.assertEqual(saved.status_code, 410)
+        self.assertEqual(self.repo.settings, {})
 
     def test_missing_aggregates_remain_unavailable_instead_of_zero(self) -> None:
         from time_tl.admin.async_app import _safe_aggregates
@@ -250,7 +267,83 @@ class AsyncEndpointTests(unittest.TestCase):
             "/settings/provider",
             data={"csrf": self.csrf(page.text), "poll": "14", "stale": "120"},
         )
-        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.status_code, 410)
+
+    def test_owner_can_save_write_only_tokens_but_not_activate_them(self) -> None:
+        self.repo.owner.must_change_password = False
+        self.repo.owner.bootstrap_expires_at = None
+        self.login()
+        page = self.client.get("/")
+        telegram = "telegram-route-secret"
+        alerts = "alerts-route-secret"
+        saved = self.client.post(
+            "/settings/service",
+            data={
+                "csrf": self.csrf(page.text),
+                "expected_revision": "0",
+                "environment": "staging",
+                "alert_provider": "alerts_in_ua",
+                "telegram_transport": "live",
+                "poll_interval_seconds": "15",
+                "stale_after_seconds": "120",
+                "staging_allowlist": "123456789",
+                "telegram_token": telegram,
+                "alerts_in_ua_token": alerts,
+                "current_password": "bootstrap-password-long",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(saved.status_code, 303)
+        self.assertIn("setup=saved", saved.headers["location"])
+        rendered = self.client.get("/")
+        self.assertNotIn(telegram, rendered.text)
+        self.assertNotIn(alerts, rendered.text)
+        self.assertNotIn("123456789", rendered.text)
+        self.assertIn("Налаштовано", rendered.text)
+        api = self.client.get("/api/dashboard")
+        self.assertNotIn(telegram, api.text)
+        self.assertNotIn(alerts, api.text)
+        self.assertNotIn("123456789", api.text)
+        self.assertEqual(api.json()["owner_configuration"]["activation_state"], "DRAFT")
+
+        request_page = self.client.get("/")
+        pending = self.client.post(
+            "/settings/service/request-activation",
+            data={
+                "csrf": self.csrf(request_page.text),
+                "expected_revision": "1",
+                "current_password": "bootstrap-password-long",
+                "acknowledge": "yes",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(pending.status_code, 303)
+        self.assertEqual(self.owner_store.bundle.pending_revision, 1)
+        self.assertIsNone(self.owner_store.bundle.active_revision)
+
+    def test_owner_settings_mutations_require_csrf_and_reauthentication(self) -> None:
+        self.repo.owner.must_change_password = False
+        self.repo.owner.bootstrap_expires_at = None
+        self.login()
+        base = {
+            "expected_revision": "0",
+            "environment": "simulation",
+            "alert_provider": "fake",
+            "telegram_transport": "disabled",
+            "poll_interval_seconds": "15",
+            "stale_after_seconds": "120",
+        }
+        denied = self.client.post(
+            "/settings/service", data={**base, "csrf": "wrong", "current_password": "x"}
+        )
+        self.assertEqual(denied.status_code, 403)
+        page = self.client.get("/")
+        bad_password = self.client.post(
+            "/settings/service",
+            data={**base, "csrf": self.csrf(page.text), "current_password": "wrong"},
+        )
+        self.assertEqual(bad_password.status_code, 401)
+        self.assertEqual(self.owner_store.bundle.latest_revision, 0)
 
     def test_lockout_after_five_failures(self) -> None:
         statuses = [self.login("wrong").status_code for _ in range(5)]

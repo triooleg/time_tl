@@ -120,7 +120,7 @@ class EndpointTests(unittest.TestCase):
             "/settings/provider",
             data={"csrf": self.csrf(dashboard.text), "poll": "14", "stale": "120"},
         )
-        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.status_code, 410)
 
 
 if __name__ == "__main__":

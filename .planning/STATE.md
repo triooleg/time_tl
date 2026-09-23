@@ -96,3 +96,16 @@ persisted. This does not yet satisfy the requested geolocation experience.
 An isolated permanent SIMULATION deployment has been performed. No Telegram staging,
 production deployment, official-provider polling or real-user message delivery has
 been performed.
+
+## Session Continuity
+
+Last session: 2026-09-23
+Stopped at: Owner web setup wizard implemented locally with write-only encrypted
+Telegram/alerts tokens, versioned DRAFT/PENDING/ACTIVE flow, split least-privilege
+keys, operator-only activation, applied-revision worker heartbeats and the legacy
+direct provider-settings route disabled. Current uncommitted-tree evidence:
+`pytest` 257 passed / 1 opt-in destructive PostgreSQL E2E skipped; Ruff passed;
+strict mypy passed for 67 source files; compileall and admin JavaScript syntax passed.
+Independent repeat safety review returned PASS for the local diff. No new server
+deploy was performed; G6-G9 remain blocked by their documented external gates.
+Resume file: none.

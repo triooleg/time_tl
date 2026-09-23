@@ -41,6 +41,13 @@ from .security import (
     validate_new_password,
     verify_password,
 )
+from .settings import (
+    OwnerConfigurationUpdate,
+    OwnerSettingsConflictError,
+    OwnerSettingsError,
+    OwnerSettingsService,
+    OwnerSettingsValidationError,
+)
 
 
 class AsyncAdminAccount(Protocol):
@@ -185,13 +192,18 @@ def _safe_aggregates(raw: dict[str, Any]) -> dict[str, Any]:
         for item in raw_workers:
             if isinstance(item, dict) and item.get("name") in allowed_workers:
                 status = str(item.get("status", "unknown"))
-                workers.append(
-                    {
-                        "name": str(item["name"]),
-                        "status": status if status in allowed_worker_states else "unknown",
-                        "heartbeat_at": item.get("heartbeat_at"),
-                    }
-                )
+                worker = {
+                    "name": str(item["name"]),
+                    "status": status if status in allowed_worker_states else "unknown",
+                    "heartbeat_at": item.get("heartbeat_at"),
+                    "applied_config_revision": None,
+                }
+                details = item.get("details")
+                if isinstance(details, dict):
+                    revision = details.get("applied_config_revision")
+                    if isinstance(revision, int) and not isinstance(revision, bool) and revision > 0:
+                        worker["applied_config_revision"] = revision
+                workers.append(worker)
     raw_provider = raw.get("provider")
     provider: dict[str, Any] | None = None
     if isinstance(raw_provider, dict):
@@ -252,6 +264,7 @@ def create_async_admin_app(
     repository: AsyncAdminRepository,
     collector: MetricsCollector | None = None,
     *,
+    owner_settings: OwnerSettingsService | None = None,
     proxy_policy: ProxyPolicy | None = None,
     bootstrap_artifact_path: str | Path | None = None,
     docs_root: str | Path = "docs",
@@ -331,6 +344,20 @@ def create_async_admin_app(
         response = RedirectResponse("/login?expired=1" if expired else "/login", 303)
         response.delete_cookie(COOKIE)
         return response
+
+    async def owner_reauthenticated(
+        request: Request, session: Session, supplied_password: str
+    ) -> tuple[bool, timedelta | None]:
+        source_ip, now = proxies.client_ip(request), utcnow()
+        remaining = await repository.lockout_remaining(session.username, source_ip, now)
+        if remaining:
+            return False, remaining
+        account = await repository.account(session.username)
+        if account is None or not verify_password(account.password_hash, supplied_password):
+            await repository.record_failure(session.username, source_ip, now)
+            return False, await repository.lockout_remaining(session.username, source_ip, now)
+        await repository.reset_failures(session.username, source_ip)
+        return True, None
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request) -> HTMLResponse:
@@ -454,16 +481,28 @@ def create_async_admin_app(
             return RedirectResponse("/change-password", 303)
         poll = await repository.get_setting("poll", settings.alert_poll_interval_seconds)
         stale = await repository.get_setting("stale", settings.alert_stale_after_seconds)
+        owner_view = None
+        if owner_settings is not None:
+            try:
+                owner_view = await owner_settings.view()
+            except OwnerSettingsError:
+                owner_view = None
+        saved_message = ""
+        if request.query_params.get("setup") == "saved":
+            saved_message = "Чернетку збережено. Реальні сервіси не активовано."
+        elif request.query_params.get("setup") == "pending":
+            saved_message = "Запит активації збережено. Потрібна окрема операторська перевірка."
         page = _dashboard_html(
                 session.csrf_token,
                 settings.environment.value,
                 int(poll),
                 int(stale),
-                (
+                saved_message or (
                     "Налаштування збережено. Наступний цикл застосує нові значення."
                     if request.query_params.get("saved")
                     else ""
                 ),
+                owner_view,
             )
         page = page.replace(
             "Агрегований PostgreSQL backend ще не підключено.",
@@ -479,6 +518,12 @@ def create_async_admin_app(
         poll = await repository.get_setting("poll", settings.alert_poll_interval_seconds)
         stale = await repository.get_setting("stale", settings.alert_stale_after_seconds)
         aggregates = _safe_aggregates(await repository.dashboard_aggregates())
+        owner_public = None
+        if owner_settings is not None:
+            try:
+                owner_public = (await owner_settings.view()).public_dict()
+            except OwnerSettingsError:
+                owner_public = {"status": "unavailable"}
         sanitized_provider = aggregates.pop("provider")
         provider = dict(sanitized_provider) if isinstance(sanitized_provider, dict) else {}
         provider.update(
@@ -510,27 +555,101 @@ def create_async_admin_app(
                 "provider": provider,
                 "aggregates": aggregates,
                 "workers": aggregates["workers"],
+                "owner_configuration": owner_public,
             }
         )
+
+    @app.post("/settings/service")
+    async def save_service_settings(request: Request) -> Response:
+        session, _ = await session_for(request, False)
+        if not session or session.must_change_password:
+            return redirect_login(True)
+        if owner_settings is None:
+            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+        data = _form(await request.body())
+        if not compare_digest(session.csrf_token, data.get("csrf", "")):
+            return Response(status_code=403)
+        authenticated, remaining = await owner_reauthenticated(
+            request, session, data.get("current_password", "")
+        )
+        if not authenticated:
+            if remaining:
+                return HTMLResponse(
+                    f"Забагато спроб. Повторіть через {_duration(remaining)}", 429
+                )
+            return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
+        try:
+            allowlist_raw = data.get("staging_allowlist", "").strip()
+            allowlist = (
+                tuple(int(item.strip()) for item in allowlist_raw.split(",") if item.strip())
+                if allowlist_raw
+                else None
+            )
+            command = OwnerConfigurationUpdate(
+                expected_revision=int(data.get("expected_revision", "0")),
+                environment=data.get("environment", ""),
+                alert_provider=data.get("alert_provider", ""),
+                telegram_transport=data.get("telegram_transport", ""),
+                poll_interval_seconds=int(data.get("poll_interval_seconds", "0")),
+                stale_after_seconds=int(data.get("stale_after_seconds", "0")),
+                staging_allowlist=allowlist,
+                telegram_token=data.get("telegram_token") or None,
+                alerts_in_ua_token=data.get("alerts_in_ua_token") or None,
+                clear_telegram_token=data.get("clear_telegram_token") == "yes",
+                clear_alerts_in_ua_token=data.get("clear_alerts_in_ua_token") == "yes",
+                clear_staging_allowlist=data.get("clear_staging_allowlist") == "yes",
+            )
+            await owner_settings.save(command, session.username)
+        except (KeyError, ValueError, OwnerSettingsValidationError):
+            return HTMLResponse("Перевірте введені налаштування.", 422)
+        except OwnerSettingsConflictError:
+            return HTMLResponse("Конфігурацію змінено. Оновіть сторінку.", 409)
+        except OwnerSettingsError:
+            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+        return RedirectResponse("/?setup=saved#service-setup", 303)
+
+    @app.post("/settings/service/request-activation")
+    async def request_service_activation(request: Request) -> Response:
+        session, _ = await session_for(request, False)
+        if not session or session.must_change_password:
+            return redirect_login(True)
+        if owner_settings is None:
+            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+        data = _form(await request.body())
+        if not compare_digest(session.csrf_token, data.get("csrf", "")):
+            return Response(status_code=403)
+        if data.get("acknowledge") != "yes":
+            return HTMLResponse("Потрібне явне підтвердження.", 422)
+        authenticated, remaining = await owner_reauthenticated(
+            request, session, data.get("current_password", "")
+        )
+        if not authenticated:
+            if remaining:
+                return HTMLResponse(
+                    f"Забагато спроб. Повторіть через {_duration(remaining)}", 429
+                )
+            return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
+        try:
+            revision = int(data.get("expected_revision", "0"))
+            await owner_settings.request_activation(revision, session.username)
+        except (ValueError, OwnerSettingsValidationError):
+            return HTMLResponse("Конфігурація ще не готова до активації.", 422)
+        except OwnerSettingsConflictError:
+            return HTMLResponse("Конфігурацію змінено. Оновіть сторінку.", 409)
+        except OwnerSettingsError:
+            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+        return RedirectResponse("/?setup=pending#service-setup", 303)
 
     @app.post("/settings/provider")
     async def save_provider(request: Request) -> Response:
         session, _ = await session_for(request, False)
         if not session or session.must_change_password:
             return redirect_login(True)
-        data = _form(await request.body())
-        if not compare_digest(session.csrf_token, data.get("csrf", "")):
-            return Response(status_code=403)
-        try:
-            poll, stale = int(data["poll"]), int(data["stale"])
-        except (KeyError, ValueError):
-            return HTMLResponse("Невірне значення", 422)
-        if not 15 <= poll <= 300 or not max(30, 2 * poll) <= stale <= 3600:
-            return HTMLResponse("Poll: 15–300 с; stale: не менше 2 × poll і не більше 3600 с.", 422)
-        await repository.set_settings(
-            {"poll": poll, "stale": stale}, session.username, "provider_settings"
+        return HTMLResponse(
+            "Цей маршрут вимкнено. Змініть інтервали у майстрі налаштування сервісу; "
+            "вони набудуть чинності лише після окремої активації.",
+            410,
         )
-        return RedirectResponse("/?saved=1#settings", 303)
 
     @app.get("/help/{document}", response_class=HTMLResponse)
     async def help_document(document: str, request: Request) -> Response:

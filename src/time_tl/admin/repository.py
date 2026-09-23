@@ -25,6 +25,7 @@ from .security import (
     token_hash,
     utcnow,
 )
+from .settings import reject_sensitive_generic_settings
 
 
 def _dt(value: str) -> datetime:
@@ -234,6 +235,7 @@ class LocalAdminRepository:
         return json.loads(row[0]) if row else default
 
     def set_settings(self, values: dict[str, Any], owner: str, action: str) -> None:
+        reject_sensitive_generic_settings(values)
         before = {key: self.get_setting(key) for key in values}
         with self._db() as db:
             for key, value in values.items():

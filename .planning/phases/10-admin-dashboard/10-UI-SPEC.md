@@ -169,7 +169,14 @@ Provider save shows diff and uses `Застосувати налаштуванн
 
 Maintenance confirmation says user changes stop while alert polling/delivery continue. Pause requires reason + acknowledgement and says new messages will queue while alerts continue. Cancel is initially focused. Resume always uses the required `alertdialog` contract above: pending count, oldest age, immediate-send warning, destructive/primary `Возобновить отправку`, initially focused `Отмена`, and no automatic action after re-authentication. Neither action deletes work.
 
-Secrets show only name, `Налаштовано`/`Не налаштовано`, recorded rotation time. Link to `SETUP_BOT.md` and `ADMIN_PANEL.md`. No reveal/copy/edit/paste/test. Rotation: `Змініть секрет у захищеному середовищі сервера та перезапустіть відповідний сервіс за інструкцією.`
+Secrets show only name and `Налаштовано`/`Не налаштовано`; values, fragments and
+lengths are never rendered. Following the owner's explicit 2026-09-23 requirement,
+the authenticated PostgreSQL panel accepts write-only Telegram and alerts.in.ua
+tokens in empty password fields. Blank keeps the stored ciphertext and explicit
+clear removes it. The browser never contacts either provider directly. Database,
+master-encryption, admin-IP-hash, SSH and TLS secrets remain infrastructure-only and
+cannot be entered here. Saving creates a draft; requesting activation cannot itself
+start workers or enable real delivery. Link to `SETUP_BOT.md` and `ADMIN_PANEL.md`.
 
 Owner security includes password rotation, active-session count without IP/device, and confirmed `Завершити інші сеанси`.
 

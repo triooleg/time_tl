@@ -22,8 +22,14 @@ class Service(StrEnum):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="time-tl")
-    parser.add_argument("service", choices=[item.value for item in Service] + ["bootstrap-admin"])
+    parser.add_argument(
+        "service",
+        choices=[item.value for item in Service]
+        + ["bootstrap-admin", "activate-owner-settings"],
+    )
     parser.add_argument("--output", help=argparse.SUPPRESS)
+    parser.add_argument("--revision", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--evidence", help=argparse.SUPPRESS)
     return parser
 
 
@@ -40,6 +46,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         from time_tl.runtime.services import run_admin_bootstrap
 
         run_admin_bootstrap(settings, output)
+        return
+    if args.service == "activate-owner-settings":
+        if args.revision is None or not args.evidence:
+            raise SystemExit("activation requires --revision and --evidence")
+        from time_tl.runtime.services import activate_owner_settings
+
+        asyncio.run(activate_owner_settings(settings, args.revision, args.evidence))
         return
     if args.service == Service.ADMIN_WEB.value:
         from time_tl.runtime.services import run_admin_web_service

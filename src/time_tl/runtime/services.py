@@ -18,6 +18,7 @@ from time_tl.config import (
     AdminBackend,
     AlertProvider,
     Environment,
+    OwnerConfigSource,
     Settings,
     TelegramTransport,
 )
@@ -57,20 +58,44 @@ def build_sender_transport(settings: Settings, client_factory: Any) -> Any:
 
 
 class PostgresAlertRuntimeSettingsReader:
-    """Read the admin-managed provider cadence between singleton poll cycles."""
+    """Read cadence without crossing an activated configuration revision."""
 
-    def __init__(self, factory: Any, *, default_poll: int, default_stale: int) -> None:
+    def __init__(
+        self,
+        factory: Any,
+        *,
+        default_poll: int,
+        default_stale: int,
+        expected_revision: int | None = None,
+    ) -> None:
         self._factory = factory
         self._defaults = (default_poll, default_stale)
+        self._expected_revision = expected_revision
 
     async def read(self) -> tuple[int, int]:
+        # Environment-managed services are immutable after startup. Owner
+        # activation must never partially change only cadence in that process.
+        if self._expected_revision is None:
+            return self._defaults
+
         from time_tl.infrastructure.db.models import RuntimeSetting
 
         async with self._factory() as session:
-            poll_row = await session.get(RuntimeSetting, "poll")
-            stale_row = await session.get(RuntimeSetting, "stale")
-        poll = int(poll_row.value) if poll_row is not None else self._defaults[0]
-        stale = int(stale_row.value) if stale_row is not None else self._defaults[1]
+            state_row = await session.get(RuntimeSetting, "owner_configuration_state")
+            active_row = await session.get(RuntimeSetting, "owner_configuration_active")
+            if (
+                state_row is None
+                or active_row is None
+                or int(state_row.value.get("active_revision", 0))
+                != self._expected_revision
+                or int(active_row.value.get("revision", 0))
+                != self._expected_revision
+            ):
+                raise RuntimeContractError(
+                    "active owner configuration changed; controlled restart required"
+                )
+            poll = int(active_row.value["poll_interval_seconds"])
+            stale = int(active_row.value["stale_after_seconds"])
         if not 15 <= poll <= 300 or not max(30, 2 * poll) <= stale <= 3600:
             raise RuntimeContractError("invalid persisted alert runtime settings")
         return poll, stale
@@ -150,7 +175,84 @@ def build_alert_worker(settings: Settings) -> AlertWorker:
     )
 
 
-async def _heartbeat_loop(repository: Any, worker_name: str) -> None:
+async def resolve_owner_runtime_settings(settings: Settings) -> Settings:
+    """Load only an operator-activated DB version, otherwise preserve env settings.
+
+    Any missing row, wrong key, target-environment mismatch or invalid active
+    payload aborts service startup.  It never falls back to a draft or stale env
+    token when database management was explicitly selected.
+    """
+
+    if settings.owner_config_source is OwnerConfigSource.ENVIRONMENT:
+        return settings
+    if settings.service_role not in {
+        "bot",
+        "alert-worker",
+        "schedule-worker",
+        "sender-worker",
+    }:
+        return settings
+    telegram_key = (
+        settings.owner_telegram_fernet_key.get_secret_value()
+        if settings.owner_telegram_fernet_key is not None
+        else None
+    )
+    alerts_key = (
+        settings.owner_alerts_fernet_key.get_secret_value()
+        if settings.owner_alerts_fernet_key is not None
+        else None
+    )
+
+    from time_tl.admin.settings import OwnerSettingsService
+    from time_tl.infrastructure.db.admin import AsyncPostgresAdminRepository
+    from time_tl.infrastructure.db.engine import create_engine, create_session_factory
+
+    engine = create_engine(settings.database_url.get_secret_value())
+    repository = AsyncPostgresAdminRepository(
+        create_session_factory(engine),
+        ip_hash_key=(
+            settings.admin_ip_hash_key.get_secret_value().encode("utf-8")
+            if settings.admin_ip_hash_key is not None
+            else b"runtime-reader-does-not-hash-client-addresses"
+        ),
+    )
+    service = OwnerSettingsService(
+        repository,
+        telegram_key,
+        alerts_key,
+        default_poll=settings.alert_poll_interval_seconds,
+        default_stale=settings.alert_stale_after_seconds,
+    )
+    try:
+        candidate = await service.active_runtime_config(
+            settings.environment.value, settings.service_role
+        )
+    finally:
+        await engine.dispose()
+
+    values = settings.model_dump(by_alias=True)
+    values.update(
+        {
+            "ALERT_PROVIDER": candidate.alert_provider,
+            "ALERTS_IN_UA_TOKEN": candidate.alerts_in_ua_token,
+            "ALERT_POLL_INTERVAL_SECONDS": candidate.poll_interval_seconds,
+            "ALERT_STALE_AFTER_SECONDS": candidate.stale_after_seconds,
+            "TELEGRAM_TRANSPORT": candidate.telegram_transport,
+            "TELEGRAM_BOT_TOKEN": candidate.telegram_token,
+            "TEST_CHAT_ALLOWLIST": ",".join(
+                str(item) for item in candidate.staging_allowlist
+            ),
+            # Re-run the strict environment-backed validators over the resolved values.
+            "OWNER_CONFIG_SOURCE": OwnerConfigSource.ENVIRONMENT,
+            "OWNER_CONFIG_REVISION": candidate.revision,
+        }
+    )
+    return Settings.model_validate(values)
+
+
+async def _heartbeat_loop(
+    repository: Any, worker_name: str, applied_revision: int | None = None
+) -> None:
     """Publish sanitized process liveness without exposing host/container identity."""
 
     from datetime import UTC, datetime
@@ -163,7 +265,11 @@ async def _heartbeat_loop(repository: Any, worker_name: str) -> None:
                 instance_id=instance_id,
                 status="healthy",
                 heartbeat_at=datetime.now(UTC),
-                details={},
+                details=(
+                    {"applied_config_revision": applied_revision}
+                    if applied_revision is not None
+                    else {}
+                ),
             )
         except Exception as exc:
             LOGGER.warning(
@@ -181,7 +287,13 @@ async def _serve_worker(
         tasks.create_task(serve_health(settings.health_host, settings.health_port, "alert-worker"))
         tasks.create_task(_worker_must_not_exit(worker))
         if heartbeat_repository is not None:
-            tasks.create_task(_heartbeat_loop(heartbeat_repository, "alert-worker"))
+            tasks.create_task(
+                _heartbeat_loop(
+                    heartbeat_repository,
+                    "alert-worker",
+                    settings.owner_config_revision,
+                )
+            )
 
 
 async def _worker_must_not_exit(worker: AlertWorker) -> None:
@@ -190,6 +302,7 @@ async def _worker_must_not_exit(worker: AlertWorker) -> None:
 
 
 async def run_alert_worker(settings: Settings) -> None:
+    settings = await resolve_owner_runtime_settings(settings)
     validate_runtime_contract(settings, "alert-worker")
     if settings.environment in {Environment.LOCAL, Environment.SIMULATION}:
         await _serve_worker(build_alert_worker(settings), settings)
@@ -220,6 +333,7 @@ async def _run_postgres_alert_worker(
         factory,
         default_poll=settings.alert_poll_interval_seconds,
         default_stale=settings.alert_stale_after_seconds,
+        expected_revision=settings.owner_config_revision,
     )
     try:
         async with dedicated_advisory_lease(database_url, ALERT_ADVISORY_LOCK_KEY) as lease:
@@ -345,6 +459,7 @@ async def postgres_bot_dependencies(
 
 
 async def run_bot(settings: Settings) -> None:
+    settings = await resolve_owner_runtime_settings(settings)
     validate_runtime_contract(settings, "bot")
     if settings.telegram_transport is TelegramTransport.DISABLED:
         if settings.environment not in {Environment.LOCAL, Environment.SIMULATION}:
@@ -389,7 +504,11 @@ async def run_bot(settings: Settings) -> None:
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(serve_health(settings.health_host, settings.health_port, "bot"))
                 tasks.create_task(_polling_must_not_exit(dispatcher, bot))
-                tasks.create_task(_heartbeat_loop(heartbeat_repository, "bot"))
+                tasks.create_task(
+                    _heartbeat_loop(
+                        heartbeat_repository, "bot", settings.owner_config_revision
+                    )
+                )
         finally:
             await bot.session.close()
 
@@ -431,10 +550,25 @@ def run_admin_web_service(settings: Settings) -> None:
         engine, repository = _postgres_admin_repository(settings)
         collector = NodeExporterMetricsCollector(settings.host_metrics_url)
         proxy_policy = ProxyPolicy.from_cidrs(settings.admin_trusted_proxy_cidrs)
+        owner_settings = None
+        if (
+            settings.owner_telegram_fernet_key is not None
+            and settings.owner_alerts_fernet_key is not None
+        ):
+            from time_tl.admin.settings import OwnerSettingsService
+
+            owner_settings = OwnerSettingsService(
+                repository,
+                settings.owner_telegram_fernet_key.get_secret_value(),
+                settings.owner_alerts_fernet_key.get_secret_value(),
+                default_poll=settings.alert_poll_interval_seconds,
+                default_stale=settings.alert_stale_after_seconds,
+            )
         app = create_async_admin_app(
             settings,
             repository,
             collector,
+            owner_settings=owner_settings,
             proxy_policy=proxy_policy,
             bootstrap_artifact_path=settings.admin_bootstrap_artifact_path,
         )
@@ -476,8 +610,42 @@ def run_admin_bootstrap(settings: Settings, output: str) -> None:
     asyncio.run(bootstrap())
 
 
+async def activate_owner_settings(
+    settings: Settings, revision: int, evidence_id: str
+) -> None:
+    """Operator-only activation gate used after review and exact-version approval."""
+
+    if settings.admin_backend is not AdminBackend.POSTGRES:
+        raise RuntimeContractError("owner settings activation requires PostgreSQL admin backend")
+    if (
+        settings.owner_telegram_fernet_key is None
+        or settings.owner_alerts_fernet_key is None
+    ):
+        raise RuntimeContractError("owner settings activation requires both encryption keys")
+    from time_tl.admin.settings import OwnerSettingsService, OwnerSettingsValidationError
+
+    engine, repository = _postgres_admin_repository(settings)
+    service = OwnerSettingsService(
+        repository,
+        settings.owner_telegram_fernet_key.get_secret_value(),
+        settings.owner_alerts_fernet_key.get_secret_value(),
+        default_poll=settings.alert_poll_interval_seconds,
+        default_stale=settings.alert_stale_after_seconds,
+    )
+    try:
+        candidate = await service.activation_candidate(revision)
+        if candidate.environment != settings.environment.value:
+            raise OwnerSettingsValidationError(
+                "Pending configuration targets a different environment."
+            )
+        await service.mark_active(revision, "operator", evidence_id)
+    finally:
+        await engine.dispose()
+
+
 async def run_schedule_worker(settings: Settings) -> None:
     """Prepared production loop; capability gate remains closed pending release approval."""
+    settings = await resolve_owner_runtime_settings(settings)
     validate_runtime_contract(settings, "schedule-worker")
     if settings.environment in {Environment.LOCAL, Environment.SIMULATION}:
         await run_inert_worker(settings, "schedule-worker")
@@ -518,13 +686,20 @@ async def run_schedule_worker(settings: Settings) -> None:
                 serve_health(settings.health_host, settings.health_port, "schedule-worker")
             )
             tasks.create_task(loop())
-            tasks.create_task(_heartbeat_loop(heartbeat_repository, "schedule-worker"))
+            tasks.create_task(
+                _heartbeat_loop(
+                    heartbeat_repository,
+                    "schedule-worker",
+                    settings.owner_config_revision,
+                )
+            )
     finally:
         await engine.dispose()
 
 
 async def run_sender_worker(settings: Settings) -> None:
     """Prepared production delivery loop; gate prevents unapproved live sends."""
+    settings = await resolve_owner_runtime_settings(settings)
     validate_runtime_contract(settings, "sender-worker")
     if settings.environment in {Environment.LOCAL, Environment.SIMULATION}:
         await run_inert_worker(settings, "sender-worker")
@@ -574,7 +749,13 @@ async def run_sender_worker(settings: Settings) -> None:
                 serve_health(settings.health_host, settings.health_port, "sender-worker")
             )
             tasks.create_task(loop())
-            tasks.create_task(_heartbeat_loop(heartbeat_repository, "sender-worker"))
+            tasks.create_task(
+                _heartbeat_loop(
+                    heartbeat_repository,
+                    "sender-worker",
+                    settings.owner_config_revision,
+                )
+            )
     finally:
         await bot.session.close()
         await engine.dispose()
