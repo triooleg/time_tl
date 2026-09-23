@@ -183,6 +183,26 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(15, sleeps[1])
         self.assertEqual(1, len(transport.requests))
 
+    async def test_production_loop_degrades_restart_before_jitter_or_provider(self):
+        transport = Transport(response(200, active(), **{"Last-Modified": "m"}))
+        worker = self.worker(transport)
+        events = []
+        original = self.repo.apply_process_restart_atomically
+
+        async def restart():
+            events.append("restart")
+            await original()
+
+        async def sleep(_delay):
+            events.append("sleep")
+            raise RuntimeError("stop before provider")
+
+        self.repo.apply_process_restart_atomically = restart
+        with self.assertRaises(RuntimeError):
+            await worker.serve(sleep)
+        self.assertEqual(["restart", "sleep"], events)
+        self.assertEqual([], transport.requests)
+
     async def test_repeated_failures_use_persisted_exponential_backoff(self):
         await self.worker(Transport(OSError("offline"))).run_once()
         self.assertEqual(15, (await self.repo.poll_state()).retry_not_before_monotonic - self.clock)

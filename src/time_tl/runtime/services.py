@@ -643,6 +643,13 @@ async def activate_owner_settings(
         await engine.dispose()
 
 
+async def _apply_alert_restart_fence(factory: Any) -> None:
+    """Close durable freshness before any downstream worker can inspect it."""
+    from time_tl.infrastructure.db.alerts import PostgresAlertRepository
+
+    await PostgresAlertRepository(factory).apply_process_restart_atomically()
+
+
 async def run_schedule_worker(settings: Settings) -> None:
     """Prepared production loop; capability gate remains closed pending release approval."""
     settings = await resolve_owner_runtime_settings(settings)
@@ -663,6 +670,7 @@ async def run_schedule_worker(settings: Settings) -> None:
     assert settings.lesson_link_fernet_key is not None
     engine = create_engine(settings.database_url.get_secret_value())
     factory = create_session_factory(engine)
+    await _apply_alert_restart_fence(factory)
     codec = FernetLessonLinkCodec(
         settings.lesson_link_fernet_key.get_secret_value().encode("ascii")
     )
@@ -722,6 +730,7 @@ async def run_sender_worker(settings: Settings) -> None:
     assert settings.lesson_link_fernet_key is not None
     engine = create_engine(settings.database_url.get_secret_value())
     factory = create_session_factory(engine)
+    await _apply_alert_restart_fence(factory)
     codec = FernetLessonLinkCodec(
         settings.lesson_link_fernet_key.get_secret_value().encode("ascii")
     )

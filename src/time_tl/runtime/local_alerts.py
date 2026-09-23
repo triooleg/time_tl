@@ -104,6 +104,20 @@ class JsonAlertRepository:
             self._snapshots.update(staged)
             self._persist()
 
+    async def apply_process_restart_atomically(self) -> None:
+        async with self._lock:
+            failure = SourceFailure(SourceFailureKind.PROCESS_RESTART)
+            staged: dict[str, AlertSnapshot] = {}
+            for scope_id, scope in self._scopes.items():
+                machine = AlertStateMachine(scope, self._snapshots.get(scope_id))
+                machine.apply_failure(failure)
+                staged[scope_id] = machine.snapshot()
+            next_snapshots = {**self._snapshots, **staged}
+            next_poll_state = replace(self._poll_state, last_modified=None)
+            self._persist_values(next_poll_state, next_snapshots, self._outbox)
+            self._snapshots = next_snapshots
+            self._poll_state = next_poll_state
+
     async def snapshot_for(self, scope_id: str) -> AlertSnapshot | None:
         async with self._lock:
             return self._snapshots.get(scope_id)

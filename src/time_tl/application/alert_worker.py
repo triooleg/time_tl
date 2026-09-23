@@ -37,6 +37,7 @@ class AlertWorker:
         if not await self.lease.acquire():
             return
         try:
+            await self.repository.apply_process_restart_atomically()
             await sleep(self.startup_jitter_seconds)
             while await self.lease.renew():
                 delay = await self._poll_once_while_held()

@@ -38,7 +38,11 @@ class AlertStateMachine:
             raise ValueError("ACTIVE snapshot must contain active episodes")
         if restored.state in (AlertState.UNKNOWN, AlertState.CLEAR_CONFIRMED) and active:
             raise ValueError(f"{restored.state.value} snapshot cannot contain active episodes")
-        if active and restored.last_fetch_revision is None:
+        if (
+            active
+            and restored.last_fetch_revision is None
+            and restored.state is not AlertState.STALE
+        ):
             raise ValueError("active snapshot requires a fetch revision")
         if restored.last_fetch_revision is not None and restored.last_fetch_revision < 0:
             raise ValueError("last fetch revision must be non-negative")
@@ -123,14 +127,17 @@ class AlertStateMachine:
     def apply_failure(self, failure: SourceFailure) -> Transition:
         previous = self._state
         if failure.kind is SourceFailureKind.PROCESS_RESTART:
-            self._state = AlertState.UNKNOWN
-            self._active_episodes.clear()
+            self._state = (
+                AlertState.STALE if self._active_episodes else AlertState.UNKNOWN
+            )
             self._last_full_active_episodes = None
             self._processed_update_ids.clear()
             self._last_fetch_revision = None
             self._pending_clear_candidate = False
             kind = (
-                TransitionKind.NONE if previous is AlertState.UNKNOWN else TransitionKind.DEGRADED
+                TransitionKind.NONE
+                if previous is AlertState.UNKNOWN and self._state is AlertState.UNKNOWN
+                else TransitionKind.DEGRADED
             )
             return Transition(
                 previous_state=previous,

@@ -41,6 +41,7 @@ class AlertRepository(Protocol):
         self, update: OfficialAlertSnapshot, poll_state: AlertPollState
     ) -> tuple[AlertOutboxItem, ...]: ...
     async def apply_failure_atomically(self, failure: SourceFailure) -> None: ...
+    async def apply_process_restart_atomically(self) -> None: ...
 
 
 class InMemoryAlertRepository:
@@ -120,6 +121,12 @@ class InMemoryAlertRepository:
                 machine.apply_failure(failure)
                 staged[scope_id] = machine.snapshot()
             self._snapshots.update(staged)
+
+    async def apply_process_restart_atomically(self) -> None:
+        async with self._lock:
+            staged = self._restart_safe_snapshots()
+            self._snapshots.update(staged)
+            self._poll_state = replace(self._poll_state, last_modified=None)
 
     async def snapshot_for(self, scope_id: str) -> AlertSnapshot | None:
         async with self._lock:

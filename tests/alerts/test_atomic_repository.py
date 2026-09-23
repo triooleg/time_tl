@@ -169,3 +169,34 @@ async def test_json_persist_failure_exposes_neither_half_of_success(tmp_path: Pa
     assert (await restored.snapshot_for("student")).state is AlertState.ACTIVE  # type: ignore[union-attr]
     assert await restored.poll_state() == poll
     assert len(await restored.outbox()) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_restart_is_atomic_and_never_enqueues_clear() -> None:
+    repository = InMemoryAlertRepository([("student", SCOPE)])
+    await repository.apply_snapshot_and_poll_state_atomically(
+        update(1, "active-1", active=True),
+        AlertPollState(fetch_revision=1, last_modified="m-active"),
+    )
+    before = await repository.outbox()
+
+    await repository.apply_process_restart_atomically()
+
+    snapshot = await repository.snapshot_for("student")
+    assert snapshot is not None
+    assert snapshot.state is AlertState.STALE
+    assert {item.episode for item in snapshot.active_episodes} == {ACTIVE_EPISODE}
+    assert (await repository.poll_state()).last_modified is None
+    assert await repository.outbox() == before
+
+    await repository.apply_snapshot_and_poll_state_atomically(
+        update(2, "empty-2", active=False),
+        AlertPollState(fetch_revision=2, last_modified="m-empty-2"),
+    )
+    first = await repository.snapshot_for("student")
+    assert first is not None
+    assert first.state is AlertState.STALE
+    assert not any(
+        item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+        for item in await repository.outbox()
+    )

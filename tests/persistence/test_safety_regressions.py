@@ -12,11 +12,14 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
 from time_tl.domain.alerts import (
+    ActiveEpisode,
     AlertState,
     OfficialAlertSnapshot,
     ProviderSnapshotKind,
     RegionScope,
 )
+from time_tl.domain.alerts import AlertEpisode as DomainEpisode
+from time_tl.domain.alerts import AlertSnapshot as DomainSnapshot
 from time_tl.domain.schedule import Lesson, ScheduleProfile
 from time_tl.infrastructure.alerts.repositories import AlertPollState
 from time_tl.infrastructure.db.accounts import AsyncPostgresAccountRepository
@@ -221,6 +224,69 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(poll_row.last_success_at, datetime(2026, 9, 21, tzinfo=UTC))
         self.assertEqual(poll_row.fetch_revision, 1)
         self.assertEqual(poll_row.last_modified, "marker")
+
+    async def test_postgres_restart_invalidates_marker_and_freshness_atomically(self):
+        poll_row = PollRow(
+            singleton_id=1,
+            fetch_revision=7,
+            last_modified="persisted-marker",
+            circuit_open=False,
+        )
+        poll_row.last_success_at = AUTHORIZATION_AT
+        session = SnapshotSession(poll_row)
+        repo = PostgresAlertRepository(lambda: AsyncContext(session))  # type: ignore[arg-type]
+
+        await repo.apply_process_restart_atomically()
+
+        self.assertEqual(session.calls, 2)
+        self.assertIsNone(poll_row.last_modified)
+        self.assertIsNone(poll_row.last_success_at)
+        self.assertEqual(poll_row.fetch_revision, 7)
+
+    async def test_postgres_restart_preserves_active_episode_as_stale_without_outbox(self):
+        poll_row = PollRow(
+            singleton_id=1,
+            fetch_revision=7,
+            last_modified="persisted-marker",
+            circuit_open=False,
+        )
+        poll_row.last_success_at = AUTHORIZATION_AT
+        scope = SimpleNamespace(
+            id=uuid4(),
+            selected_region_id="14",
+            applicable_region_ids=["14"],
+        )
+
+        class RestartSession(SnapshotSession):
+            async def execute(self, _statement):
+                self.calls += 1
+                if self.calls == 1:
+                    return Result(scalar=self.poll_row)
+                return Result(scalars=(scope,))
+
+        session = RestartSession(poll_row)
+        repo = PostgresAlertRepository(lambda: AsyncContext(session))  # type: ignore[arg-type]
+        episode = DomainEpisode("14", "air_raid", "oblast-air-raid:14")
+        original = DomainSnapshot(
+            state=AlertState.ACTIVE,
+            active_episodes=(ActiveEpisode(episode, 7),),
+            last_full_active_episodes=(episode,),
+            processed_update_ids=frozenset({"active-7"}),
+            last_fetch_revision=7,
+        )
+        with (
+            patch.object(repo, "_load_snapshot", AsyncMock(return_value=original)),
+            patch.object(repo, "_store_snapshot", AsyncMock()) as store,
+        ):
+            await repo.apply_process_restart_atomically()
+
+        stored = store.await_args.args[2]
+        self.assertEqual(stored.state, AlertState.STALE)
+        self.assertEqual(tuple(item.episode for item in stored.active_episodes), (episode,))
+        self.assertIsNone(stored.last_fetch_revision)
+        self.assertIsNone(stored.last_full_active_episodes)
+        self.assertEqual(session.calls, 2)
+        self.assertIsNone(poll_row.last_success_at)
 
     async def test_snapshot_poll_state_transaction_rolls_back_injected_commit_failure(self):
         poll_row = PollRow(

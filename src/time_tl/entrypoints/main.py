@@ -25,11 +25,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "service",
         choices=[item.value for item in Service]
-        + ["bootstrap-admin", "activate-owner-settings"],
+        + ["bootstrap-admin", "preflight-owner-settings", "activate-owner-settings"],
     )
     parser.add_argument("--output", help=argparse.SUPPRESS)
     parser.add_argument("--revision", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--evidence", help=argparse.SUPPRESS)
+    parser.add_argument("--approved-chat-id", type=int, help=argparse.SUPPRESS)
     return parser
 
 
@@ -53,6 +54,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         from time_tl.runtime.services import activate_owner_settings
 
         asyncio.run(activate_owner_settings(settings, args.revision, args.evidence))
+        return
+    if args.service == "preflight-owner-settings":
+        if args.revision is None or args.approved_chat_id is None:
+            raise SystemExit("preflight requires --revision and --approved-chat-id")
+        from time_tl.entrypoints.operator_preflight import preflight_owner_settings
+
+        evidence = asyncio.run(
+            preflight_owner_settings(settings, args.revision, args.approved_chat_id)
+        )
+        print(evidence.sanitized_summary())
         return
     if args.service == Service.ADMIN_WEB.value:
         from time_tl.runtime.services import run_admin_web_service

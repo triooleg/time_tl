@@ -300,6 +300,34 @@ class PostgresAlertRepository:
                     machine.apply_failure(failure)
                     await self._store_snapshot(session, scope.id, machine.snapshot())
 
+    async def apply_process_restart_atomically(self) -> None:
+        """Invalidate freshness and conditionals before the first provider request."""
+        async with self._factory() as session:
+            async with session.begin():
+                poll_row = (
+                    await session.execute(
+                        select(PollRow).where(PollRow.singleton_id == 1).with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if poll_row is None:
+                    raise RuntimeError("alert_poll_state singleton is missing; run migrations")
+                scopes = list(
+                    (
+                        await session.execute(
+                            select(AlertScope).order_by(AlertScope.id).with_for_update()
+                        )
+                    ).scalars()
+                )
+                failure = SourceFailure(SourceFailureKind.PROCESS_RESTART)
+                for scope in scopes:
+                    machine = AlertStateMachine(
+                        self._scope(scope), await self._load_snapshot(session, scope.id)
+                    )
+                    machine.apply_failure(failure)
+                    await self._store_snapshot(session, scope.id, machine.snapshot())
+                poll_row.last_modified = None
+                poll_row.last_success_at = None
+
     @staticmethod
     def _scope(row: AlertScope) -> RegionScope:
         values = frozenset(str(item) for item in row.applicable_region_ids)

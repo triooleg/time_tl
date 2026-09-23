@@ -24,18 +24,44 @@ properties in place and then describe the resulting stack as reviewed staging.
 
 ## Current release boundary
 
-G2-G5 pass for SIMULATION. G6-G9 remain blocked for Telegram staging/production.
-These runtime capabilities remain false and must not be patched directly on the
-server:
+G2-G5 pass for SIMULATION. G6-G9 remain blocked until exact STAGING evidence is
+recorded. The reviewed code now contains separate STAGING-only capabilities for
+the manual-region bot, schedule worker and sender worker. They open only when one
+ACTIVE database revision has supplied alerts.in.ua, Live Telegram and a non-empty
+allowlist. These production capabilities remain false and must not be patched
+directly on the server:
 
 - `production_oblast_scope_release`;
 - `reviewed_region_resolver`;
 - `schedule_worker`;
 - `sender_worker`.
 
-Implementations exist behind these gates. A production stack must fail closed until
-an independently reviewed exact version intentionally changes the corresponding
-capabilities. Manual oblast selection works; coordinate resolution is not released.
+The STAGING variants are `staging_manual_region_bot`,
+`staging_schedule_worker` and `staging_sender_worker`. A production stack still
+fails closed. Manual oblast selection works; coordinate resolution is not released.
+
+## Pending-revision operator preflight
+
+Run this against the exact candidate image before activation. Substitute the
+separately confirmed numeric test chat ID; do not paste tokens into the command:
+
+```bash
+docker compose run --rm --no-deps \
+  -e TIME_TL_ENV=staging \
+  admin-web preflight-owner-settings \
+  --revision 5 \
+  --approved-chat-id <APPROVED_NUMERIC_CHAT_ID>
+```
+
+Expected output is sanitized and ends with `persisted=no`. The command performs
+only Telegram `getMe` and one unconditional official 27-oblast FULL_200 probe.
+It never calls sendMessage, mutates webhooks, persists the provider snapshot or
+marks the revision ACTIVE. Any mismatch, timeout, 401/403/429, malformed/partial
+body or missing Last-Modified fails the preflight.
+
+Only after a passing result, independent safety review and exact-version approval
+may the operator run `activate-owner-settings`. Activation and controlled worker
+restart are separate steps.
 
 ## Exact-version evidence required before G8
 
@@ -114,6 +140,9 @@ exact reviewed Compose/environment evidence.
 - Provider HTTP redirects and environment proxy inheritance are disabled.
 - The response limit is 4096 bytes for both declared and actual body size.
 - Snapshot/baseline/outbox and fetch revision/`Last-Modified` commit atomically.
+- Alert, schedule and sender startup each commit the same restart fence before
+  polling, planning or constructing the live Telegram client; stale pre-restart
+  freshness therefore cannot authorize an all-clear or return message.
 - Stale, timeout, invalid, restart and auth failures never synthesize all-clear.
 - Sender performs a final transactional mode/state/profile/freshness authorization
   immediately around Telegram delivery and uses a bounded transport timeout.

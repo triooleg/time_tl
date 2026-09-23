@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,12 +34,15 @@ from time_tl.runtime.regions import (
     REGISTRY_SUPPORTS_AGGREGATE_OBLAST_SCOPES,
 )
 from time_tl.runtime.services import (
+    _apply_alert_restart_fence,
     _provider,
     build_alert_worker,
     postgres_bot_dependencies,
     run_alert_worker,
     run_bot,
     run_inert_worker,
+    run_schedule_worker,
+    run_sender_worker,
 )
 
 
@@ -61,6 +66,7 @@ def settings_for(
         DATABASE_URL=SecretStr("postgresql+asyncpg://user:pass@postgres/time_tl"),
         RUNTIME_STATE_DIR=state_dir,
         ALLOW_SCAFFOLD_SERVICES=environment in {Environment.LOCAL, Environment.SIMULATION},
+        OWNER_CONFIG_REVISION=5 if environment is Environment.STAGING else None,
         ADMIN_COOKIE_SECURE=True,
         _env_file=None,
     )
@@ -88,6 +94,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         settings = settings_for(
             "alert-worker",
             environment=Environment.STAGING,
+            telegram=TelegramTransport.LIVE,
             alert_provider=AlertProvider.ALERTS_IN_UA,
         )
         validate_runtime_contract(settings, "alert-worker")
@@ -96,6 +103,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         settings = settings_for(
             "alert-worker",
             environment=Environment.STAGING,
+            telegram=TelegramTransport.LIVE,
             alert_provider=AlertProvider.ALERTS_IN_UA,
         )
         capabilities = RuntimeCapabilities(reviewed_aggregate_oblast_provider=False)
@@ -106,6 +114,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         settings = settings_for(
             "alert-worker",
             environment=Environment.STAGING,
+            telegram=TelegramTransport.LIVE,
             alert_provider=AlertProvider.ALERTS_IN_UA,
         )
         worker = AsyncMock()
@@ -121,6 +130,148 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaisesRegex(RuntimeContractError, "reviewed geolocation resolver"):
             await run_bot(settings)
+
+    def test_staging_manual_region_bot_contract_is_released(self) -> None:
+        settings = settings_for(
+            "bot",
+            environment=Environment.STAGING,
+            telegram=TelegramTransport.LIVE,
+            alert_provider=AlertProvider.ALERTS_IN_UA,
+        )
+        validate_runtime_contract(settings, "bot")
+        with self.assertRaisesRegex(RuntimeContractError, "manual-region"):
+            validate_runtime_contract(
+                settings,
+                "bot",
+                RuntimeCapabilities(staging_manual_region_bot=False),
+            )
+
+    def test_staging_roles_require_one_applied_safe_configuration(self) -> None:
+        for role in ("bot", "alert-worker", "schedule-worker", "sender-worker"):
+            base = settings_for(
+                role,
+                environment=Environment.STAGING,
+                telegram=TelegramTransport.LIVE,
+                alert_provider=AlertProvider.ALERTS_IN_UA,
+            )
+            forbidden = (
+                ({"owner_config_revision": None}, "ACTIVE database revision"),
+                ({"alert_provider": AlertProvider.FAKE}, "official alerts.in.ua"),
+                ({"telegram_transport": TelegramTransport.DISABLED}, "live Telegram"),
+                ({"test_chat_allowlist_raw": ""}, "allowlist"),
+            )
+            for update, message in forbidden:
+                with (
+                    self.subTest(role=role, update=update),
+                    self.assertRaisesRegex(RuntimeContractError, message),
+                ):
+                    validate_runtime_contract(base.model_copy(update=update), role)
+
+    def test_staging_worker_capabilities_can_be_closed_independently(self) -> None:
+        for role, capabilities in (
+            ("schedule-worker", RuntimeCapabilities(staging_schedule_worker=False)),
+            ("sender-worker", RuntimeCapabilities(staging_sender_worker=False)),
+        ):
+            settings = settings_for(
+                role,
+                environment=Environment.STAGING,
+                telegram=TelegramTransport.LIVE,
+                alert_provider=AlertProvider.ALERTS_IN_UA,
+            )
+            with self.subTest(role=role), self.assertRaisesRegex(
+                RuntimeContractError, f"staging {role}"
+            ):
+                validate_runtime_contract(settings, role, capabilities)
+
+    async def test_downstream_startup_fence_is_db_backed(self) -> None:
+        repository = AsyncMock()
+        with patch(
+            "time_tl.infrastructure.db.alerts.PostgresAlertRepository",
+            return_value=repository,
+        ):
+            factory = object()
+            await _apply_alert_restart_fence(factory)
+        repository.apply_process_restart_atomically.assert_awaited_once_with()
+
+    def test_downstream_workers_fence_before_any_loop_or_bot_creation(self) -> None:
+        schedule_source = inspect.getsource(run_schedule_worker)
+        sender_source = inspect.getsource(run_sender_worker)
+        self.assertLess(
+            schedule_source.index("await _apply_alert_restart_fence"),
+            schedule_source.index("worker = build_schedule_worker"),
+        )
+        self.assertLess(
+            sender_source.index("await _apply_alert_restart_fence"),
+            sender_source.index("bot = Bot"),
+        )
+
+    async def test_concurrent_schedule_start_cannot_pass_uncommitted_fence(self) -> None:
+        settings = settings_for(
+            "schedule-worker",
+            environment=Environment.STAGING,
+            telegram=TelegramTransport.LIVE,
+            alert_provider=AlertProvider.ALERTS_IN_UA,
+        )
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_fence(_factory: object) -> None:
+            entered.set()
+            await release.wait()
+
+        with (
+            patch(
+                "time_tl.runtime.services.resolve_owner_runtime_settings",
+                AsyncMock(return_value=settings),
+            ),
+            patch(
+                "time_tl.runtime.services._apply_alert_restart_fence",
+                side_effect=blocking_fence,
+            ),
+            patch("time_tl.infrastructure.db.engine.create_engine", return_value=object()),
+            patch("time_tl.infrastructure.db.engine.create_session_factory", return_value=object()),
+            patch("time_tl.application.schedule_worker.build_schedule_worker") as build,
+        ):
+            task = asyncio.create_task(run_schedule_worker(settings))
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            build.assert_not_called()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+    async def test_concurrent_sender_start_cannot_create_bot_before_fence(self) -> None:
+        settings = settings_for(
+            "sender-worker",
+            environment=Environment.STAGING,
+            telegram=TelegramTransport.LIVE,
+            alert_provider=AlertProvider.ALERTS_IN_UA,
+        )
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_fence(_factory: object) -> None:
+            entered.set()
+            await release.wait()
+
+        with (
+            patch(
+                "time_tl.runtime.services.resolve_owner_runtime_settings",
+                AsyncMock(return_value=settings),
+            ),
+            patch(
+                "time_tl.runtime.services._apply_alert_restart_fence",
+                side_effect=blocking_fence,
+            ),
+            patch("time_tl.infrastructure.db.engine.create_engine", return_value=object()),
+            patch("time_tl.infrastructure.db.engine.create_session_factory", return_value=object()),
+            patch("aiogram.Bot") as bot,
+        ):
+            task = asyncio.create_task(run_sender_worker(settings))
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            bot.assert_not_called()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
 
     async def test_postgres_bot_dependencies_build_without_network_or_messages(self) -> None:
         settings = settings_for(
@@ -192,6 +343,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         settings = settings_for(
             "alert-worker",
             environment=Environment.STAGING,
+            telegram=TelegramTransport.LIVE,
             alert_provider=AlertProvider.ALERTS_IN_UA,
         )
         with patch("time_tl.runtime.services.HttpxTransport", return_value=transport):

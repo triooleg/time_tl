@@ -163,8 +163,19 @@ class AlertStateMachineTests(unittest.TestCase):
         self.assertEqual(TransitionKind.NONE, duplicate.kind)
         self.assertEqual(AlertState.ACTIVE, restored.state)
 
-    def test_restart_without_durable_snapshot_becomes_unknown(self) -> None:
+    def test_restart_preserves_known_active_as_stale(self) -> None:
         self.start()
+        transition = self.machine.apply_failure(SourceFailure(SourceFailureKind.PROCESS_RESTART))
+        self.assertEqual(AlertState.STALE, transition.state)
+        self.assertEqual(frozenset({self.air}), self.machine.active_episodes)
+        restarted = self.machine.snapshot()
+        self.assertIsNone(restarted.last_fetch_revision)
+        self.assertIsNone(restarted.last_full_active_episodes)
+        self.assertFalse(restarted.pending_clear_candidate)
+        self.assertNotEqual(TransitionKind.ALL_CLEAR_CONFIRMED, transition.kind)
+
+    def test_restart_from_confirmed_clear_becomes_unknown(self) -> None:
+        self.machine.apply_snapshot(full(1, ()))
         transition = self.machine.apply_failure(SourceFailure(SourceFailureKind.PROCESS_RESTART))
         self.assertEqual(AlertState.UNKNOWN, transition.state)
         self.assertNotEqual(TransitionKind.ALL_CLEAR_CONFIRMED, transition.kind)
