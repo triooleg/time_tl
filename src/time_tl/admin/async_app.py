@@ -578,13 +578,39 @@ def create_async_admin_app(
                     f"Забагато спроб. Повторіть через {_duration(remaining)}", 429
                 )
             return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
+
+        async def validation_response(message: str) -> HTMLResponse:
+            try:
+                owner_view = await owner_settings.view()
+            except OwnerSettingsError:
+                return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+            poll = await repository.get_setting("poll", settings.alert_poll_interval_seconds)
+            stale = await repository.get_setting("stale", settings.alert_stale_after_seconds)
+            return HTMLResponse(
+                _dashboard_html(
+                    session.csrf_token,
+                    settings.environment.value,
+                    int(poll),
+                    int(stale),
+                    message,
+                    owner_view,
+                ),
+                422,
+            )
+
         try:
             allowlist_raw = data.get("staging_allowlist", "").strip()
-            allowlist = (
-                tuple(int(item.strip()) for item in allowlist_raw.split(",") if item.strip())
-                if allowlist_raw
-                else None
-            )
+            try:
+                allowlist = (
+                    tuple(int(item.strip()) for item in allowlist_raw.split(",") if item.strip())
+                    if allowlist_raw
+                    else None
+                )
+            except ValueError as exc:
+                raise OwnerSettingsValidationError(
+                    "STAGING allowlist має містити лише числові Telegram chat ID, "
+                    "розділені комами."
+                ) from exc
             command = OwnerConfigurationUpdate(
                 expected_revision=int(data.get("expected_revision", "0")),
                 environment=data.get("environment", ""),
@@ -600,8 +626,13 @@ def create_async_admin_app(
                 clear_staging_allowlist=data.get("clear_staging_allowlist") == "yes",
             )
             await owner_settings.save(command, session.username)
-        except (KeyError, ValueError, OwnerSettingsValidationError):
-            return HTMLResponse("Перевірте введені налаштування.", 422)
+        except (KeyError, ValueError):
+            return await validation_response(
+                "Перевірте числові поля: версію, інтервал опитування та "
+                "поріг застарівання."
+            )
+        except OwnerSettingsValidationError as exc:
+            return await validation_response(str(exc))
         except OwnerSettingsConflictError:
             return HTMLResponse("Конфігурацію змінено. Оновіть сторінку.", 409)
         except OwnerSettingsError:

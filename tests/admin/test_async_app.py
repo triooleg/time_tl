@@ -345,6 +345,33 @@ class AsyncEndpointTests(unittest.TestCase):
         self.assertEqual(bad_password.status_code, 401)
         self.assertEqual(self.owner_store.bundle.latest_revision, 0)
 
+    def test_invalid_owner_settings_rerender_dashboard_without_echoing_secrets(self) -> None:
+        self.repo.owner.must_change_password = False
+        self.repo.owner.bootstrap_expires_at = None
+        self.login()
+        page = self.client.get("/")
+        fake_secret = "telegram-invalid-route-secret"
+        response = self.client.post(
+            "/settings/service",
+            data={
+                "csrf": self.csrf(page.text),
+                "expected_revision": "0",
+                "environment": "staging",
+                "alert_provider": "alerts_in_ua",
+                "telegram_transport": "live",
+                "poll_interval_seconds": "15",
+                "stale_after_seconds": "120",
+                "staging_allowlist": "not-a-chat-id",
+                "telegram_token": fake_secret,
+                "current_password": "bootstrap-password-long",
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("Майстер налаштування сервісу", response.text)
+        self.assertIn("лише числові Telegram chat ID", response.text)
+        self.assertNotIn(fake_secret, response.text)
+        self.assertEqual(self.owner_store.bundle.latest_revision, 0)
+
     def test_lockout_after_five_failures(self) -> None:
         statuses = [self.login("wrong").status_code for _ in range(5)]
         self.assertEqual(statuses[:4], [401] * 4)
