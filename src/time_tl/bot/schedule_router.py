@@ -139,8 +139,8 @@ def build_schedule_router(application: AsyncTelegramApplication) -> Router:
                 start=start,
                 end=end,
                 title=title,
-                week_parity=Parity(data["week_parity"]),
-                date_parity=Parity(data["date_parity"]),
+                week_parity=_parse_parity(data["week_parity"]),
+                date_parity=_parse_parity(data["date_parity"]),
                 join_url=join_url,
             )
         except ValueError as exc:
@@ -163,8 +163,8 @@ def build_schedule_router(application: AsyncTelegramApplication) -> Router:
             weekday=int(weekday),
             lesson_index=int(index),
             enabled=enabled == "1",
-            week_parity=Parity(week),
-            date_parity=Parity(day),
+            week_parity=_parse_parity(week),
+            date_parity=_parse_parity(day),
         )
         await callback.answer("Урок увімкнено" if enabled == "1" else "Урок вимкнено")
 
@@ -417,6 +417,11 @@ def _parse_lesson(raw: str) -> tuple[time, time, str, str | None] | None:
     if not title:
         return None
     return start, end, title, join_url
+
+
+def _parse_parity(raw: str) -> Parity:
+    """Normalize Telegram callback values to the domain enum."""
+    return Parity(raw.upper())
 
 
 def _editor_view(profile_id: str, name: str, prefix: str = "") -> View:
