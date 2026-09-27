@@ -226,8 +226,81 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(alert_id), episodes[0].episode_id)
 
         for alert_id in (False, 0, -1, SIGNED_INT64_MAX + 1):
-            with self.subTest(invalid=alert_id), self.assertRaises(TypeError):
+            with self.subTest(invalid=alert_id), self.assertRaises(ValueError):
                 provider._parse_active_payload(json.dumps(active(alert_id)).encode())
+
+    async def test_invalid_snapshot_reports_only_redacted_taxonomy(self):
+        payload = active()
+        payload["alerts"][0]["provider_private_field"] = "must-not-leak"
+        payload["alerts"][0]["another_private_field"] = "also-must-not-leak"
+        result = await adapter(
+            Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
+        ).fetch(fetch_revision=1, last_modified=None)
+
+        self.assertIsNotNone(result.failure)
+        self.assertEqual("alert_fields_unknown", result.diagnostic_code)
+        self.assertEqual(2, result.diagnostic_count)
+        summary = result.sanitized_failure()
+        self.assertEqual(
+            "kind=INVALID_RESPONSE code=alert_fields_unknown count=2",
+            summary,
+        )
+        assert summary is not None
+        self.assertNotIn("provider_private_field", summary)
+        self.assertNotIn("must-not-leak", summary)
+        self.assertNotIn("1903", summary)
+
+    async def test_unknown_uid_diagnostic_never_exposes_uid(self):
+        private_uid = "999999"
+        result = await adapter(
+            Transport(
+                response(
+                    200,
+                    active(uid=private_uid),
+                    **{"Last-Modified": MARKER_1},
+                )
+            )
+        ).fetch(fetch_revision=1, last_modified=None)
+
+        self.assertEqual("location_uid_unknown", result.diagnostic_code)
+        self.assertEqual(1, result.diagnostic_count)
+        summary = result.sanitized_failure()
+        assert summary is not None
+        self.assertNotIn(private_uid, summary)
+
+    async def test_diagnostic_taxonomy_identifies_rejected_predicate(self):
+        missing = active()
+        del missing["alerts"][0]["updated_at"]
+        mismatch = active(uid="1803", location_type="hromada")
+        naive = active()
+        naive["alerts"][0]["started_at"] = "2026-09-20T10:00:00"
+        threat = active()
+        threat["alerts"][0]["threats"] = [
+            {
+                "threat_type": "not-documented",
+                "level": "yellow",
+                "started_at": "2026-09-20T10:00:01Z",
+            }
+        ]
+        samples = (
+            ({"alerts": [], "unexpected": True}, "root_schema_invalid", 1),
+            (missing, "alert_fields_missing", 1),
+            (active(False), "alert_id_invalid", 1),
+            (active(uid="01903"), "location_uid_format_invalid", 1),
+            (mismatch, "location_type_catalogue_mismatch", 1),
+            (active(alert_type="new_alert_kind"), "alert_type_enum_invalid", 1),
+            (active(alert_level="green"), "alert_level_enum_invalid", 1),
+            (naive, "started_at_timezone_missing", 1),
+            (threat, "threat_type_enum_invalid", 1),
+        )
+
+        for payload, code, count in samples:
+            with self.subTest(code=code):
+                result = await adapter(
+                    Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
+                ).fetch(fetch_revision=1, last_modified=None)
+                self.assertEqual(code, result.diagnostic_code)
+                self.assertEqual(count, result.diagnostic_count)
 
     async def test_marker_regression_and_same_marker_changed_content_are_invalid(self):
         regression_provider = adapter(

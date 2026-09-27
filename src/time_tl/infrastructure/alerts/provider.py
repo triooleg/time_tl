@@ -49,6 +49,23 @@ class OperatorCircuitOpen(RuntimeError):
     """401/403 circuit can only be closed by an operator action."""
 
 
+class SnapshotValidationError(ValueError):
+    """Internal redacted validation result; never carries provider values."""
+
+    def __init__(self, code: str, count: int = 1) -> None:
+        if (
+            not code
+            or len(code) > 64
+            or any(character not in "abcdefghijklmnopqrstuvwxyz_" for character in code)
+        ):
+            raise ValueError("diagnostic code must be lowercase ASCII with underscores")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("diagnostic count must be non-negative")
+        super().__init__(code)
+        self.code = code
+        self.count = count
+
+
 def _content_bound_update_id(
     prefix: str,
     revision: int,
@@ -81,10 +98,30 @@ class FetchResult:
     last_modified: str | None = None
     retry_after_seconds: float | None = None
     open_operator_circuit: bool = False
+    diagnostic_code: str | None = None
+    diagnostic_count: int | None = None
 
     def __post_init__(self) -> None:
         if (self.snapshot is None) == (self.failure is None):
             raise ValueError("fetch result requires exactly one of snapshot/failure")
+        if self.snapshot is not None and (
+            self.diagnostic_code is not None or self.diagnostic_count is not None
+        ):
+            raise ValueError("successful fetch cannot carry a failure diagnostic")
+        if (self.diagnostic_code is None) != (self.diagnostic_count is None):
+            raise ValueError("diagnostic code and count must be provided together")
+        if self.diagnostic_code is not None:
+            SnapshotValidationError(self.diagnostic_code, self.diagnostic_count or 0)
+
+    def sanitized_failure(self) -> str | None:
+        """Return only bounded taxonomy metadata, never provider content."""
+
+        if self.failure is None:
+            return None
+        summary = f"kind={self.failure.kind.value}"
+        if self.diagnostic_code is not None:
+            summary += f" code={self.diagnostic_code} count={self.diagnostic_count}"
+        return summary
 
 
 class AlertsInUaAdapter:
@@ -197,15 +234,24 @@ class AlertsInUaAdapter:
         normalized = {key.lower(): value for key, value in response.headers.items()}
         if response.status == 304:
             if conditional_marker is None:
-                return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+                return self._invalid(
+                    SourceFailureKind.INVALID_RESPONSE,
+                    "not_modified_without_baseline",
+                )
             response_marker = normalized.get("last-modified")
             if response_marker is not None:
                 try:
                     _parse_http_date(response_marker)
                 except ValueError:
-                    return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+                    return self._invalid(
+                        SourceFailureKind.INVALID_RESPONSE,
+                        "not_modified_marker_invalid",
+                    )
                 if response_marker != conditional_marker:
-                    return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+                    return self._invalid(
+                        SourceFailureKind.INVALID_RESPONSE,
+                        "not_modified_marker_mismatch",
+                    )
             return FetchResult(
                 snapshot=self._snapshot(fetch_revision, ProviderSnapshotKind.NOT_MODIFIED_304, ()),
                 last_modified=conditional_marker,
@@ -213,28 +259,58 @@ class AlertsInUaAdapter:
         if response.status == 200:
             marker = normalized.get("last-modified")
             if not marker:
-                return self._invalid(SourceFailureKind.PARTIAL_RESPONSE)
+                return self._invalid(
+                    SourceFailureKind.PARTIAL_RESPONSE,
+                    "last_modified_missing",
+                )
             if not response.body:
-                return self._invalid(SourceFailureKind.EMPTY_RESPONSE)
+                return self._invalid(SourceFailureKind.EMPTY_RESPONSE, "body_empty", 0)
             try:
                 marker_at = _parse_http_date(marker)
+            except ValueError:
+                return self._invalid(
+                    SourceFailureKind.INVALID_RESPONSE,
+                    "last_modified_invalid",
+                )
+            try:
                 persisted_floor = (
                     _parse_http_date(last_modified) if last_modified is not None else None
                 )
+            except ValueError:
+                return self._invalid(
+                    SourceFailureKind.INVALID_RESPONSE,
+                    "persisted_marker_invalid",
+                )
+            try:
                 episodes, content_digest = self._parse_active_payload(response.body)
+            except SnapshotValidationError as error:
+                return self._invalid(
+                    SourceFailureKind.INVALID_RESPONSE,
+                    error.code,
+                    error.count,
+                )
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-                return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+                return self._invalid(
+                    SourceFailureKind.INVALID_RESPONSE,
+                    "payload_unclassified",
+                )
             if (
                 self._validated_last_modified_at is not None
                 and marker_at < self._validated_last_modified_at
             ) or (persisted_floor is not None and marker_at < persisted_floor):
-                return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+                return self._invalid(
+                    SourceFailureKind.INVALID_RESPONSE,
+                    "last_modified_regression",
+                )
             if (
                 self._validated_last_modified_at is not None
                 and marker_at == self._validated_last_modified_at
                 and content_digest != self._validated_content_digest
             ):
-                return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+                return self._invalid(
+                    SourceFailureKind.INVALID_RESPONSE,
+                    "last_modified_content_mismatch",
+                )
             self._validated_last_modified = marker
             self._validated_last_modified_at = marker_at
             self._validated_content_digest = content_digest
@@ -268,26 +344,47 @@ class AlertsInUaAdapter:
         )
 
     @staticmethod
-    def _invalid(kind: SourceFailureKind) -> FetchResult:
-        return FetchResult(failure=SourceFailure(kind))
+    def _invalid(
+        kind: SourceFailureKind,
+        diagnostic_code: str,
+        diagnostic_count: int = 1,
+    ) -> FetchResult:
+        return FetchResult(
+            failure=SourceFailure(kind),
+            diagnostic_code=diagnostic_code,
+            diagnostic_count=diagnostic_count,
+        )
 
     def _parse_active_payload(self, body: bytes) -> tuple[tuple[AlertEpisode, ...], str]:
-        root = json.loads(body.decode("utf-8"))
+        try:
+            decoded = body.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise SnapshotValidationError("body_encoding_invalid") from error
+        try:
+            root = json.loads(decoded)
+        except json.JSONDecodeError as error:
+            raise SnapshotValidationError("json_invalid") from error
         if not isinstance(root, dict) or set(root) != {"alerts"}:
-            raise ValueError("root must contain only alerts")
+            raise SnapshotValidationError("root_schema_invalid")
         alerts = root["alerts"]
         if not isinstance(alerts, list):
-            raise TypeError("alerts must be a list")
+            raise SnapshotValidationError("alerts_field_type_invalid")
         parsed: list[AlertEpisode] = []
         alert_ids: set[int] = set()
         for item in alerts:
             if not isinstance(item, dict):
-                raise TypeError("alert must be an object")
+                raise SnapshotValidationError("alert_row_type_invalid")
             keys = frozenset(item)
             if not self._REQUIRED_ALERT_FIELDS.issubset(keys):
-                raise ValueError("partial alert object")
+                raise SnapshotValidationError(
+                    "alert_fields_missing",
+                    len(self._REQUIRED_ALERT_FIELDS - keys),
+                )
             if not keys.issubset(self._ALLOWED_ALERT_FIELDS):
-                raise ValueError("alert object contains undocumented fields")
+                raise SnapshotValidationError(
+                    "alert_fields_unknown",
+                    len(keys - self._ALLOWED_ALERT_FIELDS),
+                )
 
             alert_id = item["id"]
             if (
@@ -295,37 +392,37 @@ class AlertsInUaAdapter:
                 or not isinstance(alert_id, int)
                 or not 1 <= alert_id <= self.MAX_ALERT_ID
             ):
-                raise TypeError("id must be a positive signed int64")
+                raise SnapshotValidationError("alert_id_invalid")
             if alert_id in alert_ids:
-                raise ValueError("duplicate alert ID")
+                raise SnapshotValidationError("alert_id_duplicate")
             alert_ids.add(alert_id)
 
             location_uid = item["location_uid"]
             if not isinstance(location_uid, str) or not self._is_canonical_uid(location_uid):
-                raise TypeError("location_uid must be a canonical positive decimal string")
+                raise SnapshotValidationError("location_uid_format_invalid")
             pinned_type = self._region_types.get(location_uid)
             if pinned_type is None:
-                raise ValueError("alert references an unknown provider UID")
+                raise SnapshotValidationError("location_uid_unknown")
 
             location_type = item["location_type"]
             if not isinstance(location_type, str) or location_type not in self._LOCATION_TYPES:
-                raise ValueError("unknown location_type")
+                raise SnapshotValidationError("location_type_enum_invalid")
             if location_type not in self._PINNED_TO_PROVIDER_TYPES[pinned_type]:
-                raise ValueError("location_type disagrees with the pinned UID catalogue")
+                raise SnapshotValidationError("location_type_catalogue_mismatch")
 
             alert_type = item["alert_type"]
             if not isinstance(alert_type, str) or alert_type not in self._ALERT_TYPES:
-                raise ValueError("unknown alert_type")
+                raise SnapshotValidationError("alert_type_enum_invalid")
             alert_level = item["alert_level"]
             if not isinstance(alert_level, str) or alert_level not in self._ALERT_LEVELS:
-                raise ValueError("unknown alert_level")
+                raise SnapshotValidationError("alert_level_enum_invalid")
 
             started_at = self._parse_api_timestamp(item["started_at"], "started_at")
             updated_at = self._parse_api_timestamp(item["updated_at"], "updated_at")
             if updated_at < started_at:
-                raise ValueError("updated_at precedes started_at")
+                raise SnapshotValidationError("timestamp_order_invalid")
             if item["finished_at"] is not None:
-                raise ValueError("active alert must not be finished")
+                raise SnapshotValidationError("finished_at_not_null")
 
             self._validate_required_text(item["location_title"], "location_title")
             for optional_text in (
@@ -339,10 +436,10 @@ class AlertsInUaAdapter:
             if "location_oblast_uid" in item and item["location_oblast_uid"] is not None:
                 oblast_uid = item["location_oblast_uid"]
                 if not isinstance(oblast_uid, str) or not self._is_canonical_uid(oblast_uid):
-                    raise TypeError("location_oblast_uid must be a canonical decimal string")
+                    raise SnapshotValidationError("location_oblast_uid_format_invalid")
                 oblast_type = self._region_types.get(oblast_uid)
                 if oblast_type not in {"Область", "Місто з спеціальним статусом"}:
-                    raise ValueError("location_oblast_uid is not a known top-level UID")
+                    raise SnapshotValidationError("location_oblast_uid_unknown")
             if "threats" in item:
                 self._validate_threats(item["threats"])
 
@@ -350,7 +447,7 @@ class AlertsInUaAdapter:
                 # Both documented red and yellow levels represent an active air raid.
                 parsed.append(AlertEpisode(location_uid, alert_type, str(alert_id)))
         if len(parsed) != len(set(parsed)):
-            raise ValueError("duplicate alert episode")
+            raise SnapshotValidationError("alert_episode_duplicate")
         canonical = json.dumps(
             root,
             ensure_ascii=False,
@@ -370,42 +467,51 @@ class AlertsInUaAdapter:
 
     @staticmethod
     def _parse_api_timestamp(value: object, field: str) -> datetime:
+        code_prefix = field.replace(".", "_")
         if not isinstance(value, str) or not value or value != value.strip():
-            raise TypeError(f"{field} must be a non-empty date-time string")
+            raise SnapshotValidationError(f"{code_prefix}_type_invalid")
         normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
         try:
             parsed = datetime.fromisoformat(normalized)
         except ValueError as error:
-            raise ValueError(f"{field} must be an ISO-8601 date-time") from error
+            raise SnapshotValidationError(f"{code_prefix}_format_invalid") from error
         if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError(f"{field} must include a timezone")
+            raise SnapshotValidationError(f"{code_prefix}_timezone_missing")
         return parsed.astimezone(UTC)
 
     @staticmethod
     def _validate_required_text(value: object, field: str) -> None:
         if not isinstance(value, str) or not value.strip() or value != value.strip():
-            raise TypeError(f"{field} must be a non-empty trimmed string")
+            raise SnapshotValidationError(f"{field}_invalid")
 
     @staticmethod
     def _validate_text(value: object, field: str) -> None:
         if not isinstance(value, str) or value != value.strip():
-            raise TypeError(f"{field} must be a trimmed string")
+            raise SnapshotValidationError(f"{field}_invalid")
 
     def _validate_threats(self, value: object) -> None:
         if not isinstance(value, list) or not value:
-            raise TypeError("threats must be a non-empty list when present")
+            raise SnapshotValidationError("threats_field_invalid")
         for threat in value:
             if not isinstance(threat, dict):
-                raise TypeError("threat must be an object")
+                raise SnapshotValidationError("threat_row_type_invalid")
             keys = frozenset(threat)
             if not self._REQUIRED_THREAT_FIELDS.issubset(keys):
-                raise ValueError("partial threat object")
+                raise SnapshotValidationError(
+                    "threat_fields_missing",
+                    len(self._REQUIRED_THREAT_FIELDS - keys),
+                )
             if not keys.issubset(self._ALLOWED_THREAT_FIELDS):
-                raise ValueError("threat object contains undocumented fields")
-            if threat["threat_type"] not in self._THREAT_TYPES:
-                raise ValueError("unknown threat_type")
-            if threat["level"] not in self._ALERT_LEVELS:
-                raise ValueError("unknown threat level")
+                raise SnapshotValidationError(
+                    "threat_fields_unknown",
+                    len(keys - self._ALLOWED_THREAT_FIELDS),
+                )
+            threat_type = threat["threat_type"]
+            if not isinstance(threat_type, str) or threat_type not in self._THREAT_TYPES:
+                raise SnapshotValidationError("threat_type_enum_invalid")
+            threat_level = threat["level"]
+            if not isinstance(threat_level, str) or threat_level not in self._ALERT_LEVELS:
+                raise SnapshotValidationError("threat_level_enum_invalid")
             self._parse_api_timestamp(threat["started_at"], "threat.started_at")
             if "source_message" in threat and threat["source_message"] is not None:
                 self._validate_text(threat["source_message"], "threat.source_message")

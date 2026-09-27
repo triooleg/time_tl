@@ -101,7 +101,9 @@ async def probe_candidate(
         or len(snapshot.covered_region_ids) != EXPECTED_RECORD_COUNT
         or not result.last_modified
     ):
-        raise OperatorPreflightError("alerts.in.ua full-snapshot preflight failed")
+        diagnostic = result.sanitized_failure()
+        suffix = f": {diagnostic}" if diagnostic is not None else ""
+        raise OperatorPreflightError(f"alerts.in.ua full-snapshot preflight failed{suffix}")
     return OperatorPreflightEvidence(
         revision=candidate.revision,
         allowlist_count=len(candidate.staging_allowlist),

@@ -120,7 +120,7 @@ async def test_probe_rejects_partial_provider_response_after_closing_bot() -> No
             return HttpResponse(200, {}, full_body())
 
     bot = FakeBot("ignored")
-    with pytest.raises(OperatorPreflightError, match="full-snapshot"):
+    with pytest.raises(OperatorPreflightError, match="full-snapshot") as captured:
         await probe_candidate(
             candidate(),
             123,
@@ -128,6 +128,7 @@ async def test_probe_rejects_partial_provider_response_after_closing_bot() -> No
             transport_factory=PartialTransport,
         )
     assert bot.session.closed
+    assert "kind=PARTIAL_RESPONSE code=last_modified_missing count=1" in str(captured.value)
 
 
 @pytest.mark.asyncio
@@ -136,10 +137,43 @@ async def test_probe_rejects_malformed_last_modified_marker() -> None:
         async def send(self, _request: object) -> HttpResponse:
             return HttpResponse(200, {"Last-Modified": "not-an-http-date"}, full_body())
 
-    with pytest.raises(OperatorPreflightError, match="full-snapshot"):
+    with pytest.raises(OperatorPreflightError, match="full-snapshot") as captured:
         await probe_candidate(
             candidate(),
             123,
             bot_factory=FakeBot,
             transport_factory=MalformedMarkerTransport,
         )
+    message = str(captured.value)
+    assert "kind=INVALID_RESPONSE code=last_modified_invalid count=1" in message
+    assert "not-an-http-date" not in message
+    assert "secret" not in message
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_unknown_field_count_without_field_or_body_values() -> None:
+    payload = json.loads(full_body())
+    payload["alerts"][0]["private_provider_field"] = "must-not-leak"
+
+    class DriftTransport:
+        async def send(self, _request: object) -> HttpResponse:
+            return HttpResponse(
+                200,
+                {"Last-Modified": MARKER},
+                json.dumps(payload).encode(),
+            )
+
+    with pytest.raises(OperatorPreflightError, match="full-snapshot") as captured:
+        await probe_candidate(
+            candidate(),
+            123,
+            bot_factory=FakeBot,
+            transport_factory=DriftTransport,
+        )
+
+    message = str(captured.value)
+    assert "kind=INVALID_RESPONSE code=alert_fields_unknown count=1" in message
+    assert "private_provider_field" not in message
+    assert "must-not-leak" not in message
+    assert "telegram-secret" not in message
+    assert "alerts-secret" not in message
