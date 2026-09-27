@@ -82,6 +82,10 @@ validation/enrichment evidence and never become selectable territory rows.
 Activation and every active Telegram read require the exact pinned UID set; an
 extra or missing UID aborts before the active pointer can be used for display.
 
+While `region_registry_full.WIRE_RUNTIME` is false, any live alert-worker startup
+aborts before owner settings, database, provider, lease, health or polling resources
+are created. LOCAL and SIMULATION keep their offline provider behavior.
+
 ## Refresh procedure
 
 1. Fetch the exact official source during an approved source-review task.

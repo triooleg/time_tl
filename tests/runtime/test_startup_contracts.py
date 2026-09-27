@@ -7,7 +7,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from pydantic import SecretStr
 
@@ -24,6 +24,7 @@ from time_tl.infrastructure.alerts import (
     HttpResponse,
     OblastAlertsInUaAdapter,
 )
+from time_tl.runtime import region_registry_full
 from time_tl.runtime.contracts import (
     PRODUCTION_PUBLIC_RELEASE_APPROVED,
     PRODUCTION_RELEASE_MANIFEST,
@@ -127,6 +128,86 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeContractError, "reviewed full-territory"):
             validate_runtime_contract(settings, "alert-worker", capabilities)
 
+    async def test_live_alert_worker_refuses_disabled_wire_before_owner_or_composition(
+        self,
+    ) -> None:
+        settings = settings_for(
+            "alert-worker",
+            environment=Environment.STAGING,
+            telegram=TelegramTransport.LIVE,
+            alert_provider=AlertProvider.ALERTS_IN_UA,
+        )
+        owner_settings = AsyncMock()
+        postgres_worker = AsyncMock()
+        provider = Mock()
+        serve = AsyncMock()
+        with (
+            patch.object(region_registry_full, "WIRE_RUNTIME", False),
+            patch(
+                "time_tl.runtime.services.resolve_owner_runtime_settings",
+                owner_settings,
+            ),
+            patch("time_tl.runtime.services._run_postgres_alert_worker", postgres_worker),
+            patch("time_tl.runtime.services._provider", provider),
+            patch("time_tl.runtime.services._serve_worker", serve),
+            self.assertRaisesRegex(RuntimeContractError, "runtime wiring is disabled"),
+        ):
+            await run_alert_worker(settings)
+
+        owner_settings.assert_not_awaited()
+        postgres_worker.assert_not_awaited()
+        provider.assert_not_called()
+        serve.assert_not_awaited()
+
+    async def test_direct_postgres_composition_refuses_wire_before_resources(self) -> None:
+        settings = settings_for(
+            "alert-worker",
+            environment=Environment.STAGING,
+            telegram=TelegramTransport.LIVE,
+            alert_provider=AlertProvider.ALERTS_IN_UA,
+        )
+        engine = Mock()
+        session_factory = Mock()
+        lease = Mock()
+        provider = Mock()
+        readiness = AsyncMock()
+        serve = AsyncMock()
+        with (
+            patch.object(region_registry_full, "WIRE_RUNTIME", False),
+            patch("time_tl.infrastructure.db.engine.create_engine", engine),
+            patch("time_tl.infrastructure.db.engine.create_session_factory", session_factory),
+            patch("time_tl.infrastructure.db.lease.dedicated_advisory_lease", lease),
+            patch("time_tl.runtime.services._provider", provider),
+            patch("time_tl.runtime.services._assert_territory_runtime_ready", readiness),
+            patch("time_tl.runtime.services._serve_worker", serve),
+            self.assertRaisesRegex(RuntimeContractError, "runtime wiring is disabled"),
+        ):
+            await _run_postgres_alert_worker(settings, verified_region_ids=frozenset())
+
+        engine.assert_not_called()
+        session_factory.assert_not_called()
+        lease.assert_not_called()
+        provider.assert_not_called()
+        readiness.assert_not_awaited()
+        serve.assert_not_awaited()
+
+    async def test_simulation_alert_worker_ignores_live_wire_interlock(self) -> None:
+        settings = settings_for("alert-worker", environment=Environment.SIMULATION)
+        worker = Mock()
+        serve = AsyncMock()
+        with (
+            patch.object(region_registry_full, "WIRE_RUNTIME", False),
+            patch(
+                "time_tl.runtime.services.resolve_owner_runtime_settings",
+                AsyncMock(return_value=settings),
+            ),
+            patch("time_tl.runtime.services.build_alert_worker", return_value=worker),
+            patch("time_tl.runtime.services._serve_worker", serve),
+        ):
+            await run_alert_worker(settings)
+
+        serve.assert_awaited_once_with(worker, settings)
+
     async def test_staging_composes_postgres_worker_with_exact_full_registry(self) -> None:
         settings = settings_for(
             "alert-worker",
@@ -135,7 +216,10 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             alert_provider=AlertProvider.ALERTS_IN_UA,
         )
         worker = AsyncMock()
-        with patch("time_tl.runtime.services._run_postgres_alert_worker", worker):
+        with (
+            patch.object(region_registry_full, "WIRE_RUNTIME", True),
+            patch("time_tl.runtime.services._run_postgres_alert_worker", worker),
+        ):
             await run_alert_worker(settings)
         expected = frozenset(item.uid for item in load_catalog().records)
         worker.assert_awaited_once_with(settings, verified_region_ids=expected)

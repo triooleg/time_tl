@@ -31,6 +31,7 @@ from time_tl.infrastructure.alerts import (
     OblastAlertsInUaAdapter,
 )
 
+from . import region_registry_full
 from .contracts import RuntimeContractError, validate_runtime_contract
 from .httpx_transport import HttpxTransport
 from .local_alerts import JsonAlertRepository
@@ -363,6 +364,13 @@ async def _worker_must_not_exit(worker: AlertWorker) -> None:
 
 
 async def run_alert_worker(settings: Settings) -> None:
+    if (
+        settings.environment not in {Environment.LOCAL, Environment.SIMULATION}
+        and not region_registry_full.WIRE_RUNTIME
+    ):
+        raise RuntimeContractError(
+            "full-territory alert runtime wiring is disabled pending official UID coverage"
+        )
     settings = await resolve_owner_runtime_settings(settings)
     validate_runtime_contract(settings, "alert-worker")
     if settings.environment in {Environment.LOCAL, Environment.SIMULATION}:
@@ -376,6 +384,10 @@ async def _run_postgres_alert_worker(
     settings: Settings, *, verified_region_ids: frozenset[str]
 ) -> None:
     """Compose durable polling for the reviewed full provider UID catalogue."""
+    if not region_registry_full.WIRE_RUNTIME:
+        raise RuntimeContractError(
+            "full-territory alert runtime wiring is disabled pending official UID coverage"
+        )
     if verified_region_ids != frozenset(item.uid for item in load_catalog().records):
         raise RuntimeContractError(
             "alert-worker requires the reviewed full alerts.in.ua UID registry"
