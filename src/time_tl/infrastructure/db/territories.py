@@ -186,8 +186,14 @@ def validate_territory_rows(rows: Iterable[TerritoryDraftRow]) -> tuple[Territor
 class PostgresTerritoryCatalogRepository:
     """Stage, validate, atomically activate, and query territory catalogues."""
 
-    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        *,
+        expected_region_ids: frozenset[str] | None = None,
+    ) -> None:
         self._factory = factory
+        self._expected_region_ids = expected_region_ids
 
     async def assert_runtime_ready(
         self,
@@ -212,6 +218,7 @@ class PostgresTerritoryCatalogRepository:
         provider: str,
         expected_region_ids: frozenset[str] | None = None,
     ) -> str:
+        expected_region_ids = self._resolve_expected_region_ids(expected_region_ids)
         await session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:provider, 0))"),
             {"provider": provider},
@@ -330,6 +337,10 @@ class PostgresTerritoryCatalogRepository:
         if len(source_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in source_sha256):
             raise TerritoryCatalogValidationError("source SHA256 must be 64 lowercase hex digits")
         prepared = validate_territory_rows(rows)
+        if not self._region_ids_match(prepared, self._expected_region_ids):
+            raise TerritoryCatalogValidationError(
+                "draft territory UIDs differ from the official provider registry"
+            )
         computed_selectable = sum(row.is_selectable for row in prepared)
         computed_unresolved = len(prepared) - computed_selectable
         if selectable_count is not None and selectable_count != computed_selectable:
@@ -456,7 +467,6 @@ class PostgresTerritoryCatalogRepository:
                 ).scalar_one_or_none()
                 if poll_row is None:
                     raise TerritoryCatalogValidationError("alert poll state singleton is missing")
-                self._advance_alert_poll_fence(poll_row)
                 stored = list(
                     (
                         await session.execute(
@@ -468,6 +478,10 @@ class PostgresTerritoryCatalogRepository:
                     ).scalars()
                 )
                 prepared = validate_territory_rows([self._draft(row) for row in stored])
+                if not self._region_ids_match(prepared, self._expected_region_ids):
+                    raise TerritoryCatalogValidationError(
+                        "candidate territory UIDs differ from the official provider registry"
+                    )
                 if len(stored) != version.record_count:
                     raise TerritoryCatalogValidationError(
                         "catalogue record count differs from imported metadata"
@@ -480,6 +494,8 @@ class PostgresTerritoryCatalogRepository:
                     raise TerritoryCatalogValidationError(
                         "catalogue reconciliation counts differ from persisted rows"
                     )
+
+                self._advance_alert_poll_fence(poll_row)
 
                 scopes = list(
                     (
@@ -553,6 +569,38 @@ class PostgresTerritoryCatalogRepository:
                     )
                 version.status = "ACTIVE"
                 version.activated_at = now
+
+    def _resolve_expected_region_ids(
+        self,
+        requested: frozenset[str] | None,
+    ) -> frozenset[str] | None:
+        configured = self._expected_region_ids
+        if configured is not None and requested is not None and configured != requested:
+            raise TerritoryRuntimeNotReadyError(
+                "configured territory UIDs differ from the requested provider registry"
+            )
+        return requested if requested is not None else configured
+
+    @staticmethod
+    def _region_ids_match(
+        rows: Sequence[TerritoryDraftRow],
+        expected_region_ids: frozenset[str] | None,
+    ) -> bool:
+        return expected_region_ids is None or frozenset(
+            row.region_id for row in rows
+        ) == expected_region_ids
+
+    def _assert_active_rows_expected(self, rows: Sequence[Territory]) -> None:
+        try:
+            prepared = validate_territory_rows(self._draft(row) for row in rows)
+        except TerritoryCatalogValidationError as error:
+            raise TerritoryRuntimeNotReadyError(
+                "active territory catalogue hierarchy is invalid"
+            ) from error
+        if not self._region_ids_match(prepared, self._expected_region_ids):
+            raise TerritoryRuntimeNotReadyError(
+                "active territory catalogue UIDs differ from the official provider registry"
+            )
 
     @staticmethod
     def _validate_activation_evidence(
@@ -725,6 +773,7 @@ class PostgresTerritoryCatalogRepository:
         )
         if not rows:
             raise RuntimeError("active territory catalogue is empty")
+        self._assert_active_rows_expected(rows)
         return self._resolved_scope(
             provider=provider,
             catalog_version=pointer.catalog_version,
@@ -787,6 +836,7 @@ class PostgresTerritoryCatalogRepository:
             )
         if not rows:
             raise RuntimeError("active territory catalogue is empty")
+        self._assert_active_rows_expected(rows)
         return pointer.catalog_version, rows
 
     @staticmethod

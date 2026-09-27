@@ -143,14 +143,19 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_territory_startup_requires_exact_official_provider_uids(self) -> None:
         readiness = AsyncMock(return_value="reviewed-v1")
         repository = SimpleNamespace(assert_runtime_ready=readiness)
+        factory = object()
+        expected = frozenset(item.uid for item in load_catalog().records)
         with patch(
             "time_tl.infrastructure.db.territories.PostgresTerritoryCatalogRepository",
             return_value=repository,
-        ):
-            active = await _assert_territory_runtime_ready(object())
+        ) as repository_type:
+            active = await _assert_territory_runtime_ready(factory)
 
         self.assertEqual("reviewed-v1", active)
-        expected = frozenset(item.uid for item in load_catalog().records)
+        repository_type.assert_called_once_with(
+            factory,
+            expected_region_ids=expected,
+        )
         readiness.assert_awaited_once_with(
             provider="alerts.in.ua",
             expected_region_ids=expected,
@@ -347,6 +352,10 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     "PostgresTerritoryCatalogRepository",
                     type(territory_catalog).__name__,
+                )
+                self.assertEqual(
+                    frozenset(item.uid for item in load_catalog().records),
+                    territory_catalog._expected_region_ids,
                 )
                 self.assertEqual(
                     "PostgresWorkerHeartbeatRepository",

@@ -9,6 +9,7 @@ from pathlib import Path
 from time_tl.config import Settings
 from time_tl.infrastructure.db.engine import create_engine, create_session_factory
 from time_tl.infrastructure.db.territories import PostgresTerritoryCatalogRepository
+from time_tl.runtime.region_registry_full import load_catalog
 from time_tl.runtime.territory_catalog_builder import build_territory_catalog
 
 
@@ -58,7 +59,11 @@ async def import_territory_catalog(
         "issues": [asdict(item) for item in built.unresolved],
     }
     engine = create_engine(settings.database_url.get_secret_value())
-    repository = PostgresTerritoryCatalogRepository(create_session_factory(engine))
+    official_region_ids = frozenset(record.uid for record in load_catalog().records)
+    repository = PostgresTerritoryCatalogRepository(
+        create_session_factory(engine),
+        expected_region_ids=official_region_ids,
+    )
     try:
         count = await repository.load_draft(
             provider="alerts.in.ua",
@@ -109,7 +114,11 @@ async def activate_territory_catalog(
         raise ValueError("expected unresolved count cannot be negative")
 
     engine = create_engine(settings.database_url.get_secret_value())
-    repository = PostgresTerritoryCatalogRepository(create_session_factory(engine))
+    official_region_ids = frozenset(record.uid for record in load_catalog().records)
+    repository = PostgresTerritoryCatalogRepository(
+        create_session_factory(engine),
+        expected_region_ids=official_region_ids,
+    )
     try:
         await repository.activate(
             provider="alerts.in.ua",

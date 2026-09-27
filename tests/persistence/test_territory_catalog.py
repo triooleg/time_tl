@@ -437,6 +437,61 @@ class ConfirmationFactory:
         return self.session
 
 
+class ActiveReadSession:
+    def __init__(self, rows: Sequence[Territory]) -> None:
+        self.pointer = ActiveTerritoryCatalog(
+            provider="alerts.in.ua",
+            catalog_version="unsafe-v2",
+        )
+        self.version = _catalog_version(status="ACTIVE")
+        self.version.catalog_version = "unsafe-v2"
+        self.rows = rows
+
+    async def __aenter__(self) -> ActiveReadSession:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+    async def get(self, model: type[Any], _identity: Any) -> Any:
+        if model is ActiveTerritoryCatalog:
+            return self.pointer
+        if model is TerritoryCatalogVersion:
+            return self.version
+        raise AssertionError(model)
+
+    async def execute(self, _statement: Any) -> QueueResult:
+        return QueueResult(rows=self.rows)
+
+
+class ActiveReadFactory:
+    def __init__(self, rows: Sequence[Territory]) -> None:
+        self.rows = rows
+
+    def __call__(self) -> ActiveReadSession:
+        return ActiveReadSession(self.rows)
+
+
+@pytest.mark.parametrize(
+    "expected_region_ids",
+    [
+        frozenset({"9", "90"}),
+        frozenset({"9", "90", "901", "999"}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_running_read_path_rejects_unsafe_active_pointer_swap(
+    expected_region_ids: frozenset[str],
+) -> None:
+    repository = PostgresTerritoryCatalogRepository(
+        ActiveReadFactory(_stored_rows()[:3]),  # type: ignore[arg-type]
+        expected_region_ids=expected_region_ids,
+    )
+
+    with pytest.raises(TerritoryRuntimeNotReadyError, match="official provider registry"):
+        await repository.list_top(provider="alerts.in.ua")
+
+
 @pytest.mark.asyncio
 async def test_confirmation_locks_provider_before_same_session_resolve_and_scope_write() -> None:
     provider = "alerts.in.ua"
@@ -568,6 +623,47 @@ async def test_activation_mismatch_aborts_before_scope_read_or_reset() -> None:
     assert "territory_catalog_versions" in session.statements[1]
     assert all("alert_scopes" not in statement for statement in session.statements)
     assert snapshot.state == "ACTIVE"
+
+
+@pytest.mark.parametrize(
+    "expected_region_ids",
+    [
+        frozenset({"9", "90"}),
+        frozenset({"9", "90", "901", "999"}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_activation_rejects_foreign_or_missing_provider_uid(
+    expected_region_ids: frozenset[str],
+) -> None:
+    poll = AlertPollState(singleton_id=1)
+    snapshot = AlertSnapshot(scope_id=uuid4(), state="UNKNOWN")
+    session = ConfirmationSession(
+        [
+            QueueResult(),
+            QueueResult(scalar=_catalog_version()),
+            QueueResult(scalar=poll),
+            QueueResult(rows=_stored_rows()[:3]),
+        ],
+        snapshot,
+    )
+    repository = PostgresTerritoryCatalogRepository(
+        ConfirmationFactory(session),
+        expected_region_ids=expected_region_ids,
+    )
+
+    with pytest.raises(TerritoryCatalogValidationError, match="official provider registry"):
+        await repository.activate(
+            provider="alerts.in.ua",
+            catalog_version="reviewed-v1",
+            expected_source_sha256="a" * 64,
+            expected_record_count=3,
+            expected_unresolved_total=295,
+        )
+
+    assert len(session.statements) == 4
+    assert all("alert_scopes" not in statement for statement in session.statements)
+    assert poll.fetch_revision is None
 
 
 @pytest.mark.asyncio

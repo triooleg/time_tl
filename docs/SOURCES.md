@@ -79,6 +79,9 @@ Only UIDs present in this byte-pinned alerts.in.ua file may be persisted as
 territories or exposed in the Telegram selection tree. KATOTTG-only terms are
 validation/enrichment evidence and never become selectable territory rows.
 
+Activation and every active Telegram read require the exact pinned UID set; an
+extra or missing UID aborts before the active pointer can be used for display.
+
 ## Refresh procedure
 
 1. Fetch the exact official source during an approved source-review task.

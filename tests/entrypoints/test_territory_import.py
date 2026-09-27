@@ -38,8 +38,16 @@ async def test_second_step_activation_uses_existing_draft_without_loading_it(
     calls: list[dict[str, Any]] = []
 
     class FakeRepository:
-        def __init__(self, factory: object) -> None:
+        def __init__(
+            self,
+            factory: object,
+            *,
+            expected_region_ids: frozenset[str],
+        ) -> None:
             assert factory == "factory"
+            assert expected_region_ids == frozenset(
+                record.uid for record in territory_import.load_catalog().records
+            )
 
         async def activate(self, **kwargs: Any) -> None:
             calls.append(kwargs)
@@ -99,8 +107,15 @@ async def test_import_without_activate_persists_draft_only(
     )
 
     class FakeRepository:
-        def __init__(self, _factory: object) -> None:
-            pass
+        def __init__(
+            self,
+            _factory: object,
+            *,
+            expected_region_ids: frozenset[str],
+        ) -> None:
+            assert expected_region_ids == frozenset(
+                record.uid for record in territory_import.load_catalog().records
+            )
 
         async def load_draft(self, **kwargs: Any) -> int:
             calls.append(kwargs)

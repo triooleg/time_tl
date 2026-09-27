@@ -534,7 +534,11 @@ async def postgres_bot_dependencies(
     from time_tl.infrastructure.db.territories import PostgresTerritoryCatalogRepository
 
     await _assert_territory_runtime_ready(factory)
-    territory_catalog = PostgresTerritoryCatalogRepository(factory)
+    official_region_ids = frozenset(record.uid for record in load_catalog().records)
+    territory_catalog = PostgresTerritoryCatalogRepository(
+        factory,
+        expected_region_ids=official_region_ids,
+    )
     region_confirmation = PostgresRegionConfirmationService(factory, territory_catalog)
     from time_tl.infrastructure.db.import_sessions import AsyncPostgresImportSessionAdapter
 
@@ -755,7 +759,11 @@ async def _assert_territory_runtime_ready(factory: Any) -> str:
     from time_tl.infrastructure.db.territories import PostgresTerritoryCatalogRepository
 
     official_region_ids = frozenset(record.uid for record in load_catalog().records)
-    return await PostgresTerritoryCatalogRepository(factory).assert_runtime_ready(
+    repository = PostgresTerritoryCatalogRepository(
+        factory,
+        expected_region_ids=official_region_ids,
+    )
+    return await repository.assert_runtime_ready(
         provider="alerts.in.ua",
         expected_region_ids=official_region_ids,
     )
