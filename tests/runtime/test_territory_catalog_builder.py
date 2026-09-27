@@ -149,6 +149,32 @@ def test_missing_community_fails_closed_and_same_name_is_district_scoped() -> No
     assert reasons["301"] == "missing official community in provider district"
 
 
+def test_katottg_parent_mismatch_cannot_reparent_provider_hromada() -> None:
+    alerts = _catalog(
+        _record("9", "Дніпропетровська область", "Область", 1),
+        _record("42", "Кам'янський район", "Район", 2),
+        _record("300", "Спільна територіальна громада", "Громада", 3),
+        _record("99", "Інший район", "Район", 4),
+        _record("304", "Інша територіальна громада", "Громада", 5),
+    )
+    payload = _payload(
+        _term("UA12000000000090473", "Дніпропетровська", "O"),
+        _term("UA12040000000032213", "Кам’янський", "P", "UA12000000000090473"),
+        _term("UA12060000000000001", "Інший", "P", "UA12000000000090473"),
+        _term("UA12060010000000001", "Спільна", "H", "UA12060000000000001"),
+        _term("UA12060030000000001", "Інша", "H", "UA12060000000000001"),
+    )
+
+    result = build_territory_catalog(payload, alerts_catalog=alerts)
+
+    rows = {row.region_id: row for row in result.rows}
+    assert rows["300"].parent_region_id == "42"
+    assert rows["300"].parent_region_id != "99"
+    assert rows["300"].external_code is None
+    assert not rows["300"].is_selectable
+    assert result.unresolved_uids == ("300",)
+
+
 def test_city_key_selects_one_exact_official_hromada_descendant() -> None:
     alerts = _catalog(
         _record("300", "м. Кам’янське та Кам’янська територіальна громада", "Громада", 3),

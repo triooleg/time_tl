@@ -14,6 +14,7 @@ from time_tl.runtime.region_registry_full import (
     WIRE_RUNTIME,
     FullRegionCatalog,
     HierarchyUnavailableError,
+    LocationRecord,
     RegistryValidationError,
     assert_row_order_hierarchy_is_unambiguous,
     load_catalog,
@@ -63,6 +64,22 @@ class FullRegionRegistryTests(unittest.TestCase):
             "disagrees with canonical provider row order",
         ):
             assert_row_order_hierarchy_is_unambiguous(tampered)
+
+    def test_unexpected_consecutive_root_run_fails_closed(self) -> None:
+        catalog = FullRegionCatalog(
+            (
+                LocationRecord("9", "Перша область", "Область", "", 1),
+                LocationRecord("20", "Друга область", "Область", "", 2),
+                LocationRecord("42", "Тестовий район", "Район", "", 3, "9"),
+            ),
+            "a" * 64,
+        )
+
+        with self.assertRaisesRegex(
+            RegistryValidationError,
+            "ambiguous consecutive root run",
+        ):
+            assert_row_order_hierarchy_is_unambiguous(catalog)
 
     def test_runtime_wiring_stays_fail_closed(self) -> None:
         self.assertFalse(WIRE_RUNTIME)
