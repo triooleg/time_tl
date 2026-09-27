@@ -364,8 +364,17 @@ class AlertsInUaAdapter:
             root = json.loads(decoded)
         except json.JSONDecodeError as error:
             raise SnapshotValidationError("json_invalid") from error
-        if not isinstance(root, dict) or set(root) != {"alerts"}:
-            raise SnapshotValidationError("root_schema_invalid")
+        if not isinstance(root, dict):
+            raise SnapshotValidationError("root_not_object")
+        root_keys = frozenset(root)
+        if "alerts" not in root_keys:
+            raise SnapshotValidationError("root_fields_missing")
+        unknown_root_fields = root_keys - {"alerts"}
+        if unknown_root_fields:
+            raise SnapshotValidationError(
+                "root_fields_unknown",
+                len(unknown_root_fields),
+            )
         alerts = root["alerts"]
         if not isinstance(alerts, list):
             raise SnapshotValidationError("alerts_field_type_invalid")

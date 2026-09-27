@@ -283,7 +283,13 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
         samples = (
-            ({"alerts": [], "unexpected": True}, "root_schema_invalid", 1),
+            ([], "root_not_object", 1),
+            ({}, "root_fields_missing", 1),
+            (
+                {"alerts": [], "unexpected": True, "another": False},
+                "root_fields_unknown",
+                2,
+            ),
             (missing, "alert_fields_missing", 1),
             (active(False), "alert_id_invalid", 1),
             (active(uid="01903"), "location_uid_format_invalid", 1),
