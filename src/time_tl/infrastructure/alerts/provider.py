@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -135,6 +136,15 @@ class AlertsInUaAdapter:
     ENDPOINT = "https://api.alerts.in.ua/v1/alerts/active.json"
     MAX_RESPONSE_BYTES = 1_048_576
     MAX_ALERT_ID = (1 << 63) - 1
+    MAX_DISCLAIMER_CHARS = 4_096
+
+    _BARE_ROOT_FIELDS = frozenset({"alerts"})
+    _ENVELOPE_ROOT_FIELDS = frozenset({"alerts", "meta", "disclaimer"})
+    _META_FIELDS = frozenset({"last_updated_at"})
+    _META_TIMESTAMP_FORMAT = "%Y/%m/%d %H:%M:%S %z"
+    _META_TIMESTAMP_PATTERN = re.compile(
+        r"\A\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}\Z"
+    )
 
     _LOCATION_TYPES = frozenset({"oblast", "raion", "city", "hromada", "unknown"})
     _ALERT_TYPES = frozenset(
@@ -369,12 +379,19 @@ class AlertsInUaAdapter:
         root_keys = frozenset(root)
         if "alerts" not in root_keys:
             raise SnapshotValidationError("root_fields_missing")
-        unknown_root_fields = root_keys - {"alerts"}
+        unknown_root_fields = root_keys - self._ENVELOPE_ROOT_FIELDS
         if unknown_root_fields:
             raise SnapshotValidationError(
                 "root_fields_unknown",
                 len(unknown_root_fields),
             )
+        if root_keys not in {self._BARE_ROOT_FIELDS, self._ENVELOPE_ROOT_FIELDS}:
+            raise SnapshotValidationError(
+                "root_fields_missing",
+                len(self._ENVELOPE_ROOT_FIELDS - root_keys),
+            )
+        if root_keys == self._ENVELOPE_ROOT_FIELDS:
+            self._validate_envelope_metadata(root["meta"], root["disclaimer"])
         alerts = root["alerts"]
         if not isinstance(alerts, list):
             raise SnapshotValidationError("alerts_field_type_invalid")
@@ -464,6 +481,45 @@ class AlertsInUaAdapter:
             separators=(",", ":"),
         ).encode("utf-8")
         return tuple(sorted(parsed)), sha256(canonical).hexdigest()
+
+    @classmethod
+    def _validate_envelope_metadata(cls, meta: object, disclaimer: object) -> None:
+        """Validate the exact envelope consumed by the official Python SDK.
+
+        Metadata is deliberately not returned to the alert state machine. It is
+        validation and content-digest input only, and can never synthesize an
+        ACTIVE or CLEAR observation.
+        """
+
+        if not isinstance(meta, dict):
+            raise SnapshotValidationError("meta_type_invalid")
+        meta_keys = frozenset(meta)
+        if not cls._META_FIELDS.issubset(meta_keys):
+            raise SnapshotValidationError(
+                "meta_fields_missing",
+                len(cls._META_FIELDS - meta_keys),
+            )
+        if not meta_keys.issubset(cls._META_FIELDS):
+            raise SnapshotValidationError(
+                "meta_fields_unknown",
+                len(meta_keys - cls._META_FIELDS),
+            )
+        last_updated_at = meta["last_updated_at"]
+        if not isinstance(last_updated_at, str):
+            raise SnapshotValidationError("meta_last_updated_at_type_invalid")
+        if cls._META_TIMESTAMP_PATTERN.fullmatch(last_updated_at) is None:
+            raise SnapshotValidationError("meta_last_updated_at_format_invalid")
+        try:
+            parsed = datetime.strptime(last_updated_at, cls._META_TIMESTAMP_FORMAT)
+        except ValueError as error:
+            raise SnapshotValidationError("meta_last_updated_at_format_invalid") from error
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise SnapshotValidationError("meta_last_updated_at_timezone_missing")
+
+        if not isinstance(disclaimer, str):
+            raise SnapshotValidationError("disclaimer_type_invalid")
+        if not 1 <= len(disclaimer) <= cls.MAX_DISCLAIMER_CHARS:
+            raise SnapshotValidationError("disclaimer_length_invalid")
 
     @staticmethod
     def _is_canonical_uid(value: object) -> bool:

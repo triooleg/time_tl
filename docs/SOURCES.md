@@ -6,6 +6,8 @@ production alert decisions.
 ## Official active-alert full snapshot
 
 - Documentation: <https://devs.alerts.in.ua/#apialerts_active>
+- Official Python SDK envelope consumer:
+  <https://github.com/alerts-ua/alerts-in-ua-py/blob/master/alerts_in_ua/alerts.py>
 - Endpoint: `https://api.alerts.in.ua/v1/alerts/active.json`
 - Authentication: bearer token stored only as `ALERTS_IN_UA_TOKEN`
 - Scope: all currently active documented threats carrying explicit provider
@@ -20,6 +22,15 @@ compatible catalogue/API location type, documented alert/level/threat enums,
 timezone-aware timestamps and uniqueness. A known non-air row is then excluded
 from Time TL air-raid decisions; an invalid or unknown row of any type invalidates
 the whole snapshot. Both `red` and `yellow` `air_raid` rows are ACTIVE.
+
+Two explicit official root variants are accepted: the documentation example
+containing only `alerts`, and the official SDK envelope containing exactly
+`alerts`, `meta` and `disclaimer`. In the envelope, `meta` contains exactly the
+SDK-consumed `last_updated_at` timestamp in `%Y/%m/%d %H:%M:%S %z` format and
+`disclaimer` is a bounded string. Partial envelopes, unknown root or metadata
+fields, malformed timestamps and invalid disclaimers invalidate the entire
+snapshot. Metadata is never used to infer ACTIVE or CLEAR; it is validation and
+content-digest input only.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful

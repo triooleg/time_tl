@@ -32,7 +32,9 @@ def full_body() -> bytes:
                     "location_uid": "31",
                     "alert_level": "red",
                 }
-            ]
+            ],
+            "meta": {"last_updated_at": "2026/09/24 13:00:00 +0300"},
+            "disclaimer": "Official alerts.in.ua data",
         }
     ).encode()
 
@@ -175,5 +177,33 @@ async def test_probe_reports_unknown_field_count_without_field_or_body_values() 
     assert "kind=INVALID_RESPONSE code=alert_fields_unknown count=1" in message
     assert "private_provider_field" not in message
     assert "must-not-leak" not in message
+    assert "telegram-secret" not in message
+    assert "alerts-secret" not in message
+
+
+@pytest.mark.asyncio
+async def test_probe_rejects_malformed_official_metadata_without_leaking_value() -> None:
+    payload = json.loads(full_body())
+    payload["meta"]["last_updated_at"] = "private-invalid-timestamp"
+
+    class InvalidMetadataTransport:
+        async def send(self, _request: object) -> HttpResponse:
+            return HttpResponse(
+                200,
+                {"Last-Modified": MARKER},
+                json.dumps(payload).encode(),
+            )
+
+    with pytest.raises(OperatorPreflightError, match="full-snapshot") as captured:
+        await probe_candidate(
+            candidate(),
+            123,
+            bot_factory=FakeBot,
+            transport_factory=InvalidMetadataTransport,
+        )
+
+    message = str(captured.value)
+    assert "code=meta_last_updated_at_format_invalid count=1" in message
+    assert "private-invalid-timestamp" not in message
     assert "telegram-secret" not in message
     assert "alerts-secret" not in message

@@ -20,6 +20,7 @@ MARKER_2 = "Sun, 20 Sep 2026 11:00:00 GMT"
 MARKER_3 = "Sun, 20 Sep 2026 12:00:00 GMT"
 SIGNED_INT64_MAX = (1 << 63) - 1
 REGION_TYPES = {"1903": "Громада", "1803": "Район", "16": "Область"}
+META_TIMESTAMP = "2026/09/20 15:00:00 +0300"
 
 
 class Transport:
@@ -68,6 +69,15 @@ def active(
     }
 
 
+def official_envelope(payload=None, *, meta=None, disclaimer="Official alerts.in.ua data"):
+    payload = active() if payload is None else payload
+    return {
+        "alerts": payload["alerts"],
+        "meta": {"last_updated_at": META_TIMESTAMP} if meta is None else meta,
+        "disclaimer": disclaimer,
+    }
+
+
 def adapter(transport):
     return AlertsInUaAdapter(
         token="secret-not-logged",
@@ -78,6 +88,21 @@ def adapter(transport):
 
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_official_sdk_envelope_is_a_complete_snapshot(self):
+        result = await adapter(
+            Transport(
+                response(
+                    200,
+                    official_envelope(),
+                    **{"Last-Modified": MARKER_1},
+                )
+            )
+        ).fetch(fetch_revision=1, last_modified=None)
+
+        self.assertIsNotNone(result.snapshot)
+        assert result.snapshot is not None
+        self.assertEqual("10", result.snapshot.active_episodes[0].episode_id)
+
     async def test_200_uses_bearer_and_strict_full_mapping(self):
         transport = Transport(
             response(200, active(), **{"Last-Modified": "Sun, 20 Sep 2026 12:00:00 GMT"})
@@ -308,6 +333,65 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(code, result.diagnostic_code)
                 self.assertEqual(count, result.diagnostic_count)
 
+    async def test_official_envelope_metadata_is_strict_and_redacted(self):
+        samples = (
+            (
+                {"alerts": [], "meta": {"last_updated_at": META_TIMESTAMP}},
+                "root_fields_missing",
+                1,
+            ),
+            (official_envelope(meta=[]), "meta_type_invalid", 1),
+            (official_envelope(meta={}), "meta_fields_missing", 1),
+            (
+                official_envelope(
+                    meta={"last_updated_at": META_TIMESTAMP, "private": "must-not-leak"}
+                ),
+                "meta_fields_unknown",
+                1,
+            ),
+            (
+                official_envelope(meta={"last_updated_at": 123}),
+                "meta_last_updated_at_type_invalid",
+                1,
+            ),
+            (
+                official_envelope(meta={"last_updated_at": "2026-09-20T12:00:00Z"}),
+                "meta_last_updated_at_format_invalid",
+                1,
+            ),
+            (
+                official_envelope(meta={"last_updated_at": "2026/02/30 12:00:00 +0000"}),
+                "meta_last_updated_at_format_invalid",
+                1,
+            ),
+            (official_envelope(disclaimer=None), "disclaimer_type_invalid", 1),
+            (official_envelope(disclaimer=""), "disclaimer_length_invalid", 1),
+            (
+                official_envelope(
+                    disclaimer="x" * (AlertsInUaAdapter.MAX_DISCLAIMER_CHARS + 1)
+                ),
+                "disclaimer_length_invalid",
+                1,
+            ),
+            (
+                {**official_envelope(), "unknown": "must-not-leak"},
+                "root_fields_unknown",
+                1,
+            ),
+        )
+
+        for payload, code, count in samples:
+            with self.subTest(code=code):
+                result = await adapter(
+                    Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
+                ).fetch(fetch_revision=1, last_modified=None)
+                self.assertEqual(code, result.diagnostic_code)
+                self.assertEqual(count, result.diagnostic_count)
+                summary = result.sanitized_failure()
+                assert summary is not None
+                self.assertNotIn("must-not-leak", summary)
+                self.assertNotIn(META_TIMESTAMP, summary)
+
     async def test_marker_regression_and_same_marker_changed_content_are_invalid(self):
         regression_provider = adapter(
             Transport(
@@ -445,6 +529,38 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             Transport(response(200, unknown, **{"Last-Modified": MARKER_2}))
         ).run_once()
         self.assertEqual(AlertState.STALE, (await self.repo.snapshot_for("student-1")).state)
+        self.assertFalse(
+            any(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await self.repo.outbox()
+            )
+        )
+
+    async def test_invalid_official_metadata_after_active_is_stale_never_clear(self):
+        await self.worker(
+            Transport(
+                response(
+                    200,
+                    official_envelope(),
+                    **{"Last-Modified": MARKER_1},
+                )
+            )
+        ).run_once()
+        invalid_empty = official_envelope(
+            {"alerts": []},
+            meta={"last_updated_at": "not-an-official-timestamp"},
+        )
+
+        for marker in (MARKER_2, MARKER_3):
+            self.clock += 15
+            await self.worker(
+                Transport(response(200, invalid_empty, **{"Last-Modified": marker}))
+            ).run_once()
+            self.assertEqual(
+                AlertState.STALE,
+                (await self.repo.snapshot_for("student-1")).state,
+            )
+
         self.assertFalse(
             any(
                 item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
