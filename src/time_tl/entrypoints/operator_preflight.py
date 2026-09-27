@@ -10,9 +10,10 @@ from typing import Any
 from time_tl.admin.settings import ActivationCandidate, OwnerSettingsService
 from time_tl.config import AdminBackend, Environment, Settings
 from time_tl.domain.alerts import ProviderSnapshotKind
-from time_tl.infrastructure.alerts import OblastAlertsInUaAdapter
+from time_tl.infrastructure.alerts import FullTerritoryAlertsInUaAdapter
 from time_tl.runtime.contracts import RuntimeContractError
 from time_tl.runtime.httpx_transport import HttpxTransport
+from time_tl.runtime.region_registry_full import EXPECTED_RECORD_COUNT, load_catalog
 
 
 class OperatorPreflightError(RuntimeError):
@@ -77,9 +78,12 @@ async def probe_candidate(
     if not telegram_ok:
         raise OperatorPreflightError("Telegram identity is not a named bot")
 
-    adapter = OblastAlertsInUaAdapter(
+    catalog_region_uids = tuple(item.uid for item in load_catalog().records)
+    expected_coverage = frozenset(catalog_region_uids)
+    adapter = FullTerritoryAlertsInUaAdapter(
         token=candidate.alerts_in_ua_token.get_secret_value(),
         transport=transport_factory(),
+        region_uids=catalog_region_uids,
     )
     result = await adapter.fetch(fetch_revision=1, last_modified=None)
     snapshot = result.snapshot
@@ -89,7 +93,8 @@ async def probe_candidate(
         or snapshot.kind is not ProviderSnapshotKind.FULL_200
         or not snapshot.is_complete
         or not snapshot.is_fresh
-        or snapshot.covered_region_ids != OblastAlertsInUaAdapter.COVERED_REGION_IDS
+        or snapshot.covered_region_ids != expected_coverage
+        or len(snapshot.covered_region_ids) != EXPECTED_RECORD_COUNT
         or not result.last_modified
     ):
         raise OperatorPreflightError("alerts.in.ua full-snapshot preflight failed")
@@ -114,10 +119,7 @@ async def preflight_owner_settings(
         raise RuntimeContractError("owner settings preflight requires PostgreSQL admin backend")
     if settings.environment is not Environment.STAGING:
         raise RuntimeContractError("owner settings preflight must run with TIME_TL_ENV=staging")
-    if (
-        settings.owner_telegram_fernet_key is None
-        or settings.owner_alerts_fernet_key is None
-    ):
+    if settings.owner_telegram_fernet_key is None or settings.owner_alerts_fernet_key is None:
         raise RuntimeContractError("owner settings preflight requires both encryption keys")
 
     from aiogram import Bot

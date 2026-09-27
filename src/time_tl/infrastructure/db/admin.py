@@ -52,6 +52,8 @@ class AsyncPostgresAdminRepository:
     _OWNER_STATE_KEY = "owner_configuration_state"
     _OWNER_DRAFT_KEY = "owner_configuration_draft"
     _OWNER_ACTIVE_KEY = "owner_configuration_active"
+    _OWNER_PREVIOUS_ACTIVE_KEY = "owner_configuration_previous_active"
+    _OWNER_ACTIVATION_STATUS_KEY = "owner_configuration_activation_status"
 
     def __init__(self, factory: async_sessionmaker[AsyncSession], *, ip_hash_key: bytes) -> None:
         if len(ip_hash_key) < 32:
@@ -308,15 +310,14 @@ class AsyncPostgresAdminRepository:
                     "staging_allowlist": "staging_allowlist_presence",
                     "telegram_token_ciphertext": "telegram_token_presence",
                     "alerts_in_ua_token_ciphertext": "alerts_in_ua_token_presence",
+                    "onboarding_text": "onboarding_text",
                 }
                 changed_fields = [
                     audit_name
                     for field, audit_name in audit_names.items()
                     if previous.get(field) != draft.get(field)
                 ]
-                await self._upsert_runtime_setting(
-                    session, self._OWNER_DRAFT_KEY, draft, actor
-                )
+                await self._upsert_runtime_setting(session, self._OWNER_DRAFT_KEY, draft, actor)
                 state.update(
                     {
                         "latest_revision": revision,
@@ -324,9 +325,7 @@ class AsyncPostgresAdminRepository:
                         "active_revision": state.get("active_revision"),
                     }
                 )
-                await self._upsert_runtime_setting(
-                    session, self._OWNER_STATE_KEY, state, actor
-                )
+                await self._upsert_runtime_setting(session, self._OWNER_STATE_KEY, state, actor)
                 session.add(
                     AuditLog(
                         actor=actor,
@@ -381,9 +380,13 @@ class AsyncPostgresAdminRepository:
         return await self.owner_settings_bundle()
 
     async def mark_owner_settings_active(
-        self, revision: int, actor: str, evidence_id: str
+        self,
+        revision: int,
+        actor: str,
+        evidence_id: str,
+        evidence_summary: dict[str, int | str] | None = None,
     ) -> OwnerSettingsBundle:
-        """Operator-only gate; the browser has no route to this method."""
+        """Activate one preflighted revision and retain one rollback target."""
 
         async with self._factory() as session:
             async with session.begin():
@@ -404,8 +407,35 @@ class AsyncPostgresAdminRepository:
                     or int(draft.value.get("revision", 0)) != revision
                 ):
                     raise OwnerSettingsConflictError("Версия не ожидает активации.")
+                current_active = await session.get(RuntimeSetting, self._OWNER_ACTIVE_KEY)
+                if current_active is not None:
+                    await self._upsert_runtime_setting(
+                        session,
+                        self._OWNER_PREVIOUS_ACTIVE_KEY,
+                        dict(current_active.value),
+                        actor,
+                    )
                 await self._upsert_runtime_setting(
                     session, self._OWNER_ACTIVE_KEY, dict(draft.value), actor
+                )
+                safe_summary = {
+                    key: value
+                    for key, value in (evidence_summary or {}).items()
+                    if key in {"check_profile", "covered_region_count", "allowlist_count"}
+                    and isinstance(value, (str, int))
+                    and not isinstance(value, bool)
+                }
+                activation_status = {
+                    "revision": revision,
+                    "result": "passed",
+                    "evidence_id": evidence_id,
+                    **safe_summary,
+                }
+                await self._upsert_runtime_setting(
+                    session,
+                    self._OWNER_ACTIVATION_STATUS_KEY,
+                    activation_status,
+                    actor,
                 )
                 state["active_revision"] = revision
                 state["pending_revision"] = None
@@ -419,10 +449,95 @@ class AsyncPostgresAdminRepository:
                         target_type="owner_configuration",
                         target_id=str(revision),
                         redacted_details={
+                            "evidence_id": evidence_id,
                             "evidence_id_sha256": hashlib.sha256(
                                 evidence_id.encode("utf-8")
-                            ).hexdigest()
+                            ).hexdigest(),
+                            **safe_summary,
                         },
+                    )
+                )
+        return await self.owner_settings_bundle()
+
+    async def record_owner_settings_preflight_failure(
+        self, revision: int, actor: str, failure_code: str
+    ) -> OwnerSettingsBundle:
+        safe_code = (
+            failure_code
+            if failure_code
+            in {
+                "telegram_get_me_failed",
+                "alerts_full_snapshot_failed",
+                "preflight_failed",
+            }
+            else "preflight_failed"
+        )
+        async with self._factory() as session:
+            async with session.begin():
+                await self._lock_owner_settings(session)
+                await self._upsert_runtime_setting(
+                    session,
+                    self._OWNER_ACTIVATION_STATUS_KEY,
+                    {"revision": revision, "result": "failed", "failure_code": safe_code},
+                    actor,
+                )
+                session.add(
+                    AuditLog(
+                        actor=actor,
+                        action="owner_configuration_preflight_failed",
+                        result="failure",
+                        target_type="owner_configuration",
+                        target_id=str(revision),
+                        redacted_details={"failure_code": safe_code},
+                    )
+                )
+        return await self.owner_settings_bundle()
+
+    async def rollback_owner_settings_active(
+        self, expected_active_revision: int, actor: str
+    ) -> OwnerSettingsBundle:
+        async with self._factory() as session:
+            async with session.begin():
+                await self._lock_owner_settings(session)
+                state_row = await session.get(RuntimeSetting, self._OWNER_STATE_KEY)
+                active_row = await session.get(RuntimeSetting, self._OWNER_ACTIVE_KEY)
+                previous_row = await session.get(RuntimeSetting, self._OWNER_PREVIOUS_ACTIVE_KEY)
+                if state_row is None or active_row is None or previous_row is None:
+                    raise OwnerSettingsConflictError("Немає попередньої активної версії.")
+                state = dict(state_row.value)
+                if int(state.get("active_revision", 0)) != expected_active_revision:
+                    raise OwnerSettingsConflictError("Активна версія змінилася. Оновіть сторінку.")
+                current = dict(active_row.value)
+                previous = dict(previous_row.value)
+                previous_revision = int(previous.get("revision", 0))
+                if previous_revision <= 0:
+                    raise OwnerSettingsConflictError("Попередня версія пошкоджена.")
+                active_row.value = previous
+                active_row.updated_by = actor
+                previous_row.value = current
+                previous_row.updated_by = actor
+                state["active_revision"] = previous_revision
+                state["pending_revision"] = None
+                state_row.value = state
+                state_row.updated_by = actor
+                await self._upsert_runtime_setting(
+                    session,
+                    self._OWNER_ACTIVATION_STATUS_KEY,
+                    {
+                        "revision": previous_revision,
+                        "result": "rolled_back",
+                        "from_revision": expected_active_revision,
+                    },
+                    actor,
+                )
+                session.add(
+                    AuditLog(
+                        actor=actor,
+                        action="owner_configuration_rolled_back",
+                        result="success",
+                        target_type="owner_configuration",
+                        target_id=str(previous_revision),
+                        redacted_details={"from_revision": expected_active_revision},
                     )
                 )
         return await self.owner_settings_bundle()
@@ -448,6 +563,8 @@ class AsyncPostgresAdminRepository:
         state_row = await session.get(RuntimeSetting, self._OWNER_STATE_KEY)
         draft_row = await session.get(RuntimeSetting, self._OWNER_DRAFT_KEY)
         active_row = await session.get(RuntimeSetting, self._OWNER_ACTIVE_KEY)
+        previous_active_row = await session.get(RuntimeSetting, self._OWNER_PREVIOUS_ACTIVE_KEY)
+        activation_status_row = await session.get(RuntimeSetting, self._OWNER_ACTIVATION_STATUS_KEY)
         state = dict(state_row.value) if state_row else {}
         return OwnerSettingsBundle(
             draft=dict(draft_row.value) if draft_row else None,
@@ -459,12 +576,14 @@ class AsyncPostgresAdminRepository:
                 else None
             ),
             active_revision=(
-                int(state["active_revision"])
-                if state.get("active_revision") is not None
-                else None
+                int(state["active_revision"]) if state.get("active_revision") is not None else None
             ),
             updated_by=draft_row.updated_by if draft_row else None,
             updated_at=draft_row.updated_at if draft_row else None,
+            previous_active=(dict(previous_active_row.value) if previous_active_row else None),
+            activation_status=(
+                dict(activation_status_row.value) if activation_status_row else None
+            ),
         )
 
     async def dashboard_aggregates(self) -> dict[str, Any]:

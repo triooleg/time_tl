@@ -22,6 +22,10 @@ class AsyncAccounts:
     async def get_or_create(self, user_id: int) -> UserAccount:
         return copy.deepcopy(self.accounts.setdefault(user_id, UserAccount(user_id)))
 
+    async def get_existing(self, user_id: int) -> UserAccount | None:
+        account = self.accounts.get(user_id)
+        return copy.deepcopy(account) if account is not None else None
+
     async def save(self, account: UserAccount) -> None:
         self.accounts[account.user_id] = copy.deepcopy(account)
 
@@ -128,11 +132,22 @@ SNAPSHOT = (
     '"source_display_label":"classmate","included_fields":[]},'
     '"profile":{"name":"8-A","timezone":"Europe/Kyiv","rules":[],"overrides":[]}}'
 )
+SNAPSHOT_WITH_LINK = (
+    '{"schema_version":"1.0","metadata":{"template_name":"8-A",'
+    '"created_at":"2026-09-20T00:00:00+00:00",'
+    '"source_display_label":"classmate","included_fields":["join_links"]},'
+    '"profile":{"name":"8-A","timezone":"Europe/Kyiv","rules":'
+    '[{"weekday":0,"week_parity":"ANY","date_parity":"ANY",'
+    '"valid_from":null,"valid_to":null,"lessons":'
+    '[{"start":"09:00","end":"09:45","title":"Math","enabled":true,'
+    '"join_url":"https://school.example/private"}]}],"overrides":[]}}'
+)
 
 
 class DurableImportRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.accounts = AsyncAccounts()
+        self.accounts.accounts[101] = UserAccount(101)
         self.sessions: dict[str, Stored] = {}
 
     def app(self) -> DurableAsyncTelegramApplication:
@@ -176,11 +191,47 @@ class DurableImportRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Profile 1", names)
         self.assertIn("8-A", names)
 
+    async def test_without_links_choice_survives_replacement_restart(self) -> None:
+        self.accounts.accounts[101] = UserAccount(
+            101,
+            profiles={
+                f"p{i}": ScheduleProfile(f"p{i}", f"Profile {i}", active=i == 0) for i in range(3)
+            },
+        )
+        first = self.app()
+        import_token, _ = await first.preview_import(101, SNAPSHOT_WITH_LINK)
+        replacement_token, _ = await first.request_import_replacement(
+            101,
+            import_token,
+            "p1",
+            confirm_links=False,
+        )
+
+        await self.app().confirm_import_replacement(101, replacement_token)
+
+        imported = next(
+            item for item in self.accounts.accounts[101].profiles.values() if item.name == "8-A"
+        )
+        self.assertIsNone(imported.rules[0].lessons[0].join_url)
+
+    async def test_explicit_link_confirmation_retains_link(self) -> None:
+        token, _ = await self.app().preview_import(101, SNAPSHOT_WITH_LINK)
+
+        await self.app().confirm_import(101, token, confirm_links=True)
+
+        imported = next(iter(self.accounts.accounts[101].profiles.values()))
+        self.assertEqual(
+            imported.rules[0].lessons[0].join_url,
+            "https://school.example/private",
+        )
+
     async def test_token_is_bound_to_telegram_user(self) -> None:
         token, _ = await self.app().preview_import(101, SNAPSHOT)
+        attacker = self.app()
+        await attacker.start(202)
         with self.assertRaisesRegex(ConfirmationError, "missing"):
-            await self.app().confirm_import(202, token)
-        self.assertNotIn(202, self.accounts.accounts)
+            await attacker.confirm_import(202, token)
+        self.assertEqual({}, self.accounts.accounts[202].profiles)
 
 
 if __name__ == "__main__":

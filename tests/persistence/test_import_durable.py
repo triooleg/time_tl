@@ -11,6 +11,7 @@ from sqlalchemy.dialects import postgresql
 
 from time_tl.domain.schedule import Lesson, ScheduleProfile, ScheduleRule
 from time_tl.domain.schedule.profiles import ConfirmationError
+from time_tl.domain.schedule.sessions import ImportSessionLimitExceeded
 from time_tl.domain.schedule.snapshots import export_snapshot
 from time_tl.infrastructure.db import import_sessions as import_session_module
 from time_tl.infrastructure.db.codec import FernetLessonLinkCodec
@@ -28,6 +29,9 @@ class ScalarResult:
         self.value = value
 
     def scalar_one_or_none(self):
+        return self.value
+
+    def scalar_one(self):
         return self.value
 
 
@@ -87,6 +91,29 @@ class ReplacementSession:
 
     async def get(self, _model, key):
         return self.profile if key == self.profile.id else None
+
+
+class CapacitySession:
+    def __init__(self, owner, *, user_tokens=(), global_count=0):
+        self.owner = owner
+        self.user_tokens = tuple(user_tokens)
+        self.global_count = global_count
+        self.added = []
+        self.statements = []
+
+    def add(self, row):
+        self.added.append(row)
+
+    async def execute(self, statement):
+        self.statements.append(statement)
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        if "pg_advisory_xact_lock" in sql:
+            return ScalarResult(None)
+        if "FROM users" in sql:
+            return ScalarResult(self.owner)
+        if "count(" in sql.casefold():
+            return ScalarResult(self.global_count)
+        return ScalarRows(self.user_tokens)
 
 
 class CleanupSession:
@@ -276,11 +303,20 @@ class DurableImportRepositoryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ConfirmationError, "oversized"):
             sanitize_proposal_payload(oversized)
 
+        oversized_label = proposal_payload()
+        oversized_label["metadata"]["source_display_label"] = "x" * 161
+        with self.assertRaisesRegex(ConfirmationError, "source label"):
+            sanitize_proposal_payload(oversized_label)
+
+        naive_created_at = proposal_payload()
+        naive_created_at["metadata"]["created_at"] = "2026-09-21T10:00:00"
+        with self.assertRaisesRegex(ConfirmationError, "timezone-aware"):
+            sanitize_proposal_payload(naive_created_at)
+
     async def test_create_stores_hashes_and_detached_sanitized_payload(self):
-        added = []
-        session = SimpleNamespace(add=added.append)
-        repo = PostgresImportSessionRepository(session, self.codec)
         owner = uuid4()
+        session = CapacitySession(owner)
+        repo = PostgresImportSessionRepository(session, self.codec)
         payload = proposal_payload()
         before = datetime.now(UTC)
         await repo.create(
@@ -290,7 +326,7 @@ class DurableImportRepositoryTests(unittest.IsolatedAsyncioTestCase):
             expires_at=None,
             proposal_payload=payload,
         )
-        stored = added[0]
+        stored = session.added[0]
         self.assertEqual(stored.token_hash, digest_secret("secret-token"))
         self.assertEqual(stored.fingerprint_hash, digest_secret("fingerprint"))
         self.assertNotIn("secret-token", str(stored.proposal_payload))
@@ -315,9 +351,9 @@ class DurableImportRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(ConfirmationError) as raised:
-            await PostgresImportSessionRepository(
-                OwnerAwareSession(row), self.codec
-            ).load(token="token", now=now, expected_user_id=owner)
+            await PostgresImportSessionRepository(OwnerAwareSession(row), self.codec).load(
+                token="token", now=now, expected_user_id=owner
+            )
 
         self.assertEqual(str(raised.exception), "import proposal could not be verified")
         self.assertNotIn("SENSITIVE-MARKER", str(raised.exception))
@@ -346,24 +382,64 @@ class DurableImportRepositoryTests(unittest.IsolatedAsyncioTestCase):
         now = datetime.now(UTC)
         owner = uuid4()
         payload = proposal_payload(with_link=False)
-        added = []
-        await PostgresImportSessionRepository(
-            SimpleNamespace(add=added.append), self.codec
-        ).create(
+        session = CapacitySession(owner)
+        await PostgresImportSessionRepository(session, self.codec).create(
             token="token",
             user_id=owner,
             fingerprint="fingerprint",
             expires_at=now + timedelta(minutes=10),
             proposal_payload=payload,
         )
-        row = added[0]
+        row = session.added[0]
 
-        restored = await PostgresImportSessionRepository(
-            OwnerAwareSession(row), self.codec
-        ).load(token="token", now=now, expected_user_id=owner)
+        restored = await PostgresImportSessionRepository(OwnerAwareSession(row), self.codec).load(
+            token="token", now=now, expected_user_id=owner
+        )
 
         self.assertEqual(restored.payload, sanitize_proposal_payload(payload))
         self.assertNotIn("join_url", str(row.proposal_payload))
+
+    async def test_pending_capacity_survives_restart_and_rejects_fourth_user_session(self):
+        owner = uuid4()
+        session = CapacitySession(owner, user_tokens=("one", "two", "three"))
+        before_restart = PostgresImportSessionRepository(session, self.codec)
+        self.assertIsNotNone(before_restart)
+        repo = PostgresImportSessionRepository(session, self.codec)
+
+        with self.assertRaises(ImportSessionLimitExceeded) as raised:
+            await repo.create(
+                token="four",
+                user_id=owner,
+                fingerprint="fingerprint",
+                expires_at=None,
+                proposal_payload=proposal_payload(),
+            )
+
+        self.assertEqual(raised.exception.scope, "user")
+        self.assertEqual(raised.exception.limit, 3)
+        self.assertEqual(session.added, [])
+        compiled = [str(item.compile(dialect=postgresql.dialect())) for item in session.statements]
+        self.assertIn("pg_advisory_xact_lock", compiled[0])
+        self.assertIn("FOR UPDATE", compiled[1])
+        self.assertIn("FOR UPDATE", compiled[2])
+
+    async def test_global_pending_capacity_fails_with_typed_backpressure(self):
+        owner = uuid4()
+        session = CapacitySession(owner, global_count=1_000)
+        repo = PostgresImportSessionRepository(session, self.codec)
+
+        with self.assertRaises(ImportSessionLimitExceeded) as raised:
+            await repo.create(
+                token="global-full",
+                user_id=owner,
+                fingerprint="fingerprint",
+                expires_at=None,
+                proposal_payload=proposal_payload(),
+            )
+
+        self.assertEqual(raised.exception.scope, "global")
+        self.assertEqual(raised.exception.limit, 1_000)
+        self.assertEqual(session.added, [])
 
     async def test_expired_cleanup_is_bounded_and_deletes_selected_rows(self):
         now = datetime(2026, 9, 21, 8, tzinfo=UTC)
@@ -378,6 +454,9 @@ class DurableImportRepositoryTests(unittest.IsolatedAsyncioTestCase):
         sql = str(session.statements[0].compile(dialect=postgresql.dialect()))
         self.assertIn("LIMIT", sql)
         self.assertIn("FOR UPDATE SKIP LOCKED", sql)
+        self.assertIn("revoked_at IS NOT NULL", sql)
+        self.assertIn("consumed_at IS NOT NULL", sql)
+        self.assertIn("created_at <=", sql)
         with self.assertRaisesRegex(ValueError, "between 1 and 100"):
             await repo.purge_expired(now, limit=101)
 

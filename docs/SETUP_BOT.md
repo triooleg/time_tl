@@ -1,53 +1,85 @@
 # Настройка и подключение Time TL
 
-## Статус на 2026-09-23
+## Текущий статус кандидата
 
-Бот, PostgreSQL-репозитории, alert/schedule/sender workers и административная
-панель реализованы и проверены локальными тестами. Развёртывание не выполнялось.
-Production намеренно заблокирован capability gates: нет одобренного георезолвера,
-production-разрешения для областного provider scope, staging evidence и разрешения
-на точную версию.
+Time TL реализует публичный Telegram UX, PostgreSQL-репозитории, единичные
+`alert-worker`, `schedule-worker` и `sender-worker`, а также административную
+панель. Текущий head миграций — `0006_outbox_terminal_retention`.
 
-Сейчас пользователь может вручную выбрать и подтвердить область. Отправленная
-Telegram-геолокация не преобразуется в регион: resolver возвращает отказ, а сырые
-координаты не сохраняются. Не называйте это готовой геолокацией.
+Локальные и изолированные серверные проверки текущего кандидата записаны в
+[RELEASE_EVIDENCE_2026-09-27.md](RELEASE_EVIDENCE_2026-09-27.md). Эти проверки не
+означают, что кандидат уже установлен в рабочий STAGING или выпущен в PRODUCTION.
+Компилируемый production-переключатель `PRODUCTION_PUBLIC_RELEASE_APPROVED` остаётся
+`False`, поэтому production-роли должны завершаться fail closed.
 
-## Что потребуется для staging
+## Что умеет бот
+
+Пользователь самостоятельно работает с ботом через inline-меню:
+
+- выбирает один из трёх режимов: «Лише уроки», «Уроки + тривоги» или
+  «Лише тривоги»;
+- выбирает территорию из сохранённого в PostgreSQL дерева
+  **область → район → громада**;
+- создаёт до трёх расписаний и выбирает одно активное;
+- добавляет уроки на любое время, парность дней и недель, выходные и исключения
+  для отдельных дат;
+- включает и выключает уроки, меняет их название и время или удаляет их;
+- экспортирует расписание и импортирует чужое только после проверки и
+  подтверждения;
+- настраивает напоминание и открывает справку «Як це працює»;
+- безвозвратно удаляет свой Telegram ID и все принадлежащие ему данные через
+  двухэтапное подтверждение.
+
+Геолокация сейчас не используется и не сохраняется: бот предлагает ручной выбор
+территории. У существующих пользователей с сохранённой областью остаётся
+совместимый областной scope, пока они сами не выберут более точную территорию.
+
+## Каталог территорий и официальные тревоги
+
+Список UID alerts.in.ua проверяется по закреплённому официальному экспорту, но
+плоский список UID сам по себе не доказывает родительские связи. Иерархия строится
+из проверенного снимка КАТОТТГ, сохраняется как неизменяемый DRAFT в PostgreSQL и
+активируется отдельно только после сверки количества строк, unresolved-записей и
+SHA-256. Telegram читает уже активную версию дерева из БД; списки областей,
+районов и громад в меню не хардкодятся.
+
+Единственный `alert-worker` получает полный снимок UID через официальный endpoint:
+
+`https://api.alerts.in.ua/v1/iot/active_air_raid_alerts.json`
+
+Для выбранной территории применяется проверенная иерархия. `A` у самой территории
+или её родителя означает применимую тревогу. `P` у родителя не считается тревогой
+для каждой дочерней громады; `P` у самой выбранной территории обрабатывается
+консервативно как активное состояние. Одновременные совпадения дедуплицируются до
+одного уведомления пользователю.
+
+Timeout, `401/403`, `429`, `5xx`, неизвестный UID, пустой/неполный ответ,
+просроченный TTL и restart никогда не означают отбой. Состояние становится
+`UNKNOWN` или `STALE`; новый `CLEAR_CONFIRMED` допустим только после валидной
+последовательности полных снимков.
+
+Чтобы не превышать лимиты, запрос выполняет один singleton-poller для всех
+пользователей. Минимальный интервал — 15 секунд; лимитер не допускает накопления
+burst. Один `sender-worker` учитывает `Retry-After`, останавливает batch после
+Telegram `429` и возвращает неотправленный хвост очереди без увеличения attempts.
+
+## Что потребуется для STAGING
 
 - отдельный Telegram-бот от `@BotFather`;
 - отдельный токен alerts.in.ua для Time TL;
 - PostgreSQL 16;
-- стабильный Fernet-ключ для ссылок на уроки;
-- стабильный ключ хеширования IP панели длиной не менее 32 байт;
+- стабильные отдельные Fernet-ключи для Telegram token, alerts.in.ua token и
+  ссылок на уроки;
+- стабильный `ADMIN_IP_HASH_KEY` длиной не менее 32 байт;
 - утверждённый список тестовых Telegram chat ID;
-- HTTPS и проверенная trusted-proxy policy для панели;
-- immutable image с записанными commit, digest и Alembic revision.
+- HTTPS и точный `ADMIN_TRUSTED_PROXY_CIDRS` для проверенного reverse proxy;
+- immutable image с точными commit, tag, digest и Alembic revision;
+- проверенные backup, restore и rollback для рабочего STAGING.
 
 Не переносите токены, SSH-пароли или пароли БД из других проектов. Не публикуйте
-секреты в Git, чатах, логах, screenshots, build args или документации.
+секреты в Git, чатах, логах, скриншотах, build args или документации.
 
-## Официальные тревоги
-
-Единственный серверный `alert-worker` обращается к официальному endpoint:
-
-`https://api.alerts.in.ua/v1/iot/active_air_raid_alerts_by_oblast.json`
-
-Ответ — JSON-строка ровно из 27 символов в официальном порядке. `A` означает
-тревогу по всей области, `P` — тревогу в части районов/громад; оба значения считаются
-ACTIVE для выбранной области. `N` допускается только после полной строгой проверки.
-
-Защита от лимитов и ложного отбоя:
-
-- один poller для всех пользователей, а не запрос на каждого ученика;
-- интервал не меньше 15 секунд, нормальная частота — до 4 запросов в минуту;
-- отдельный лимит 5 запросов в минуту без накопления burst;
-- `If-Modified-Since` используется только с проверенным baseline;
-- snapshot, outbox, fetch revision и `Last-Modified` фиксируются атомарно;
-- response body читается потоково и ограничен 4096 байтами;
-- timeout, `401/403`, `429`, `5xx`, неверная длина/символ, stale/partial response
-  никогда не означают отбой.
-
-## Локальная установка
+## Локальная установка и проверки
 
 ```powershell
 py -3.12 -m venv .venv
@@ -57,13 +89,15 @@ python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 ```
 
-Для безопасной локальной симуляции используйте только заглушки:
+Для безопасной локальной симуляции используйте fake provider, отключённый
+Telegram и локальный backend панели. Значения `DATABASE_URL` и `POSTGRES_*` в
+`.env` должны быть только локальными и согласованными с Compose; `.env` не
+добавляется в Git.
 
 ```dotenv
 TIME_TL_ENV=simulation
 ALERT_PROVIDER=fake
 TELEGRAM_TRANSPORT=disabled
-ALLOW_SCAFFOLD_SERVICES=true
 ADMIN_BACKEND=local_sqlite
 ADMIN_COOKIE_SECURE=false
 ALERT_POLL_INTERVAL_SECONDS=15
@@ -73,14 +107,10 @@ ALERT_RATE_LIMIT_BURST=1
 SENDER_TRANSPORT_TIMEOUT_SECONDS=8
 ```
 
-`DATABASE_URL`, `POSTGRES_*` всё равно должны содержать согласованные локальные
-значения для Compose. `.env` не должен попадать в Git.
-
-## Локальные проверки
+Основные проверки:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m unittest discover -s tests -q
 .\.venv\Scripts\ruff.exe check .
 .\.venv\Scripts\mypy.exe --strict src
 .\.venv\Scripts\python.exe -m compileall -q src tests migrations
@@ -89,101 +119,80 @@ node --check src/time_tl/admin/static/admin.js
 docker compose config
 ```
 
-Записанное 2026-09-23 evidence: pytest 241 PASS + 1 opt-in PostgreSQL E2E SKIP,
-unittest 233 tests + тот же 1 SKIP, Ruff PASS, strict
-mypy PASS для 66 source files, compileall PASS, Alembic offline PASS, Compose
-восемь services, JavaScript syntax PASS. Это LOCAL evidence, а не доказательство
-работы контейнеров или сервера.
+## Миграции и каталог территорий
 
-## Миграции
-
-Миграции запускаются отдельным профилем и не стартуют одновременно во всех workers:
+Миграции выполняются отдельной one-off ролью до запуска нового приложения:
 
 ```bash
 docker compose --profile ops run --rm migrate
 ```
 
-Перед staging обязательны backup, проверенный restore в отдельную БД, фиксация
-исходной/целевой Alembic revision и тест повторного безопасного запуска. Offline SQL
-generation не заменяет реальную миграцию PostgreSQL.
+После команды нужно проверить `alembic current`; ожидаемый head текущего кандидата:
 
-## Runtime services
-
-Compose описывает восемь services: `bot`, `alert-worker`, `schedule-worker`,
-`sender-worker`, `admin-web`, `migrate`, `node-exporter`, `postgres`.
-
-PostgreSQL adapters, реальные schedule/sender loops, transactional outbox,
-heartbeats и агрегаты панели присутствуют. Однако production capability flags для
-schedule/sender всё ещё закрыты. Не включайте их вручную: флаг открывается только
-после PostgreSQL restart/fault evidence и независимого safety review.
-
-Для sender задан ограниченный transport timeout:
-
-```dotenv
-SENDER_TRANSPORT_TIMEOUT_SECONDS=8
+```text
+0006_outbox_terminal_retention
 ```
 
-Допустимый диапазон — больше 0 и не более 10 секунд. Compose явно передаёт эту
-переменную через общий environment; release default — 8 секунд.
+Перед миграцией рабочего STAGING обязательны полный backup, restore rehearsal в
+отдельной БД, запись исходной и целевой revision и проверенный rollback. Offline
+SQL и успешный старт контейнера этого не заменяют.
 
-## Подготовка staging
+Импорт каталога территорий — отдельная операторская операция. Сначала создаётся
+DRAFT из заранее полученного и проверенного КАТОТТГ JSON, затем оператор сверяет
+санитизированный результат и активирует именно этот immutable draft с ожидаемыми
+SHA-256, числом строк и unresolved-записей. Команды нельзя выполнять с
+предполагаемыми значениями или прямо по непроверенному сетевому ответу.
 
-Staging допускается только с отдельным ботом и allowlist:
+## Настройка через административную панель
 
-```dotenv
-TIME_TL_ENV=staging
-OWNER_CONFIG_SOURCE=database
-OWNER_TELEGRAM_FERNET_KEY=SECRET_FERNET_KEY_FOR_TELEGRAM
-OWNER_ALERTS_FERNET_KEY=DIFFERENT_SECRET_FERNET_KEY_FOR_ALERTS
-DATABASE_URL=postgresql+asyncpg://...
-LESSON_LINK_FERNET_KEY=SECRET
-ADMIN_BACKEND=postgres
-ADMIN_IP_HASH_KEY=SECRET_AT_LEAST_32_BYTES
-HOST_METRICS_URL=http://node-exporter:9100/metrics
-ADMIN_COOKIE_SECURE=true
-ALLOW_SCAFFOLD_SERVICES=false
-SENDER_TRANSPORT_TIMEOUT_SECONDS=8
-```
+Владелец вводит в браузере только Telegram Bot Token, токен alerts.in.ua,
+окружение, transport, интервалы и STAGING allowlist. Поля токенов write-only:
+панель показывает только «налаштовано/не налаштовано» и никогда не возвращает
+секрет. Пароли сервера, PostgreSQL и ключи шифрования задаются оператором в
+защищённой конфигурации сервера, а не вводятся пользователем в терминал или чат.
 
-Telegram Bot Token, alerts.in.ua token, poll/stale и staging allowlist после
-bootstrap вводятся только в owner panel. Сохраните draft и запросите активацию.
-Оператор сверяет exact version/evidence, активирует конкретную revision и
-контролируемо перезапускает worker-контейнеры. Панель никогда не показывает токены
-повторно и не активирует реальную доставку одним сохранением формы.
+1. Сохраните конфигурацию как `DRAFT`.
+2. Для STAGING выберите официальный provider, Live Telegram и внесите только
+   отдельно утверждённые числовые chat ID.
+3. Запросите активацию в панели — revision перейдёт в `PENDING_ACTIVATION`, но
+   сервисы ещё не переключатся.
+4. Оператор выполняет read-only `preflight-owner-settings` для точной revision и
+   отдельно подтверждённого chat ID. Проверяются точное совпадение allowlist,
+   Telegram `getMe` и полный снимок alerts.in.ua; сообщения не отправляются.
+5. Только после проверки evidence оператор активирует точную revision и выполняет
+   контролируемый restart всех runtime-ролей.
+6. Убедитесь, что все роли применили одну ACTIVE revision и показали свежие
+   heartbeat без `UNKNOWN/STALE` маскировки.
 
-Для STAGING выпущен только узкий manual-region slice: координаты отклоняются,
-а пользователь выбирает и подтверждает область вручную. Все четыре runtime-роли
-стартуют только после применения одной ACTIVE DB revision, которая одновременно
-задаёт alerts.in.ua, Live Telegram и непустой allowlist. Production capability
-gates остаются закрытыми.
+Сохранение формы или запрос активации сами по себе не запускают Telegram и не
+доказывают готовность STAGING.
 
-Перед активацией оператор обязан выполнить read-only команду
-`preflight-owner-settings`: она сравнивает exact allowlist с отдельно
-подтверждённым chat ID, вызывает только Telegram `getMe` и получает один полный
-27-регионный снимок alerts.in.ua. Команда не отправляет сообщения, не сохраняет
-снимок и не активирует revision.
+## Контролируемый STAGING gate
 
-До завершения G6 нужно:
+Перед обновлением рабочего STAGING необходимо:
 
-1. выполнить real PostgreSQL fault/restart сценарии;
-2. получить независимый safety verdict;
-3. сохранить ограничение staging ручным выбором области;
-4. проверить allowlist на каждом outbound path;
-5. проверить onboarding, тревогу, два подтверждения отбоя, возврат на текущий урок,
-   retry/dedupe и restart;
-6. убедиться, что ни один неразрешённый chat ID не получил сообщение.
+1. зафиксировать точный commit, immutable tag, image digest, Compose и Alembic
+   revision;
+2. снять backup и доказать restore в отдельной БД;
+3. подтвердить rollback-процедуру;
+4. убедиться, что allowlist содержит только одобренные тестовые chat ID;
+5. выполнить read-only preflight для точной pending revision;
+6. получить отдельное разрешение на миграцию и обновление STAGING;
+7. применить миграцию один раз, затем обновить сервисы контролируемо;
+8. проверить health, одинаковую ACTIVE revision, provider freshness, heartbeats,
+   outbox и отсутствие сообщений вне allowlist;
+9. провести STAGING canary: onboarding, дерево территорий, расписание, тревога,
+   подтверждённый отбой, возврат к уроку, retry/dedupe и restart recovery.
 
-## Production и выдача данных доступа
+## PRODUCTION
 
-Production запуск возможен только после G8 для точных commit/image digest/Compose и
-после G9 canary. Текущие значения capability `production_oblast_scope_release` и
-`reviewed_region_resolver` — false, поэтому публичный запуск должен fail closed.
+PRODUCTION возможен только после G8 для точной версии/стека и G9 canary с
+мониторингом и готовым rollback. Перед публичным запуском требуется отдельное
+явное разрешение. Текущий скомпилированный переключатель
+`PRODUCTION_PUBLIC_RELEASE_APPROVED = False`; не обходите его переменной окружения,
+ручным изменением контейнера или настройкой панели.
 
-Логин панели — `admin`. Пароль заранее не существует и не должен быть придуман в
-документации. Одноразовый пароль появляется только после утверждённого bootstrap,
-сохраняется в защищённый artifact, имеет срок действия и удаляется после смены или
-истечения. URL, пароль и срок действия передаются владельцу только после фактической
-проверки TLS и bootstrap.
-
-Развёртывание, создание production credentials и отправка реальным пользователям
-на текущем этапе не выполнялись.
+Логин панели — `admin`, но заранее заданного общего пароля нет. Одноразовый пароль
+создаёт оператор в защищённый artifact после миграций; владелец вводит его только
+на HTTPS-странице панели и сразу меняет. Пароль не передаётся через terminal prompt,
+команды, логи или скриншоты.

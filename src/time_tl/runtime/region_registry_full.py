@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import os
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -29,7 +30,12 @@ EXPECTED_RECORD_COUNT = 1622
 EXPECTED_TOP_LEVEL_COUNT = 27
 ALLOWED_TYPES = frozenset({"Область", "Місто з спеціальним статусом", "Район", "Громада"})
 TOP_LEVEL_TYPES = frozenset({"Область", "Місто з спеціальним статусом"})
-DATA_PATH = Path(__file__).parents[3] / "data" / "alerts_in_ua" / "locations.csv"
+_REPOSITORY_DATA_DIR = Path(__file__).parents[3] / "data"
+DATA_PATH = (
+    Path(os.environ.get("TIME_TL_DATA_DIR", _REPOSITORY_DATA_DIR))
+    / "alerts_in_ua"
+    / "locations.csv"
+)
 
 # Runtime composition must check this before using the catalogue for alert
 # propagation. It remains false until an official parent mapping is available.

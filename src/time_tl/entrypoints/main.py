@@ -7,6 +7,7 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from enum import StrEnum
+from pathlib import Path
 
 from time_tl.config import get_settings
 
@@ -25,12 +26,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "service",
         choices=[item.value for item in Service]
-        + ["bootstrap-admin", "preflight-owner-settings", "activate-owner-settings"],
+        + [
+            "bootstrap-admin",
+            "preflight-owner-settings",
+            "activate-owner-settings",
+            "import-territories",
+            "activate-territories",
+        ],
     )
     parser.add_argument("--output", help=argparse.SUPPRESS)
     parser.add_argument("--revision", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--evidence", help=argparse.SUPPRESS)
     parser.add_argument("--approved-chat-id", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--katottg-json", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--catalog-version", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-source-sha256", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-persisted-rows", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--expected-unresolved-total", type=int, help=argparse.SUPPRESS)
     return parser
 
 
@@ -64,6 +76,56 @@ def main(argv: Sequence[str] | None = None) -> None:
             preflight_owner_settings(settings, args.revision, args.approved_chat_id)
         )
         print(evidence.sanitized_summary())
+        return
+    if args.service == "import-territories":
+        if args.katottg_json is None or not args.catalog_version:
+            raise SystemExit("import-territories requires --katottg-json and --catalog-version")
+        from time_tl.entrypoints.territory_import import import_territory_catalog
+
+        result = asyncio.run(
+            import_territory_catalog(
+                settings,
+                katottg_json=args.katottg_json,
+                catalog_version=args.catalog_version,
+            )
+        )
+        print(
+            f"catalog={result.catalog_version} rows={result.row_count} "
+            f"selectable={result.selectable_count} "
+            f"hidden={result.hidden_nonselectable_count} "
+            f"unresolved_total={result.unresolved_total} "
+            f"source_sha256={result.source_sha256}"
+        )
+        return
+    if args.service == "activate-territories":
+        if (
+            not args.catalog_version
+            or not args.expected_source_sha256
+            or args.expected_persisted_rows is None
+            or args.expected_unresolved_total is None
+        ):
+            raise SystemExit(
+                "activate-territories requires --catalog-version, "
+                "--expected-source-sha256, --expected-persisted-rows, and "
+                "--expected-unresolved-total"
+            )
+        from time_tl.entrypoints.territory_import import activate_territory_catalog
+
+        activation_result = asyncio.run(
+            activate_territory_catalog(
+                settings,
+                catalog_version=args.catalog_version,
+                expected_source_sha256=args.expected_source_sha256,
+                expected_persisted_rows=args.expected_persisted_rows,
+                expected_unresolved_total=args.expected_unresolved_total,
+            )
+        )
+        print(
+            f"catalog={activation_result.catalog_version} "
+            f"rows={activation_result.record_count} "
+            f"unresolved_total={activation_result.unresolved_total} "
+            f"source_sha256={activation_result.source_sha256} activated=true"
+        )
         return
     if args.service == Service.ADMIN_WEB.value:
         from time_tl.runtime.services import run_admin_web_service

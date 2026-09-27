@@ -64,14 +64,34 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("token", transport.requests[0].url)
         self.assertEqual("10", result.snapshot.active_episodes[0].episode_id)
 
-    async def test_304_sends_if_modified_since(self):
-        transport = Transport(response(304))
-        result = await adapter(transport).fetch(fetch_revision=2, last_modified="marker")
-        self.assertEqual("marker", transport.requests[0].headers["If-Modified-Since"])
+    async def test_304_is_used_only_after_same_process_validated_200(self):
+        transport = Transport(
+            response(200, active(), **{"Last-Modified": "marker"}),
+            response(304),
+        )
+        provider = adapter(transport)
+        first = await provider.fetch(fetch_revision=1, last_modified=None)
+        result = await provider.fetch(fetch_revision=2, last_modified="marker")
+        self.assertIsNotNone(first.snapshot)
+        self.assertEqual("marker", transport.requests[1].headers["If-Modified-Since"])
         self.assertEqual("NOT_MODIFIED_304", result.snapshot.kind.value)
 
     async def test_304_without_baseline_is_invalid(self):
         result = await adapter(Transport(response(304))).fetch(fetch_revision=1, last_modified=None)
+        self.assertIsNotNone(result.failure)
+
+    async def test_restart_does_not_trust_persisted_conditional_marker(self):
+        transport = Transport(response(304))
+        result = await adapter(transport).fetch(fetch_revision=2, last_modified="persisted")
+        self.assertNotIn("If-Modified-Since", transport.requests[0].headers)
+        self.assertIsNotNone(result.failure)
+
+    async def test_unknown_provider_uid_invalidates_whole_snapshot(self):
+        payload = active()
+        payload["alerts"][0]["location_uid"] = "not-in-reviewed-catalogue"
+        result = await adapter(Transport(response(200, payload, **{"Last-Modified": "m"}))).fetch(
+            fetch_revision=1, last_modified=None
+        )
         self.assertIsNotNone(result.failure)
 
     async def test_invalid_partial_or_finished_payload_fails_closed(self):
@@ -127,13 +147,13 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             jitter=lambda a, b: 7.0,
         )
 
-    async def test_restart_restores_snapshot_revision_and_deduplicates_outbox(self):
+    async def test_restart_rejects_unverifiable_304_without_false_clear(self):
         await self.worker(Transport(response(200, active(), **{"Last-Modified": "m1"}))).run_once()
         self.clock += 15
         await self.worker(Transport(response(304))).run_once()
         snapshot = await self.repo.snapshot_for("student-1")
-        self.assertEqual(AlertState.ACTIVE, snapshot.state)
-        self.assertEqual(2, snapshot.last_fetch_revision)
+        self.assertEqual(AlertState.STALE, snapshot.state)
+        self.assertEqual(1, snapshot.last_fetch_revision)
         self.assertEqual(1, len(await self.repo.outbox()))
 
     async def test_failure_after_active_is_stale_never_clear(self):

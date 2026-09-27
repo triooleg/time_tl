@@ -28,12 +28,26 @@ class AdminContractTests(unittest.TestCase):
     def test_compose_secrets_are_least_privilege(self) -> None:
         compose = Path("docker-compose.yml").read_text(encoding="utf-8")
         base = compose.split("services:", 1)[0]
+        self.assertIn(
+            "${TIME_TL_IMAGE_TAG:?TIME_TL_IMAGE_TAG must be an immutable release tag}",
+            base,
+        )
+        self.assertNotIn("TIME_TL_IMAGE_TAG:-local", base)
         self.assertNotIn("ALERTS_IN_UA_TOKEN", base)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", base)
         schedule = compose.split("  schedule-worker:", 1)[1].split("  sender-worker:", 1)[0]
         admin = compose.split("  admin-web:", 1)[1].split("  postgres:", 1)[0]
         self.assertNotIn("ALERTS_IN_UA_TOKEN", schedule + admin)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", schedule + admin)
+        runtime_services = (
+            ("bot", "alert-worker"),
+            ("alert-worker", "schedule-worker"),
+            ("schedule-worker", "sender-worker"),
+            ("sender-worker", "admin-web"),
+        )
+        for service, following_service in runtime_services:
+            block = compose.split(f"  {service}:", 1)[1].split(f"  {following_service}:", 1)[0]
+            self.assertIn("deploy: {replicas: 1}", block, service)
 
     def test_ui_contains_contract_and_no_remote_assets(self) -> None:
         from time_tl.admin.app import _JS, _dashboard_html
@@ -80,10 +94,16 @@ class AdminContractTests(unittest.TestCase):
                 alerts_in_ua_token_configured=True,
                 ready_for_activation=True,
                 validation_issues=(),
+                onboarding_text="<b>Інструкція</b>",
             ),
         )
         self.assertIn('name="telegram_token"', configured)
         self.assertIn('name="alerts_in_ua_token"', configured)
+        self.assertIn('name="onboarding_text"', configured)
+        self.assertIn('id="owner-convergence"', configured)
+        self.assertIn("PRODUCTION залишається окремим release-gate", configured)
+        self.assertIn("&lt;b&gt;Інструкція&lt;/b&gt;", configured)
+        self.assertNotIn("<b>Інструкція</b>", configured)
         self.assertNotRegex(configured, r'name="telegram_token"[^>]*\svalue=')
         self.assertNotRegex(configured, r'name="alerts_in_ua_token"[^>]*\svalue=')
         self.assertNotIn("docker.sock", configured)
@@ -97,6 +117,7 @@ class AdminContractTests(unittest.TestCase):
         ):
             self.assertIn(aggregate, _JS)
         self.assertNotIn("alerts.in.ua", _JS)
+        self.assertIn("owner_configuration?.convergence", _JS)
 
     def test_provider_settings_are_validated_in_repository_contract(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

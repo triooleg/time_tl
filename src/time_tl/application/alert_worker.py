@@ -31,19 +31,40 @@ class AlertWorker:
         self.rate_limiter = NoCatchUpRateLimiter(requests_per_minute)
         self.monotonic = monotonic
         self.startup_jitter_seconds = jitter(0.0, 15.0)
+        self._prepared = False
 
-    async def serve(self, sleep: Callable[[float], Awaitable[None]]) -> None:
-        """Production loop: hold the singleton lease until cancellation/exit."""
+    async def acquire_and_prepare(self) -> bool:
+        """Acquire singleton ownership, then durably close the freshness gate."""
+
         if not await self.lease.acquire():
-            return
+            return False
         try:
             await self.repository.apply_process_restart_atomically()
+        except BaseException:
+            await self.lease.release()
+            raise
+        self._prepared = True
+        return True
+
+    async def serve_prepared(self, sleep: Callable[[float], Awaitable[None]]) -> None:
+        """Run after acquire_and_prepare; caller may now expose health."""
+
+        if not self._prepared:
+            raise RuntimeError("alert worker must acquire and prepare before serving")
+        try:
             await sleep(self.startup_jitter_seconds)
             while await self.lease.renew():
                 delay = await self._poll_once_while_held()
                 await sleep(delay)
         finally:
+            self._prepared = False
             await self.lease.release()
+
+    async def serve(self, sleep: Callable[[float], Awaitable[None]]) -> None:
+        """Production loop: hold the singleton lease until cancellation/exit."""
+        if not await self.acquire_and_prepare():
+            return
+        await self.serve_prepared(sleep)
 
     async def run_once(self) -> float:
         """Bounded integration/test hook that still enforces singleton ownership."""
@@ -71,18 +92,18 @@ class AlertWorker:
             fetch_revision=revision, last_modified=state.last_modified
         )
         if result.failure is not None:
-            await self.repository.apply_failure_atomically(result.failure)
             failures = state.consecutive_failures + 1
             exponential = min(300.0, self.poll_interval_seconds * (2 ** (failures - 1)))
             retry: float = max(float(exponential), float(result.retry_after_seconds or 0.0))
-            await self.repository.set_poll_state(
+            await self.repository.apply_failure_and_poll_state_atomically(
+                result.failure,
                 replace(
                     state,
                     fetch_revision=revision,
                     circuit_open=result.open_operator_circuit,
                     retry_not_before_monotonic=now + retry,
                     consecutive_failures=failures,
-                )
+                ),
             )
             return retry
         assert result.snapshot is not None

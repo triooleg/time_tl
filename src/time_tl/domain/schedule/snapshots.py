@@ -12,11 +12,14 @@ from uuid import uuid4
 
 from .models import DateOverride, Lesson, Parity, ScheduleProfile, ScheduleRule
 from .profiles import ConfirmationError, ProfileCollection, ProfileLimitReached, kyiv_today
+from .quotas import ScheduleValidationError
 from .resolver import ResolvedDay, preview
 from .sessions import ImportSessionRepository, PendingImportSession
 
 SCHEMA_VERSION = "1.0"
 MAX_SNAPSHOT_BYTES = 256_000
+MAX_SOURCE_DISPLAY_LABEL_LENGTH = 160
+MAX_METADATA_TIMESTAMP_LENGTH = 64
 _METADATA_FIELDS = {"template_name", "created_at", "source_display_label", "included_fields"}
 _FORBIDDEN_KEY_PARTS = (
     "region",
@@ -74,6 +77,7 @@ class ReplacementProposal:
     token: str
     import_proposal: ImportProposal
     replace_profile_id: str
+    include_join_links: bool = False
     requires_confirmation: bool = True
 
 
@@ -92,6 +96,7 @@ def export_snapshot(
     created = created_at or datetime.now(UTC)
     if created.tzinfo is None:
         raise ValueError("created_at must be timezone-aware")
+    source_label = _validated_source_display_label(source_display_label, error_type=ValueError)
     if expires_at is not None:
         if expires_at.tzinfo is None:
             raise ValueError("expires_at must be timezone-aware")
@@ -106,7 +111,7 @@ def export_snapshot(
         "metadata": {
             "template_name": profile.name,
             "created_at": created.astimezone(UTC).isoformat(),
-            "source_display_label": source_display_label,
+            "source_display_label": source_label,
             "included_fields": included,
         },
         "profile": _profile_to_data(profile, include_join_links),
@@ -180,6 +185,8 @@ def propose_import(
             active=False,
         )
         resolved = preview(profile, start or kyiv_today(), 14)
+    except ScheduleValidationError:
+        raise
     except (TypeError, ValueError) as exc:
         if isinstance(exc, SnapshotError):
             raise
@@ -194,7 +201,7 @@ def propose_import(
     )
     if links_present:
         included += ("join_links",)
-    source_label = str(metadata["source_display_label"])
+    source_label = _validated_source_display_label(metadata["source_display_label"])
     created_at = str(metadata["created_at"])
     fingerprint = _proposal_fingerprint(profile, source_label, created_at, expires_at)
     proposal = ImportProposal(
@@ -229,7 +236,14 @@ def confirm_import(
         proposal.token,
         fingerprint,
         checked_at,
-        lambda: collection.add(_independent_profile(proposal.profile)),
+        lambda: collection.add(
+            _independent_profile(
+                _profile_for_import(
+                    proposal.profile,
+                    include_join_links=confirm_include_join_links,
+                )
+            )
+        ),
     )
 
 
@@ -249,7 +263,12 @@ def request_import_replacement(
         raise ProfileLimitReached("replacement is only available at the three-profile limit")
     if not any(item.profile_id == replace_profile_id for item in collection.profiles):
         raise KeyError(replace_profile_id)
-    replacement = ReplacementProposal(uuid4().hex, proposal, replace_profile_id)
+    replacement = ReplacementProposal(
+        uuid4().hex,
+        proposal,
+        replace_profile_id,
+        include_join_links=confirm_include_join_links,
+    )
     sessions.bind_replacement(
         proposal.token,
         fingerprint,
@@ -272,14 +291,24 @@ def confirm_import_replacement(
         raise ConfirmationError("profile replacement was not confirmed")
     proposal = replacement.import_proposal
     checked_at = now or datetime.now(UTC)
-    fingerprint = _validate_proposal(proposal, True, proposal.links_present, checked_at)
+    fingerprint = _validate_proposal(
+        proposal,
+        True,
+        replacement.include_join_links,
+        checked_at,
+    )
     return sessions.consume_atomically(
         proposal.token,
         fingerprint,
         checked_at,
         lambda: collection.replace(
             replacement.replace_profile_id,
-            _independent_profile(proposal.profile),
+            _independent_profile(
+                _profile_for_import(
+                    proposal.profile,
+                    include_join_links=replacement.include_join_links,
+                )
+            ),
         ),
         replacement_token=replacement.token,
         replace_profile_id=replacement.replace_profile_id,
@@ -295,8 +324,6 @@ def _validate_proposal(
     if not confirmed:
         raise ConfirmationError("import was not confirmed")
     _verify_expiry(proposal.expires_at, now, error_type=ConfirmationError)
-    if proposal.links_present and not confirm_include_join_links:
-        raise ConfirmationError("importing lesson links requires separate explicit confirmation")
     fingerprint = _proposal_fingerprint(
         proposal.profile,
         proposal.source_display_label,
@@ -325,6 +352,33 @@ def _proposal_fingerprint(
 
 def _independent_profile(profile: ScheduleProfile) -> ScheduleProfile:
     return copy.deepcopy(replace(profile, profile_id=f"imported-{uuid4().hex}", active=False))
+
+
+def _profile_for_import(
+    profile: ScheduleProfile,
+    *,
+    include_join_links: bool,
+) -> ScheduleProfile:
+    if include_join_links:
+        return profile
+
+    def without_link(lesson: Lesson) -> Lesson:
+        return replace(lesson, join_url=None, storage_ref=None)
+
+    return replace(
+        profile,
+        rules=tuple(
+            replace(rule, lessons=tuple(without_link(lesson) for lesson in rule.lessons))
+            for rule in profile.rules
+        ),
+        overrides=tuple(
+            replace(
+                override,
+                lessons=tuple(without_link(lesson) for lesson in override.lessons),
+            )
+            for override in profile.overrides
+        ),
+    )
 
 
 def _parse_expiry(raw_expiry: Any) -> datetime | None:
@@ -375,14 +429,44 @@ def _validate_metadata(value: Any) -> Mapping[str, Any]:
         raise SnapshotError("metadata contains unknown or missing fields")
     if not isinstance(metadata["template_name"], str) or not metadata["template_name"].strip():
         raise SnapshotError("metadata template_name must be a non-empty string")
-    if not isinstance(metadata["created_at"], str):
-        raise SnapshotError("metadata created_at must be a string")
-    if not isinstance(metadata["source_display_label"], str):
-        raise SnapshotError("metadata source_display_label must be a string")
+    _parse_metadata_created_at(metadata["created_at"])
+    _validated_source_display_label(metadata["source_display_label"])
     included = metadata["included_fields"]
     if not isinstance(included, list) or not all(isinstance(item, str) for item in included):
         raise SnapshotError("metadata included_fields must be a string list")
     return metadata
+
+
+def _parse_metadata_created_at(value: Any) -> datetime:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > MAX_METADATA_TIMESTAMP_LENGTH
+        or "T" not in value
+    ):
+        raise SnapshotError("metadata created_at must be a bounded ISO timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SnapshotError("metadata created_at must be a bounded ISO timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise SnapshotError("metadata created_at must be timezone-aware")
+    return parsed
+
+
+def _validated_source_display_label(
+    value: Any, *, error_type: type[ValueError] = SnapshotError
+) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise error_type("metadata source_display_label must be a non-empty string")
+    normalized = value.strip()
+    if len(normalized) > MAX_SOURCE_DISPLAY_LABEL_LENGTH:
+        raise error_type(
+            "metadata source_display_label must not exceed "
+            f"{MAX_SOURCE_DISPLAY_LABEL_LENGTH} characters"
+        )
+    return normalized
 
 
 def _reject_forbidden_keys(value: Any, path: str = "$") -> None:
@@ -443,6 +527,8 @@ def _lesson_from_data(data: Any) -> Lesson:
             enabled=item.get("enabled", True),
             join_url=(str(item["join_url"]) if item.get("join_url") else None),
         )
+    except ScheduleValidationError:
+        raise
     except (KeyError, ValueError, TypeError) as exc:
         raise SnapshotError("invalid lesson") from exc
 
@@ -475,6 +561,8 @@ def _rule_from_data(data: Any) -> ScheduleRule:
         )
     except SnapshotError:
         raise
+    except ScheduleValidationError:
+        raise
     except (KeyError, ValueError, TypeError) as exc:
         raise SnapshotError("invalid rule") from exc
 
@@ -500,6 +588,8 @@ def _override_from_data(data: Any) -> DateOverride:
             lessons=tuple(_lesson_from_data(value) for value in item.get("lessons", [])),
         )
     except SnapshotError:
+        raise
+    except ScheduleValidationError:
         raise
     except (KeyError, ValueError, TypeError) as exc:
         raise SnapshotError("invalid override") from exc

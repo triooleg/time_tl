@@ -99,6 +99,65 @@ class AlertStateMachineTests(unittest.TestCase):
         self.assertEqual(AlertState.ACTIVE, transition.state)
         self.assertEqual(frozenset({parent}), self.machine.active_episodes)
 
+    def test_partial_alert_applies_to_exact_selected_region(self) -> None:
+        selected_partial = episode(
+            "selected-partial",
+            location="community",
+            kind="air_raid_partial",
+        )
+
+        transition = self.machine.apply_snapshot(full(1, (selected_partial,)))
+
+        self.assertEqual(TransitionKind.ALERT_STARTED, transition.kind)
+        self.assertEqual(AlertState.ACTIVE, transition.state)
+        self.assertEqual(frozenset({selected_partial}), self.machine.active_episodes)
+
+    def test_parent_partial_does_not_alert_selected_community(self) -> None:
+        parent_partial = episode(
+            "parent-partial",
+            location="region",
+            kind="air_raid_partial",
+        )
+
+        transition = self.machine.apply_snapshot(full(1, (parent_partial,)))
+
+        self.assertEqual(TransitionKind.RECOVERED, transition.kind)
+        self.assertEqual(AlertState.CLEAR_CONFIRMED, transition.state)
+        self.assertEqual(frozenset(), self.machine.active_episodes)
+        self.assertEqual((), self.machine.snapshot().last_full_active_episodes)
+
+    def test_parent_full_alert_is_inherited_by_selected_community(self) -> None:
+        parent_full = episode("parent-full", location="region", kind="air_raid")
+
+        transition = self.machine.apply_snapshot(full(1, (parent_full,)))
+
+        self.assertEqual(TransitionKind.ALERT_STARTED, transition.kind)
+        self.assertEqual(AlertState.ACTIVE, transition.state)
+        self.assertEqual(frozenset({parent_full}), self.machine.active_episodes)
+
+    def test_restored_parent_partial_is_rejected_from_active_and_baseline(self) -> None:
+        parent_partial = episode(
+            "parent-partial",
+            location="region",
+            kind="air_raid_partial",
+        )
+        invalid_active = AlertSnapshot(
+            state=AlertState.ACTIVE,
+            active_episodes=(ActiveEpisode(parent_partial, 1),),
+            last_full_active_episodes=(parent_partial,),
+            last_fetch_revision=1,
+        )
+        invalid_baseline = AlertSnapshot(
+            state=AlertState.UNKNOWN,
+            last_full_active_episodes=(parent_partial,),
+            last_fetch_revision=1,
+        )
+
+        with self.assertRaisesRegex(ValueError, "effective configured scope"):
+            AlertStateMachine(self.scope, invalid_active)
+        with self.assertRaisesRegex(ValueError, "effective scope"):
+            AlertStateMachine(self.scope, invalid_baseline)
+
     def test_partial_or_missing_scope_never_starts_clear_candidate(self) -> None:
         self.start()
         partial = self.machine.apply_snapshot(

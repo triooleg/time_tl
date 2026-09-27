@@ -190,8 +190,8 @@ class PostgresAlertRepository:
                 ).scalar_one_or_none()
                 if row is None:
                     raise RuntimeError("alert_poll_state singleton is missing; run migrations")
-                if state.fetch_revision < row.fetch_revision:
-                    raise ValueError("fetch revision cannot move backwards")
+                if state.fetch_revision != row.fetch_revision + 1:
+                    raise ValueError("fetch revision must be the exact next durable revision")
                 self._store_poll_state(row, state)
 
     async def apply_snapshot_and_poll_state_atomically(
@@ -209,13 +209,13 @@ class PostgresAlertRepository:
                     raise RuntimeError("alert_poll_state singleton is missing; run migrations")
                 if poll_state.fetch_revision != update.fetch_revision:
                     raise ValueError("poll state and snapshot revisions must match")
-                if poll_state.fetch_revision < poll_row.fetch_revision:
-                    raise ValueError("fetch revision cannot move backwards")
+                if poll_state.fetch_revision != poll_row.fetch_revision + 1:
+                    raise ValueError("fetch revision must be the exact next durable revision")
                 scopes = list(
                     (
                         await session.execute(
-                        select(AlertScope).order_by(AlertScope.id).with_for_update()
-                    )
+                            select(AlertScope).order_by(AlertScope.id).with_for_update()
+                        )
                     ).scalars()
                 )
                 evaluated = []
@@ -251,6 +251,11 @@ class PostgresAlertRepository:
                             raise RuntimeError("alert scope owner is missing")
                         if not self.mode_allows_alert_notifications(user.mode):
                             continue
+                        scope_binding = self._scope_binding(scope)
+                        if scope_binding is None:
+                            # Legacy/unversioned scopes cannot safely bind an
+                            # event to a reviewed territory hierarchy revision.
+                            continue
                         key = f"{scope.id}:{transition.kind.value}:{transition.event_id}"
                         statement = (
                             insert(OutboxMessage)
@@ -264,6 +269,7 @@ class PostgresAlertRepository:
                                     "transition_kind": transition.kind.value,
                                     "event_id": transition.event_id,
                                     "telegram_chat_id": user.telegram_user_id,
+                                    "scope_binding": scope_binding,
                                 },
                             )
                             .on_conflict_do_nothing(index_elements=[OutboxMessage.event_key])
@@ -300,6 +306,37 @@ class PostgresAlertRepository:
                     machine.apply_failure(failure)
                     await self._store_snapshot(session, scope.id, machine.snapshot())
 
+    async def apply_failure_and_poll_state_atomically(
+        self, failure: SourceFailure, poll_state: AlertPollState
+    ) -> None:
+        """Commit failure state and its exact-next cursor as one transaction."""
+
+        async with self._factory() as session:
+            async with session.begin():
+                poll_row = (
+                    await session.execute(
+                        select(PollRow).where(PollRow.singleton_id == 1).with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if poll_row is None:
+                    raise RuntimeError("alert_poll_state singleton is missing; run migrations")
+                if poll_state.fetch_revision != poll_row.fetch_revision + 1:
+                    raise ValueError("fetch revision must be the exact next durable revision")
+                scopes = list(
+                    (
+                        await session.execute(
+                            select(AlertScope).order_by(AlertScope.id).with_for_update()
+                        )
+                    ).scalars()
+                )
+                for scope in scopes:
+                    machine = AlertStateMachine(
+                        self._scope(scope), await self._load_snapshot(session, scope.id)
+                    )
+                    machine.apply_failure(failure)
+                    await self._store_snapshot(session, scope.id, machine.snapshot())
+                self._store_poll_state(poll_row, poll_state)
+
     async def apply_process_restart_atomically(self) -> None:
         """Invalidate freshness and conditionals before the first provider request."""
         async with self._factory() as session:
@@ -325,6 +362,7 @@ class PostgresAlertRepository:
                     )
                     machine.apply_failure(failure)
                     await self._store_snapshot(session, scope.id, machine.snapshot())
+                poll_row.fetch_revision += 1
                 poll_row.last_modified = None
                 poll_row.last_success_at = None
 
@@ -332,6 +370,19 @@ class PostgresAlertRepository:
     def _scope(row: AlertScope) -> RegionScope:
         values = frozenset(str(item) for item in row.applicable_region_ids)
         return RegionScope(row.selected_region_id, values)
+
+    @staticmethod
+    def _scope_binding(row: AlertScope) -> dict[str, object] | None:
+        provider = (row.territory_provider or "").strip()
+        catalog_version = (row.territory_catalog_version or "").strip()
+        if not provider or not catalog_version:
+            return None
+        return {
+            "provider": provider,
+            "catalog_version": catalog_version,
+            "selected_region_id": row.selected_region_id,
+            "applicable_region_ids": sorted(set(row.applicable_region_ids)),
+        }
 
     async def _load_snapshot(self, session: AsyncSession, scope_id: UUID) -> DomainSnapshot | None:
         row = await session.get(AlertSnapshot, scope_id)

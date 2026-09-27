@@ -14,6 +14,10 @@ from time_tl.admin.async_app import create_async_admin_app
 from time_tl.admin.security import Session, hash_password, new_token, utcnow
 from time_tl.admin.settings import OwnerSettingsService
 from time_tl.config import Settings
+from time_tl.entrypoints.operator_preflight import (
+    OperatorPreflightError,
+    OperatorPreflightEvidence,
+)
 
 
 @dataclass
@@ -143,23 +147,36 @@ class AsyncEndpointTests(unittest.TestCase):
         self.settings = Settings(
             **{
                 "DATABASE_URL": "postgresql+asyncpg://u:p@db/time_tl",
-                "TIME_TL_ENV": "simulation",
+                "TIME_TL_ENV": "staging",
                 "SERVICE_ROLE": "admin-web",
                 "ADMIN_BACKEND": "postgres",
-                "ADMIN_COOKIE_SECURE": False,
+                "ADMIN_COOKIE_SECURE": True,
+                "ADMIN_IP_HASH_KEY": "12345678901234567890123456789012",
+                "HOST_METRICS_URL": "http://metrics-exporter:9105/metrics",
+                "ADMIN_BOOTSTRAP_ARTIFACT_PATH": ".time-tl-admin/test-owner-password.txt",
             }
         )
         self.owner_store = MemoryOwnerSettingsStore()
         self.owner_settings = OwnerSettingsService(
             self.owner_store, Fernet.generate_key(), Fernet.generate_key()
         )
+
+        async def successful_preflight(candidate):
+            return OperatorPreflightEvidence(
+                revision=candidate.revision,
+                allowlist_count=len(candidate.staging_allowlist),
+                covered_region_count=1344,
+            )
+
         self.client = TestClient(
             create_async_admin_app(
                 self.settings,
                 self.repo,
                 FakeMetrics(),
                 owner_settings=self.owner_settings,
-            )
+                activation_preflight=successful_preflight,
+            ),
+            base_url="https://testserver",
         )
 
     @staticmethod
@@ -269,7 +286,7 @@ class AsyncEndpointTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 410)
 
-    def test_owner_can_save_write_only_tokens_but_not_activate_them(self) -> None:
+    def test_owner_can_save_write_only_tokens_and_self_activate_staging(self) -> None:
         self.repo.owner.must_change_password = False
         self.repo.owner.bootstrap_expires_at = None
         self.login()
@@ -307,18 +324,111 @@ class AsyncEndpointTests(unittest.TestCase):
         self.assertEqual(api.json()["owner_configuration"]["activation_state"], "DRAFT")
 
         request_page = self.client.get("/")
-        pending = self.client.post(
-            "/settings/service/request-activation",
+        activated = self.client.post(
+            "/settings/service/activate",
             data={
                 "csrf": self.csrf(request_page.text),
                 "expected_revision": "1",
                 "current_password": "bootstrap-password-long",
-                "acknowledge": "yes",
+                "activation_ack": "АКТИВУВАТИ STAGING",
             },
             follow_redirects=False,
         )
-        self.assertEqual(pending.status_code, 303)
-        self.assertEqual(self.owner_store.bundle.pending_revision, 1)
+        self.assertEqual(activated.status_code, 303)
+        self.assertIn("setup=activated", activated.headers["location"])
+        self.assertIsNone(self.owner_store.bundle.pending_revision)
+        self.assertEqual(self.owner_store.bundle.active_revision, 1)
+        self.assertEqual((self.owner_store.bundle.activation_status or {}).get("result"), "passed")
+
+    def test_preflight_failure_does_not_activate_revision(self) -> None:
+        self.repo.owner.must_change_password = False
+        self.repo.owner.bootstrap_expires_at = None
+        self.login()
+
+        async def failed_preflight(_candidate):
+            raise OperatorPreflightError("Telegram getMe preflight failed")
+
+        client = TestClient(
+            create_async_admin_app(
+                self.settings,
+                self.repo,
+                FakeMetrics(),
+                owner_settings=self.owner_settings,
+                activation_preflight=failed_preflight,
+            ),
+            base_url="https://testserver",
+        )
+        client.cookies.update(self.client.cookies)
+        page = client.get("/")
+        saved = client.post(
+            "/settings/service",
+            data={
+                "csrf": self.csrf(page.text),
+                "expected_revision": "0",
+                "environment": "staging",
+                "alert_provider": "alerts_in_ua",
+                "telegram_transport": "live",
+                "poll_interval_seconds": "15",
+                "stale_after_seconds": "120",
+                "staging_allowlist": "123456789",
+                "telegram_token": "telegram-secret",
+                "alerts_in_ua_token": "alerts-secret",
+                "current_password": "bootstrap-password-long",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(saved.status_code, 303)
+        page = client.get("/")
+        failed = client.post(
+            "/settings/service/activate",
+            data={
+                "csrf": self.csrf(page.text),
+                "expected_revision": "1",
+                "current_password": "bootstrap-password-long",
+                "activation_ack": "АКТИВУВАТИ STAGING",
+            },
+        )
+        self.assertEqual(failed.status_code, 502)
+        self.assertIsNone(self.owner_store.bundle.active_revision)
+        self.assertEqual(
+            (self.owner_store.bundle.activation_status or {}).get("failure_code"),
+            "telegram_get_me_failed",
+        )
+
+    def test_production_transition_is_blocked_from_self_activation(self) -> None:
+        self.repo.owner.must_change_password = False
+        self.repo.owner.bootstrap_expires_at = None
+        self.login()
+        page = self.client.get("/")
+        saved = self.client.post(
+            "/settings/service",
+            data={
+                "csrf": self.csrf(page.text),
+                "expected_revision": "0",
+                "environment": "production",
+                "alert_provider": "alerts_in_ua",
+                "telegram_transport": "live",
+                "poll_interval_seconds": "15",
+                "stale_after_seconds": "120",
+                "clear_staging_allowlist": "yes",
+                "telegram_token": "telegram-secret",
+                "alerts_in_ua_token": "alerts-secret",
+                "current_password": "bootstrap-password-long",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(saved.status_code, 303)
+        page = self.client.get("/")
+        blocked = self.client.post(
+            "/settings/service/activate",
+            data={
+                "csrf": self.csrf(page.text),
+                "expected_revision": "1",
+                "current_password": "bootstrap-password-long",
+                "activation_ack": "АКТИВУВАТИ STAGING",
+            },
+        )
+        self.assertEqual(blocked.status_code, 403)
         self.assertIsNone(self.owner_store.bundle.active_revision)
 
     def test_owner_settings_mutations_require_csrf_and_reauthentication(self) -> None:

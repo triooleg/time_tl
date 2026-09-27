@@ -10,11 +10,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, TypeVar
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from time_tl.domain.schedule.profiles import ConfirmationError
-from time_tl.domain.schedule.sessions import PendingImportSession as DomainPendingImportSession
+from time_tl.domain.schedule.sessions import (
+    MAX_PENDING_IMPORTS_GLOBAL,
+    MAX_PENDING_IMPORTS_PER_USER,
+    ImportSessionLimitExceeded,
+)
+from time_tl.domain.schedule.sessions import (
+    PendingImportSession as DomainPendingImportSession,
+)
 
 from .codec import LessonLinkCodec
 from .models import PendingImportSession, ScheduleProfile, User
@@ -23,6 +30,9 @@ T = TypeVar("T")
 MAX_PROPOSAL_BYTES = 256_000
 MAX_PENDING_RETENTION = timedelta(hours=24)
 MAX_PURGE_BATCH = 100
+_IMPORT_CREATE_ADVISORY_LOCK = 7_413_001
+_METADATA_LABEL_MAX_LENGTH = 160
+_METADATA_TIMESTAMP_MAX_LENGTH = 64
 _SCHEMA_VERSION = "1.0"
 _STORAGE_SCHEMA_VERSION = "fernet-json-v1"
 _STORAGE_CIPHERTEXT_FIELDS = {"storage_schema_version", "ciphertext"}
@@ -73,9 +83,7 @@ def digest_secret(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _encrypt_proposal_payload(
-    payload: Mapping[str, Any], codec: LessonLinkCodec
-) -> dict[str, str]:
+def _encrypt_proposal_payload(payload: Mapping[str, Any], codec: LessonLinkCodec) -> dict[str, str]:
     sanitized = sanitize_proposal_payload(payload)
     serialized = json.dumps(
         sanitized,
@@ -136,7 +144,8 @@ def sanitize_proposal_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     if decoded["schema_version"] != _SCHEMA_VERSION:
         raise ConfirmationError("unsupported import proposal schema version")
     _reject_prohibited_keys(decoded)
-    _require_exact_mapping(decoded["metadata"], _METADATA_FIELDS, "metadata")
+    metadata = _require_exact_mapping(decoded["metadata"], _METADATA_FIELDS, "metadata")
+    _validate_metadata(metadata)
     profile = _require_mapping(decoded["profile"], "profile")
     if set(profile) - _PROFILE_FIELDS or not {"name", "timezone"}.issubset(profile):
         raise ConfirmationError("import proposal profile has unknown or missing fields")
@@ -151,6 +160,32 @@ def sanitize_proposal_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         mapped = _require_exact_mapping(override, _OVERRIDE_FIELDS, f"override[{index}]")
         _validate_lessons(mapped["lessons"], f"override[{index}]")
     return decoded
+
+
+def _validate_metadata(metadata: Mapping[str, Any]) -> None:
+    label = metadata["source_display_label"]
+    if (
+        not isinstance(label, str)
+        or not label.strip()
+        or label != label.strip()
+        or len(label) > _METADATA_LABEL_MAX_LENGTH
+    ):
+        raise ConfirmationError("import proposal source label is invalid")
+    created_at = metadata["created_at"]
+    if (
+        not isinstance(created_at, str)
+        or not created_at
+        or created_at != created_at.strip()
+        or len(created_at) > _METADATA_TIMESTAMP_MAX_LENGTH
+        or "T" not in created_at
+    ):
+        raise ConfirmationError("import proposal created_at is invalid")
+    try:
+        parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ConfirmationError("import proposal created_at is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ConfirmationError("import proposal created_at must be timezone-aware")
 
 
 def _validate_lessons(value: Any, path: str) -> None:
@@ -198,9 +233,7 @@ def _reject_prohibited_keys(value: Any) -> None:
 class PostgresImportSessionRepository:
     """Row-locked one-time confirmations; caller owns commit/rollback."""
 
-    def __init__(
-        self, session: AsyncSession, payload_codec: LessonLinkCodec | None = None
-    ) -> None:
+    def __init__(self, session: AsyncSession, payload_codec: LessonLinkCodec | None = None) -> None:
         self._session = session
         self._payload_codec = payload_codec
 
@@ -215,6 +248,7 @@ class PostgresImportSessionRepository:
     ) -> None:
         codec = self._require_codec()
         created_at = datetime.now(UTC)
+        await self._lock_create_capacity(user_id=user_id, now=created_at)
         retention_deadline = created_at + MAX_PENDING_RETENTION
         if expires_at is not None:
             self._validate_time(expires_at)
@@ -230,6 +264,50 @@ class PostgresImportSessionRepository:
                 expires_at=effective_expiry,
             )
         )
+
+    async def _lock_create_capacity(self, *, user_id: UUID, now: datetime) -> None:
+        """Serialize public import creation and enforce bounded durable state."""
+        self._validate_time(now)
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(_IMPORT_CREATE_ADVISORY_LOCK))
+        )
+        owner = (
+            await self._session.execute(select(User.id).where(User.id == user_id).with_for_update())
+        ).scalar_one_or_none()
+        if owner is None:
+            raise ConfirmationError("import proposal owner is missing")
+        active = (
+            PendingImportSession.revoked_at.is_(None),
+            PendingImportSession.consumed_at.is_(None),
+            or_(
+                PendingImportSession.expires_at.is_(None),
+                PendingImportSession.expires_at > now,
+            ),
+        )
+        user_tokens = (
+            (
+                await self._session.execute(
+                    select(PendingImportSession.token_hash)
+                    .where(PendingImportSession.user_id == user_id, *active)
+                    .order_by(PendingImportSession.created_at, PendingImportSession.token_hash)
+                    .limit(MAX_PENDING_IMPORTS_PER_USER)
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(user_tokens) >= MAX_PENDING_IMPORTS_PER_USER:
+            raise ImportSessionLimitExceeded(scope="user", limit=MAX_PENDING_IMPORTS_PER_USER)
+        global_count = int(
+            (
+                await self._session.execute(
+                    select(func.count(PendingImportSession.token_hash)).where(*active)
+                )
+            ).scalar_one()
+        )
+        if global_count >= MAX_PENDING_IMPORTS_GLOBAL:
+            raise ImportSessionLimitExceeded(scope="global", limit=MAX_PENDING_IMPORTS_GLOBAL)
 
     async def load(
         self, *, token: str, now: datetime, expected_user_id: UUID
@@ -306,13 +384,25 @@ class PostgresImportSessionRepository:
         limit: int = MAX_PURGE_BATCH,
         exclude_token_hash: str | None = None,
     ) -> int:
-        """Delete at most one bounded batch of expired encrypted proposals."""
+        """Delete one bounded batch of expired or old terminal proposals."""
         self._validate_time(now)
         if limit < 1 or limit > MAX_PURGE_BATCH:
             raise ValueError(f"purge limit must be between 1 and {MAX_PURGE_BATCH}")
+        terminal_cutoff = now - MAX_PENDING_RETENTION
         conditions = [
-            PendingImportSession.expires_at.is_not(None),
-            PendingImportSession.expires_at <= now,
+            or_(
+                and_(
+                    PendingImportSession.expires_at.is_not(None),
+                    PendingImportSession.expires_at <= now,
+                ),
+                and_(
+                    or_(
+                        PendingImportSession.revoked_at.is_not(None),
+                        PendingImportSession.consumed_at.is_not(None),
+                    ),
+                    PendingImportSession.created_at <= terminal_cutoff,
+                ),
+            )
         ]
         if exclude_token_hash is not None:
             conditions.append(PendingImportSession.token_hash != exclude_token_hash)
@@ -466,7 +556,13 @@ class AsyncPostgresImportSessionAdapter:
         async with self._factory() as session:
             async with session.begin():
                 repo = self._repository(session)
-                user = await self._locked_user(session)
+                user = (
+                    await session.execute(
+                        select(User).where(User.telegram_user_id == self._telegram_user_id)
+                    )
+                ).scalar_one_or_none()
+                if user is None:
+                    raise ConfirmationError("import proposal owner is missing")
                 await repo.create(
                     token=pending.token,
                     user_id=user.id,
@@ -601,9 +697,7 @@ class AsyncPostgresImportSessionAdapter:
                     token=token, now=now, expected_user_id=user.id
                 )
 
-    async def purge_expired(
-        self, now: datetime, *, limit: int = MAX_PURGE_BATCH
-    ) -> int:
+    async def purge_expired(self, now: datetime, *, limit: int = MAX_PURGE_BATCH) -> int:
         async with self._factory() as session:
             async with session.begin():
                 return await self._repository(session).purge_expired(now, limit=limit)

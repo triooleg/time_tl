@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib
 import unittest
+from unittest.mock import patch
 
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable
@@ -75,9 +77,68 @@ class PersistenceSchemaTests(unittest.TestCase):
             {"scope_id", "location_uid", "alert_type", "episode_id"},
         )
 
-    def test_outbox_dedupe_and_pending_index(self):
+    def test_outbox_dedupe_and_bounded_scan_indexes(self):
         self.assertTrue(models.OutboxMessage.__table__.c.event_key.unique)
-        self.assertIn("ix_outbox_pending", {i.name for i in models.OutboxMessage.__table__.indexes})
+        indexes = {item.name: item for item in models.OutboxMessage.__table__.indexes}
+        self.assertTrue(
+            {
+                "ix_outbox_pending",
+                "ix_outbox_aggregate",
+                "ix_outbox_confirmed_clear_cursor",
+                "ix_outbox_delivered_retention",
+                "ix_outbox_dead_retention",
+            }.issubset(indexes)
+        )
+        aggregate_sql = str(
+            CreateIndex(indexes["ix_outbox_aggregate"]).compile(dialect=postgresql.dialect())
+        )
+        clear_sql = str(
+            CreateIndex(indexes["ix_outbox_confirmed_clear_cursor"]).compile(
+                dialect=postgresql.dialect()
+            )
+        )
+        self.assertIn("(aggregate_type, aggregate_id)", aggregate_sql)
+        self.assertIn("(created_at, id)", clear_sql)
+        self.assertIn("WHERE event_type = 'ALL_CLEAR_CONFIRMED'", clear_sql)
+        delivered_sql = str(
+            CreateIndex(indexes["ix_outbox_delivered_retention"]).compile(
+                dialect=postgresql.dialect()
+            )
+        )
+        dead_sql = str(
+            CreateIndex(indexes["ix_outbox_dead_retention"]).compile(dialect=postgresql.dialect())
+        )
+        self.assertIn("(delivered_at, id)", delivered_sql)
+        self.assertIn("claimed_at IS NULL", delivered_sql)
+        self.assertIn("(dead_at, id)", dead_sql)
+        self.assertIn("claimed_at IS NULL", dead_sql)
+
+    def test_pending_import_capacity_index_is_partial_and_user_ordered(self):
+        indexes = {item.name: item for item in models.PendingImportSession.__table__.indexes}
+        sql = str(
+            CreateIndex(indexes["ix_pending_import_active_user_created"]).compile(
+                dialect=postgresql.dialect()
+            )
+        )
+        self.assertIn("(user_id, created_at, token_hash)", sql)
+        self.assertIn("WHERE revoked_at IS NULL AND consumed_at IS NULL", sql)
+
+    def test_current_metadata_migrations_are_noops_in_complete_offline_script(self):
+        for module_name in (
+            "migrations.versions.0004_territory_catalog",
+            "migrations.versions.0005_public_data_indexes",
+            "migrations.versions.0006_outbox_terminal_retention",
+        ):
+            migration = importlib.import_module(module_name)
+            with (
+                patch.object(migration.context, "is_offline_mode", return_value=True),
+                patch.object(migration, "op") as operations,
+                patch.object(migration.sa, "inspect") as inspect,
+            ):
+                migration.upgrade()
+                migration.downgrade()
+            self.assertEqual([], operations.mock_calls)
+            inspect.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -30,10 +30,8 @@ class AlertStateMachine:
         active = {item.episode: item for item in restored.active_episodes}
         if len(active) != len(restored.active_episodes):
             raise ValueError("snapshot contains duplicate active episodes")
-        if any(
-            item.episode.location_uid not in scope.applicable_region_ids for item in active.values()
-        ):
-            raise ValueError("snapshot contains episodes outside the configured scope")
+        if any(not self._episode_applies(item.episode) for item in active.values()):
+            raise ValueError("snapshot contains episodes outside the effective configured scope")
         if restored.state is AlertState.ACTIVE and not active:
             raise ValueError("ACTIVE snapshot must contain active episodes")
         if restored.state in (AlertState.UNKNOWN, AlertState.CLEAR_CONFIRMED) and active:
@@ -54,10 +52,8 @@ class AlertStateMachine:
         baseline = restored.last_full_active_episodes
         if baseline is not None and len(baseline) != len(set(baseline)):
             raise ValueError("full-snapshot baseline contains duplicate episodes")
-        if baseline is not None and any(
-            item.location_uid not in scope.applicable_region_ids for item in baseline
-        ):
-            raise ValueError("full-snapshot baseline contains episodes outside scope")
+        if baseline is not None and any(not self._episode_applies(item) for item in baseline):
+            raise ValueError("full-snapshot baseline contains episodes outside effective scope")
         if restored.state is AlertState.ACTIVE and baseline is None:
             raise ValueError("ACTIVE snapshot requires a validated full baseline")
         if restored.pending_clear_candidate:
@@ -127,9 +123,7 @@ class AlertStateMachine:
     def apply_failure(self, failure: SourceFailure) -> Transition:
         previous = self._state
         if failure.kind is SourceFailureKind.PROCESS_RESTART:
-            self._state = (
-                AlertState.STALE if self._active_episodes else AlertState.UNKNOWN
-            )
+            self._state = AlertState.STALE if self._active_episodes else AlertState.UNKNOWN
             self._last_full_active_episodes = None
             self._processed_update_ids.clear()
             self._last_fetch_revision = None
@@ -153,11 +147,7 @@ class AlertStateMachine:
         previous: AlertState,
     ) -> Transition:
         relevant = tuple(
-            sorted(
-                item
-                for item in update.active_episodes
-                if item.location_uid in self._scope.applicable_region_ids
-            )
+            sorted(item for item in update.active_episodes if self._episode_applies(item))
         )
         self._last_full_active_episodes = relevant
         if relevant:
@@ -186,6 +176,13 @@ class AlertStateMachine:
                 reason="full snapshot confirms active episodes",
             )
         return self._observe_empty(update.update_id, previous)
+
+    def _episode_applies(self, episode: AlertEpisode) -> bool:
+        if episode.location_uid not in self._scope.applicable_region_ids:
+            return False
+        if episode.alert_type == "air_raid_partial":
+            return episode.location_uid == self._scope.selected_region_id
+        return True
 
     def _apply_not_modified(
         self,

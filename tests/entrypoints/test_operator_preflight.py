@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,19 @@ from time_tl.entrypoints.operator_preflight import (
     probe_candidate,
 )
 from time_tl.infrastructure.alerts import HttpResponse
+from time_tl.runtime.region_registry_full import EXPECTED_RECORD_COUNT, load_catalog
+
+MARKER = "Thu, 24 Sep 2026 10:00:00 GMT"
+
+
+def full_body() -> bytes:
+    uids = tuple(record.uid for record in load_catalog().records)
+    statuses = [" "] * (max(map(int, uids)) + 1)
+    for uid in uids:
+        statuses[int(uid)] = "N"
+    statuses[31] = "A"
+    statuses[1903] = "P"
+    return json.dumps("".join(statuses)).encode()
 
 
 class FakeSession:
@@ -33,7 +47,7 @@ class FakeBot:
 
 class FullTransport:
     async def send(self, _request: object) -> HttpResponse:
-        return HttpResponse(200, {"Last-Modified": "marker"}, b'"NNNNNNNNNNNNNNNNNNNNNNNNNNN"')
+        return HttpResponse(200, {"Last-Modified": MARKER}, full_body())
 
 
 def candidate(*, allowlist: tuple[int, ...] = (123,)) -> ActivationCandidate:
@@ -70,7 +84,7 @@ async def test_probe_is_read_only_and_summary_contains_no_secrets_or_ids() -> No
     assert bots[0].session.closed
     summary = evidence.sanitized_summary()
     assert "revision=5" in summary
-    assert "covered_regions=27" in summary
+    assert f"covered_regions={EXPECTED_RECORD_COUNT}" in summary
     assert "persisted=no" in summary
     assert "123" not in summary
     assert "secret" not in summary
@@ -92,7 +106,7 @@ async def test_probe_rejects_any_non_exact_allowlist(allowlist: tuple[int, ...])
 async def test_probe_rejects_partial_provider_response_after_closing_bot() -> None:
     class PartialTransport:
         async def send(self, _request: object) -> HttpResponse:
-            return HttpResponse(200, {}, b'"NNNNNNNNNNNNNNNNNNNNNNNNNNN"')
+            return HttpResponse(200, {}, full_body())
 
     bot = FakeBot("ignored")
     with pytest.raises(OperatorPreflightError, match="full-snapshot"):
@@ -103,3 +117,18 @@ async def test_probe_rejects_partial_provider_response_after_closing_bot() -> No
             transport_factory=PartialTransport,
         )
     assert bot.session.closed
+
+
+@pytest.mark.asyncio
+async def test_probe_rejects_malformed_last_modified_marker() -> None:
+    class MalformedMarkerTransport:
+        async def send(self, _request: object) -> HttpResponse:
+            return HttpResponse(200, {"Last-Modified": "not-an-http-date"}, full_body())
+
+    with pytest.raises(OperatorPreflightError, match="full-snapshot"):
+        await probe_candidate(
+            candidate(),
+            123,
+            bot_factory=FakeBot,
+            transport_factory=MalformedMarkerTransport,
+        )

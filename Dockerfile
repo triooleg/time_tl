@@ -16,6 +16,7 @@ FROM python:3.12-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    TIME_TL_DATA_DIR=/app/data \
     PATH="/opt/venv/bin:$PATH"
 
 RUN groupadd --system --gid 10001 time_tl \

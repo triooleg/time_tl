@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Iterator, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
-from typing import Protocol, cast
+from time import monotonic
+from typing import Protocol, TypeVar, cast
 from uuid import uuid4
 
 from time_tl.application.schedule_editor import ScheduleEditor
 from time_tl.domain.schedule import (
     ActivationProposal,
+    ConfirmationError,
     ImportProposal,
     ImportSessionRepository,
     InMemoryImportSessionRepository,
@@ -34,6 +37,75 @@ from time_tl.domain.schedule import (
 from time_tl.domain.schedule.resolver import ResolvedDay
 
 from .models import Button, NotificationMode, View
+
+_IMPORT_PREVIEW_MAX_CHARS = 3_500
+_IMPORT_PREVIEW_LESSONS_PER_DAY = 6
+
+
+def _safe_preview_value(raw: object, *, limit: int = 120) -> str:
+    value = " ".join(str(raw or "").split())
+    value = value.replace("&", "＆").replace("<", "‹").replace(">", "›")
+    if not value:
+        return "не вказано"
+    return value if len(value) <= limit else f"{value[: limit - 1]}…"
+
+
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
+
+class _BoundedTTLMap(MutableMapping[_K, _V]):
+    """Small process-local LRU cache; durable data always remains authoritative."""
+
+    def __init__(
+        self,
+        *,
+        max_entries: int,
+        ttl_seconds: float,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        if max_entries < 1 or ttl_seconds <= 0:
+            raise ValueError("invalid process-state cache limits")
+        self._max_entries = max_entries
+        self._ttl_seconds = ttl_seconds
+        self._clock = clock
+        self._items: OrderedDict[_K, tuple[float, _V]] = OrderedDict()
+
+    def _prune(self, now: float | None = None) -> None:
+        current = self._clock() if now is None else now
+        expired = [
+            key
+            for key, (touched_at, _) in self._items.items()
+            if current - touched_at >= self._ttl_seconds
+        ]
+        for key in expired:
+            self._items.pop(key, None)
+
+    def __getitem__(self, key: _K) -> _V:
+        now = self._clock()
+        self._prune(now)
+        _, value = self._items.pop(key)
+        self._items[key] = (now, value)
+        return value
+
+    def __setitem__(self, key: _K, value: _V) -> None:
+        now = self._clock()
+        self._prune(now)
+        self._items.pop(key, None)
+        self._items[key] = (now, value)
+        while len(self._items) > self._max_entries:
+            self._items.popitem(last=False)
+
+    def __delitem__(self, key: _K) -> None:
+        del self._items[key]
+
+    def __iter__(self) -> Iterator[_K]:
+        self._prune()
+        return iter(tuple(self._items))
+
+    def __len__(self) -> int:
+        self._prune()
+        return len(self._items)
 
 
 @dataclass(frozen=True)
@@ -68,8 +140,16 @@ class AccountRepository(Protocol):
 class InMemoryAccountRepository:
     """Test/local adapter. Production wiring must replace it with PostgreSQL."""
 
-    def __init__(self) -> None:
-        self.accounts: dict[int, UserAccount] = {}
+    def __init__(
+        self,
+        *,
+        max_accounts: int = 256,
+        ttl_seconds: float = 900.0,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self.accounts: MutableMapping[int, UserAccount] = _BoundedTTLMap(
+            max_entries=max_accounts, ttl_seconds=ttl_seconds, clock=clock
+        )
 
     def get_or_create(self, user_id: int) -> UserAccount:
         return self.accounts.setdefault(user_id, UserAccount(user_id))
@@ -88,6 +168,26 @@ class DisabledImportSessionRepository:
     create = assert_pending = bind_replacement = consume_atomically = revoke = _blocked
 
 
+def _compact_profile_name(name: str, *, limit: int = 30) -> str:
+    compact = " ".join(name.split())
+    return compact if len(compact) <= limit else compact[: limit - 1].rstrip() + "…"
+
+
+def _friendly_territory_name(name: str | None) -> str:
+    if not name:
+        return "не обрано"
+    compact = " ".join(name.split())
+    if " та " in compact and "територіальна громада" in compact:
+        compact = compact.rsplit(" та ", 1)[-1]
+    return compact.replace(" територіальна громада", " громада")
+
+
+def _recurring_lesson_counts(profile: ScheduleProfile) -> tuple[int, int]:
+    lessons = tuple(lesson for rule in profile.rules for lesson in rule.lessons)
+    enabled = sum(lesson.enabled for lesson in lessons)
+    return enabled, len(lessons) - enabled
+
+
 class TelegramApplication:
     """Telegram use cases which return presentation data and never send messages."""
 
@@ -99,6 +199,9 @@ class TelegramApplication:
         repository: AccountRepository | None = None,
         import_sessions: ImportSessionRepository | None = None,
         allow_in_memory_import_sessions: bool = True,
+        process_state_max_users: int = 256,
+        process_state_ttl_seconds: float = 900.0,
+        process_state_clock: Callable[[], float] = monotonic,
     ) -> None:
         self.regions = tuple(regions)
         self._region_by_id = {item.region_id: item for item in regions}
@@ -113,13 +216,43 @@ class TelegramApplication:
                 ImportSessionRepository, DisabledImportSessionRepository()
             )
         self.import_sessions = selected_import_sessions
-        self._pending_regions: dict[int, Region] = {}
-        self._editors: dict[tuple[int, str], ScheduleEditor] = {}
-        self._activations: dict[tuple[int, str], tuple[ProfileCollection, ActivationProposal]] = {}
-        self._imports: dict[tuple[int, str], tuple[ProfileCollection, ImportProposal]] = {}
-        self._replacements: dict[
+        self._pending_regions: MutableMapping[int, Region] = _BoundedTTLMap(
+            max_entries=process_state_max_users,
+            ttl_seconds=process_state_ttl_seconds,
+            clock=process_state_clock,
+        )
+        self._editors: MutableMapping[tuple[int, str], ScheduleEditor] = _BoundedTTLMap(
+            max_entries=process_state_max_users * ProfileCollection.MAX_PROFILES,
+            ttl_seconds=process_state_ttl_seconds,
+            clock=process_state_clock,
+        )
+        proposal_limit = process_state_max_users * 2
+        self._activations: MutableMapping[
+            tuple[int, str], tuple[ProfileCollection, ActivationProposal]
+        ] = _BoundedTTLMap(
+            max_entries=proposal_limit,
+            ttl_seconds=process_state_ttl_seconds,
+            clock=process_state_clock,
+        )
+        self._imports: MutableMapping[tuple[int, str], tuple[ProfileCollection, ImportProposal]] = (
+            _BoundedTTLMap(
+                max_entries=proposal_limit,
+                ttl_seconds=process_state_ttl_seconds,
+                clock=process_state_clock,
+            )
+        )
+        self._replacements: MutableMapping[
             tuple[int, str], tuple[ProfileCollection, ReplacementProposal]
-        ] = {}
+        ] = _BoundedTTLMap(
+            max_entries=proposal_limit,
+            ttl_seconds=process_state_ttl_seconds,
+            clock=process_state_clock,
+        )
+        self._deletions: MutableMapping[int, tuple[str, int]] = _BoundedTTLMap(
+            max_entries=process_state_max_users,
+            ttl_seconds=process_state_ttl_seconds,
+            clock=process_state_clock,
+        )
 
     def start(self, user_id: int) -> View:
         account = self.repository.get_or_create(user_id)
@@ -144,25 +277,16 @@ class TelegramApplication:
 
     def region_prompt(self) -> View:
         return View(
-            "Вкажіть регіон. Геолокація потрібна лише один раз для підказки і не "
-            "зберігається. Регіон буде записано тільки після підтвердження.",
-            (
-                (Button("📍 Надіслати геолокацію", request_location=True),),
-                (Button("🗺 Обрати вручну", "region:list"),),
-            ),
+            "Оберіть територію вручну. Бот не запитує та не обробляє геолокацію.",
+            ((Button("🗺 Обрати територію", "region:list"),),),
         )
 
     async def submit_location(self, user_id: int, latitude: float, longitude: float) -> View:
-        candidate = await self.resolver.resolve(latitude, longitude)
-        # Coordinates deliberately never enter an account or pending state.
-        if candidate is None or candidate.region_id not in self._region_by_id:
-            return View(
-                "Не вдалося визначити підтримуваний регіон. Оберіть його вручну.",
-                ((Button("🗺 Обрати вручну", "region:list"),),),
-            )
-        candidate = self._region_by_id[candidate.region_id]
-        self._pending_regions[user_id] = candidate
-        return self._region_confirmation(candidate)
+        del user_id, latitude, longitude
+        return View(
+            "Геолокація не використовується. Оберіть область, район і громаду вручну.",
+            ((Button("🗺 Обрати територію", "region:list"),),),
+        )
 
     def list_regions(self) -> View:
         rows = tuple((Button(item.name, f"region:pick:{item.region_id}"),) for item in self.regions)
@@ -189,21 +313,114 @@ class TelegramApplication:
 
     def menu(self, user_id: int, *, prefix: str = "") -> View:
         account = self.repository.get_or_create(user_id)
-        active = next((p for p in account.profiles.values() if p.active), None)
+        active = next((profile for profile in account.profiles.values() if profile.active), None)
         summary = (
-            f"Режим: {account.mode.label if account.mode else 'не обрано'}\n"
-            f"Регіон: {account.region_name or 'не обрано'}\n"
-            f"Активний розклад: {active.name if active else 'ще немає'}"
+            "⚙️ Ваші налаштування\n\n"
+            f"🔔 Сповіщення: {account.mode.label if account.mode else 'не обрано'}\n"
+            f"📍 Територія: {_friendly_territory_name(account.region_name)}\n"
+            f"📚 Розклад: {active.name if active else 'ще немає'}"
         )
         text = f"{prefix}\n\n{summary}" if prefix else summary
         return View(
             text,
             (
-                (Button("🗓 Розклади", "menu:schedules"),),
-                (Button("🔔 Режим сповіщень", "menu:mode"),),
-                (Button("📍 Змінити регіон", "menu:region"),),
-                (Button("⏱ Нагадування", "menu:reminder"),),
+                (Button("📚 Розклад", "menu:schedules"),),
+                (Button("🔔 Сповіщення", "menu:mode"),),
+                (Button("📍 Територія", "menu:region"),),
+                (Button("⏰ Нагадування", "menu:reminder"),),
+                (Button("ℹ️ Як це працює", "menu:info"),),
+                (Button("🗑 Видалити мої дані", "account:delete:request"),),
             ),
+        )
+
+    @staticmethod
+    def info() -> View:
+        return View(
+            "ℹ️ Як працює Time TL\n\n"
+            "🚨 Під час офіційної повітряної тривоги бот повідомляє про небезпеку "
+            "для обраної території та радить прямувати до укриття. Бот не стверджує, "
+            "що фактичний урок зупинено, і не пропонує підключатися під час тривоги.\n\n"
+            "✅ Після підтвердженого офіційного відбою бот перевіряє активний розклад. "
+            "Якщо зараз триває або незабаром почнеться урок, бот надішле його назву й час, "
+            "коли ці дані доступні. Окреме нагадування до уроку надходить лише тоді, "
+            "коли воно ввімкнене в налаштуваннях.\n\n"
+            "⚠️ Бот є допоміжним сервісом. Завжди виконуйте офіційні повідомлення "
+            "та вказівки служб безпеки.",
+            ((Button("🏠 Головне меню", "menu:home"),),),
+        )
+
+    def request_data_deletion(self, user_id: int) -> View:
+        self.repository.get_or_create(user_id)
+        token = uuid4().hex[:12]
+        self._deletions[user_id] = (token, 1)
+        return View(
+            "⚠️ Видалення особистих даних\n\n"
+            "Буде безповоротно видалено:\n"
+            "• ваш Telegram ID;\n"
+            "• обрану територію;\n"
+            "• налаштування сповіщень і нагадувань;\n"
+            "• усі розклади та збережені посилання на уроки.\n\n"
+            "Це не вплине на дані інших користувачів. Продовжити?",
+            (
+                (Button("Продовжити", f"account:delete:review:{token}"),),
+                (Button("Скасувати", "account:delete:cancel"),),
+            ),
+        )
+
+    def review_data_deletion(self, user_id: int, token: str) -> View:
+        if self._deletions.get(user_id) != (token, 1):
+            return self._expired_data_deletion_view()
+        self._deletions[user_id] = (token, 2)
+        return View(
+            "🛑 Останнє підтвердження\n\n"
+            "Дію неможливо скасувати або відновити. Натисніть "
+            "«Так, видалити назавжди», лише якщо справді хочете видалити "
+            "ВСІ МОЇ ДАНІ.",
+            (
+                (
+                    Button(
+                        "🗑 Так, видалити назавжди",
+                        f"account:delete:confirm:{token}",
+                    ),
+                ),
+                (Button("Скасувати", "account:delete:cancel"),),
+            ),
+        )
+
+    def data_deletion_is_confirmed(self, user_id: int, token: str) -> bool:
+        return self._deletions.get(user_id) == (token, 2)
+
+    def cancel_data_deletion(self, user_id: int) -> View:
+        self._deletions.pop(user_id, None)
+        return self.menu(user_id, prefix="Видалення даних скасовано.")
+
+    def clear_user_process_state(self, user_id: int) -> None:
+        import_tokens = [token for owner_id, token in tuple(self._imports) if owner_id == user_id]
+        for token in import_tokens:
+            try:
+                self.import_sessions.revoke(token)
+            except (ConfirmationError, KeyError):
+                pass
+        self._pending_regions.pop(user_id, None)
+        self._deletions.pop(user_id, None)
+        for state in (
+            self._editors,
+            self._activations,
+            self._imports,
+            self._replacements,
+        ):
+            for key in tuple(state):
+                if key[0] == user_id:
+                    state.pop(key, None)
+        if isinstance(self.repository, InMemoryAccountRepository):
+            self.repository.accounts.pop(user_id, None)
+
+    @staticmethod
+    def _expired_data_deletion_view() -> View:
+        return View(
+            "Це підтвердження видалення застаріло або належить іншому користувачу. "
+            "Дані не видалено.",
+            ((Button("🏠 Головне меню", "menu:home"),),),
         )
 
     def schedules_menu(self, user_id: int) -> View:
@@ -216,22 +433,36 @@ class TelegramApplication:
                     (Button("📥 Імпортувати", "schedule:import"),),
                 ),
             )
-        lines = ["Ваші розклади:"]
-        rows: list[tuple[Button, ...]] = [
-            (Button("➕ Створити", "schedule:create"), Button("📥 Імпортувати", "schedule:import")),
+        profile_count = len(account.profiles)
+        lines = [
+            f"🗓 Ваші розклади — {profile_count} з {ProfileCollection.MAX_PROFILES}.",
+            "✅ — активний розклад для нагадувань.",
+            "Натисніть розклад, щоб переглянути або змінити його.",
         ]
-        for profile in account.profiles.values():
-            marker = "✅" if profile.active else "○"
-            lines.append(f"{marker} {profile.name}")
-            rows.append((Button(f"✏️ {profile.name}", f"schedule:edit:{profile.profile_id}"),))
-            if not profile.active:
-                rows.append(
-                    (
-                        Button(
-                            f"Активувати {profile.name}", f"activate:request:{profile.profile_id}"
-                        ),
-                    )
+        rows: list[tuple[Button, ...]] = []
+        if profile_count < ProfileCollection.MAX_PROFILES:
+            rows.append(
+                (
+                    Button("➕ Створити", "schedule:create"),
+                    Button("📥 Імпортувати", "schedule:import"),
                 )
+            )
+        else:
+            lines.append("Ліміт заповнено: для нового розкладу видаліть один із наявних.")
+            rows.append((Button("📥 Імпортувати із заміною", "schedule:import"),))
+        for index, profile in enumerate(account.profiles.values(), start=1):
+            enabled, disabled = _recurring_lesson_counts(profile)
+            total = enabled + disabled
+            lesson_state = "порожній" if total == 0 else f"{enabled}/{total} увімк."
+            marker = "✅" if profile.active else "▫️"
+            rows.append(
+                (
+                    Button(
+                        f"{marker} {index}. {_compact_profile_name(profile.name)} · {lesson_state}",
+                        f"schedule:edit:{profile.profile_id}",
+                    ),
+                )
+            )
         return View("\n".join(lines), tuple(rows))
 
     def request_profile_export(self, user_id: int, profile_id: str) -> View:
@@ -291,6 +522,18 @@ class TelegramApplication:
         self.repository.save(account)
         return profile_id
 
+    def _editor_for_mutation(self, user_id: int, profile: ScheduleProfile) -> ScheduleEditor:
+        """Build from the latest repository state, including DB lesson references.
+
+        PostgreSQL assigns ``storage_ref`` values only after persistence. Reusing
+        a pre-save editor would drop those references on the next mutation and
+        rotate lesson identity, links, and reminder dedupe keys.
+        """
+
+        editor = ScheduleEditor.from_profile(profile)
+        self._editors[(user_id, profile.profile_id)] = editor
+        return editor
+
     def add_lesson(
         self,
         user_id: int,
@@ -307,9 +550,8 @@ class TelegramApplication:
     ) -> ScheduleProfile:
         account = self.repository.get_or_create(user_id)
         current = account.profiles[profile_id]
-        editor = self._editors.setdefault(
-            (user_id, profile_id), ScheduleEditor.from_profile(current)
-        )
+        editor = self._editor_for_mutation(user_id, current)
+
         editor.add_lesson(
             weekday=weekday,
             start=start,
@@ -337,15 +579,88 @@ class TelegramApplication:
     ) -> ScheduleProfile:
         account = self.repository.get_or_create(user_id)
         current = account.profiles[profile_id]
-        editor = self._editors.setdefault(
-            (user_id, profile_id), ScheduleEditor.from_profile(current)
-        )
+        editor = self._editor_for_mutation(user_id, current)
+
         editor.set_lesson_enabled(
             weekday=weekday,
             lesson_index=lesson_index,
             enabled=enabled,
             week_parity=week_parity,
             date_parity=date_parity,
+        )
+        account.profiles[profile_id] = editor.build(active=current.active)
+        self.repository.save(account)
+        return account.profiles[profile_id]
+
+    def set_lesson_enabled_by_selector(
+        self,
+        user_id: int,
+        profile_id: str,
+        *,
+        rule_index: int,
+        lesson_index: int,
+        expected_fingerprint: str,
+        enabled: bool,
+    ) -> ScheduleProfile:
+        account = self.repository.get_or_create(user_id)
+        current = account.profiles[profile_id]
+        editor = self._editor_for_mutation(user_id, current)
+
+        editor.set_lesson_enabled_by_selector(
+            rule_index=rule_index,
+            lesson_index=lesson_index,
+            expected_fingerprint=expected_fingerprint,
+            enabled=enabled,
+        )
+        account.profiles[profile_id] = editor.build(active=current.active)
+        self.repository.save(account)
+        return account.profiles[profile_id]
+
+    def edit_lesson(
+        self,
+        user_id: int,
+        profile_id: str,
+        *,
+        rule_index: int,
+        lesson_index: int,
+        expected_fingerprint: str,
+        start: time,
+        end: time,
+        title: str,
+    ) -> ScheduleProfile:
+        account = self.repository.get_or_create(user_id)
+        current = account.profiles[profile_id]
+        editor = self._editor_for_mutation(user_id, current)
+
+        editor.edit_lesson(
+            rule_index=rule_index,
+            lesson_index=lesson_index,
+            expected_fingerprint=expected_fingerprint,
+            start=start,
+            end=end,
+            title=title,
+        )
+        account.profiles[profile_id] = editor.build(active=current.active)
+        self.repository.save(account)
+        return account.profiles[profile_id]
+
+    def delete_lesson(
+        self,
+        user_id: int,
+        profile_id: str,
+        *,
+        rule_index: int,
+        lesson_index: int,
+        expected_fingerprint: str,
+    ) -> ScheduleProfile:
+        account = self.repository.get_or_create(user_id)
+        current = account.profiles[profile_id]
+        editor = self._editor_for_mutation(user_id, current)
+
+        editor.delete_lesson(
+            rule_index=rule_index,
+            lesson_index=lesson_index,
+            expected_fingerprint=expected_fingerprint,
         )
         account.profiles[profile_id] = editor.build(active=current.active)
         self.repository.save(account)
@@ -360,9 +675,8 @@ class TelegramApplication:
     ) -> ScheduleProfile:
         account = self.repository.get_or_create(user_id)
         current = account.profiles[profile_id]
-        editor = self._editors.setdefault(
-            (user_id, profile_id), ScheduleEditor.from_profile(current)
-        )
+        editor = self._editor_for_mutation(user_id, current)
+
         editor.set_date_lessons(day, lessons)
         account.profiles[profile_id] = editor.build(active=current.active)
         self.repository.save(account)
@@ -371,9 +685,8 @@ class TelegramApplication:
     def set_day_off(self, user_id: int, profile_id: str, day: date) -> ScheduleProfile:
         account = self.repository.get_or_create(user_id)
         current = account.profiles[profile_id]
-        editor = self._editors.setdefault(
-            (user_id, profile_id), ScheduleEditor.from_profile(current)
-        )
+        editor = self._editor_for_mutation(user_id, current)
+
         editor.set_day_off(day)
         account.profiles[profile_id] = editor.build(active=current.active)
         self.repository.save(account)
@@ -412,24 +725,58 @@ class TelegramApplication:
         collection = ProfileCollection(tuple(account.profiles.values()))
         proposal = propose_import(raw, sessions=self.import_sessions)
         self._imports[(user_id, proposal.token)] = (collection, proposal)
+        return proposal.token, self.import_preview_view(proposal)
+
+    def import_preview_view(self, proposal: ImportProposal) -> View:
         links = "так — потрібне окреме підтвердження" if proposal.links_present else "ні"
         lines = [
-            f"Шаблон: {proposal.profile.name}",
-            f"Джерело: {proposal.source_display_label or 'не вказано'}",
-            f"Створено: {proposal.created_at or 'не вказано'}",
+            f"Шаблон: {_safe_preview_value(proposal.profile.name)}",
+            f"Джерело: {_safe_preview_value(proposal.source_display_label)}",
+            f"Створено: {_safe_preview_value(proposal.created_at)}",
             f"Посилання на уроки: {links}",
             "Попередній перегляд 14 днів:",
-            *self._preview_lines(proposal.resolved_preview),
+            *self._bounded_import_preview_lines(proposal.resolved_preview),
         ]
-        return proposal.token, View(
-            "\n".join(lines),
+        text = "\n".join(lines)
+        if len(text) > _IMPORT_PREVIEW_MAX_CHARS:
+            text = (
+                text[: _IMPORT_PREVIEW_MAX_CHARS - 80].rstrip()
+                + "\n… Перегляд скорочено. Повний розклад буде збережено після підтвердження."
+            )
+        confirm_callback = f"import:confirm:{proposal.token}"
+        if len(confirm_callback.encode("utf-8")) > 64:
+            raise ValueError("import callback exceeds Telegram limit")
+        return View(
+            text,
             (
                 (
-                    Button("✅ Імпортувати", f"import:confirm:{proposal.token}"),
+                    Button("✅ Імпортувати", confirm_callback),
                     Button("Скасувати", "menu:schedules"),
                 ),
             ),
         )
+
+    @staticmethod
+    def _bounded_import_preview_lines(days: Sequence[ResolvedDay]) -> tuple[str, ...]:
+        result: list[str] = []
+        for item in days[:14]:
+            enabled = [lesson for lesson in item.lessons if lesson.enabled]
+            visible = enabled[:_IMPORT_PREVIEW_LESSONS_PER_DAY]
+            labels = [
+                f"{lesson.start:%H:%M} {_safe_preview_value(lesson.title, limit=48)}"
+                for lesson in visible
+            ]
+            if len(enabled) > len(visible):
+                labels.append(f"ще {len(enabled) - len(visible)}")
+            result.append(f"• {item.day:%d.%m}: {', '.join(labels) or 'вихідний'}")
+        return tuple(result)
+
+    def revoke_import_preview(self, user_id: int, token: str) -> None:
+        self._imports.pop((user_id, token), None)
+        try:
+            self.import_sessions.revoke(token)
+        except (ConfirmationError, KeyError, RuntimeError):
+            pass
 
     def confirm_import(self, user_id: int, token: str, *, confirm_links: bool = False) -> View:
         collection, proposal = self._imports[(user_id, token)]

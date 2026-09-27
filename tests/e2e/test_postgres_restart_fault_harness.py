@@ -5,6 +5,7 @@ import os
 import unittest
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from alembic import command
@@ -13,14 +14,13 @@ from sqlalchemy import func, insert, select, text
 from sqlalchemy.exc import DBAPIError
 
 from time_tl.application.schedule_worker import ScheduleWorker
-from time_tl.application.sender_worker import SenderWorker
+from time_tl.application.sender_worker import DeliveryRecipient, SenderWorker
 from time_tl.bot.models import NotificationMode as BotNotificationMode
 from time_tl.domain.alerts import (
     AlertEpisode,
     AlertState,
     OfficialAlertSnapshot,
     ProviderSnapshotKind,
-    RegionScope,
     SourceFailure,
     SourceFailureKind,
 )
@@ -30,13 +30,28 @@ from time_tl.infrastructure.db.accounts import AsyncPostgresAccountRepository
 from time_tl.infrastructure.db.alerts import PostgresAlertRepository
 from time_tl.infrastructure.db.base import Base
 from time_tl.infrastructure.db.engine import create_engine, create_session_factory
+from time_tl.infrastructure.db.models import (
+    ActiveTerritoryCatalog,
+    AlertScope,
+    AlertSnapshot,
+    OutboxMessage,
+    TerritoryCatalogVersion,
+    User,
+)
+from time_tl.infrastructure.db.models import (
+    AlertEpisode as AlertEpisodeRow,
+)
 from time_tl.infrastructure.db.models import AlertPollState as PollRow
-from time_tl.infrastructure.db.models import AlertSnapshot, OutboxMessage
+from time_tl.infrastructure.db.territories import (
+    PostgresTerritoryCatalogRepository,
+    TerritoryDraftRow,
+)
 from time_tl.infrastructure.db.workers import (
     PostgresScheduleWorkerRepository,
     PostgresSenderRepository,
 )
 from time_tl.infrastructure.telegram import TelegramMessage
+from time_tl.runtime.services import PostgresRegionConfirmationService
 
 DATABASE_ENV = "TIME_TL_E2E_DATABASE_URL"
 CONFIRM_ENV = "TIME_TL_E2E_ALLOW_DESTRUCTIVE"
@@ -73,9 +88,7 @@ class TerminateBackendBeforeCommit:
             backend_pid = (
                 await self._session.execute(text("SELECT pg_backend_pid()"))
             ).scalar_one()
-            control_engine = create_engine(
-                self._database_url, pool_size=1, max_overflow=0
-            )
+            control_engine = create_engine(self._database_url, pool_size=1, max_overflow=0)
             try:
                 async with control_engine.begin() as control:
                     database_name = (
@@ -148,7 +161,378 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         config = Config(str(PROJECT_ROOT / "alembic.ini"))
         # ConfigParser treats percent signs in URL-encoded passwords as interpolation.
         config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
-        command.upgrade(config, "head")
+        # Rebuild only this disposable database so this run proves the historical
+        # 0003 -> 0004 upgrade instead of accepting a schema already at head.
+        asyncio.run(cls._reset_disposable_public_schema())
+        command.upgrade(config, "0003_pending_import_payload")
+        legacy_user_id, legacy_scope_id = asyncio.run(cls._seed_legacy_0003_shape())
+        command.upgrade(config, "0004_territory_catalog")
+        asyncio.run(cls._assert_0004_upgrade_preserved_legacy_rows(legacy_user_id, legacy_scope_id))
+        command.downgrade(config, "0003_pending_import_payload")
+        asyncio.run(
+            cls._assert_0003_downgrade_preserved_legacy_rows(legacy_user_id, legacy_scope_id)
+        )
+        command.upgrade(config, "0004_territory_catalog")
+        asyncio.run(cls._assert_0004_upgrade_preserved_legacy_rows(legacy_user_id, legacy_scope_id))
+        asyncio.run(cls._drop_0005_indexes_for_legacy_shape())
+        command.upgrade(config, "0005_public_data_indexes")
+        asyncio.run(cls._assert_0005_indexes_and_explain())
+        command.downgrade(config, "0004_territory_catalog")
+        asyncio.run(cls._assert_0005_indexes_absent())
+        command.upgrade(config, "0005_public_data_indexes")
+        asyncio.run(cls._assert_0005_indexes_and_explain())
+        asyncio.run(cls._drop_0006_indexes_for_legacy_shape())
+        command.upgrade(config, "0006_outbox_terminal_retention")
+        asyncio.run(cls._assert_0006_indexes_and_explain())
+        command.downgrade(config, "0005_public_data_indexes")
+        asyncio.run(cls._assert_0006_indexes_absent())
+        command.upgrade(config, "0006_outbox_terminal_retention")
+        asyncio.run(cls._assert_0006_indexes_and_explain())
+        cls.upgrade_0003_to_0004_verified = True
+        cls.downgrade_0004_to_0003_verified = True
+        cls.upgrade_0004_to_0005_verified = True
+        cls.downgrade_0005_to_0004_verified = True
+        cls.upgrade_0005_to_0006_verified = True
+        cls.downgrade_0006_to_0005_verified = True
+
+    @staticmethod
+    async def _reset_disposable_public_schema() -> None:
+        """Reset only the name-guarded disposable database used by this harness."""
+
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.begin() as connection:
+                database_name = (
+                    await connection.execute(text("SELECT current_database()"))
+                ).scalar_one()
+                if "time_tl_e2e" not in str(database_name).casefold():
+                    raise RuntimeError("refusing schema reset outside a time_tl_e2e database")
+                await connection.execute(text("DROP SCHEMA public CASCADE"))
+                await connection.execute(text("CREATE SCHEMA public"))
+        finally:
+            await engine.dispose()
+
+    @staticmethod
+    async def _seed_legacy_0003_shape():
+        """Recreate the old schema hidden by 0001 importing current metadata."""
+
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        legacy_user_id = uuid4()
+        legacy_scope_id = uuid4()
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "ALTER TABLE alert_scopes "
+                        "DROP CONSTRAINT IF EXISTS fk_alert_scopes_selected_territory"
+                    )
+                )
+                await connection.execute(
+                    text(
+                        "ALTER TABLE alert_scopes "
+                        "DROP CONSTRAINT IF EXISTS ck_alert_scopes_territory_revision_pair"
+                    )
+                )
+                await connection.execute(
+                    text("ALTER TABLE alert_scopes DROP COLUMN IF EXISTS territory_catalog_version")
+                )
+                await connection.execute(
+                    text("ALTER TABLE alert_scopes DROP COLUMN IF EXISTS territory_provider")
+                )
+                await connection.execute(text("DROP TABLE IF EXISTS active_territory_catalogs"))
+                await connection.execute(text("DROP TABLE IF EXISTS territories"))
+                await connection.execute(text("DROP TABLE IF EXISTS territory_catalog_versions"))
+                await connection.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(id, telegram_user_id, mode, confirmed_region_id, region_name) "
+                        "VALUES (:id, :telegram_user_id, 'LESSONS_AND_ALERTS', '14', "
+                        "'Legacy Kyiv oblast')"
+                    ),
+                    {"id": legacy_user_id, "telegram_user_id": 8_000_004},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO alert_scopes "
+                        "(id, user_id, selected_region_id, applicable_region_ids) "
+                        "VALUES (:id, :user_id, '14', '[\"14\"]'::jsonb)"
+                    ),
+                    {"id": legacy_scope_id, "user_id": legacy_user_id},
+                )
+        finally:
+            await engine.dispose()
+        return legacy_user_id, legacy_scope_id
+
+    @staticmethod
+    async def _assert_0004_upgrade_preserved_legacy_rows(legacy_user_id, legacy_scope_id) -> None:
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.connect() as connection:
+                user = (
+                    await connection.execute(
+                        text(
+                            "SELECT telegram_user_id, confirmed_region_id FROM users WHERE id = :id"
+                        ),
+                        {"id": legacy_user_id},
+                    )
+                ).one()
+                scope = (
+                    await connection.execute(
+                        text(
+                            "SELECT selected_region_id, applicable_region_ids, "
+                            "territory_provider, territory_catalog_version "
+                            "FROM alert_scopes WHERE id = :id"
+                        ),
+                        {"id": legacy_scope_id},
+                    )
+                ).one()
+                revision = (
+                    await connection.execute(text("SELECT version_num FROM alembic_version"))
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+        if tuple(user) != (8_000_004, "14"):
+            raise AssertionError("0004 migration did not preserve the legacy user")
+        if tuple(scope) != ("14", ["14"], None, None):
+            raise AssertionError("0004 migration did not preserve the legacy alert scope")
+        if revision != "0004_territory_catalog":
+            raise AssertionError(f"unexpected Alembic revision after upgrade: {revision}")
+
+    @staticmethod
+    async def _assert_0003_downgrade_preserved_legacy_rows(legacy_user_id, legacy_scope_id) -> None:
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.connect() as connection:
+                user = (
+                    await connection.execute(
+                        text(
+                            "SELECT telegram_user_id, confirmed_region_id FROM users WHERE id = :id"
+                        ),
+                        {"id": legacy_user_id},
+                    )
+                ).one()
+                scope = (
+                    await connection.execute(
+                        text(
+                            "SELECT selected_region_id, applicable_region_ids "
+                            "FROM alert_scopes WHERE id = :id"
+                        ),
+                        {"id": legacy_scope_id},
+                    )
+                ).one()
+                hierarchy_tables = int(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT count(*) FROM information_schema.tables "
+                                "WHERE table_schema = 'public' AND table_name IN "
+                                "('territory_catalog_versions', 'territories', "
+                                "'active_territory_catalogs')"
+                            )
+                        )
+                    ).scalar_one()
+                )
+                revision_columns = int(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT count(*) FROM information_schema.columns "
+                                "WHERE table_schema = 'public' "
+                                "AND table_name = 'alert_scopes' AND column_name IN "
+                                "('territory_provider', 'territory_catalog_version')"
+                            )
+                        )
+                    ).scalar_one()
+                )
+                revision = (
+                    await connection.execute(text("SELECT version_num FROM alembic_version"))
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+        if tuple(user) != (8_000_004, "14"):
+            raise AssertionError("0004 downgrade did not preserve the legacy user")
+        if tuple(scope) != ("14", ["14"]):
+            raise AssertionError("0004 downgrade did not preserve the legacy alert scope")
+        if hierarchy_tables != 0 or revision_columns != 0:
+            raise AssertionError("0004 downgrade left territory schema objects behind")
+        if revision != "0003_pending_import_payload":
+            raise AssertionError(f"unexpected Alembic revision after downgrade: {revision}")
+
+    @staticmethod
+    async def _drop_0005_indexes_for_legacy_shape() -> None:
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.begin() as connection:
+                for name in (
+                    "ix_outbox_aggregate",
+                    "ix_outbox_confirmed_clear_cursor",
+                    "ix_pending_import_active_user_created",
+                ):
+                    await connection.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+        finally:
+            await engine.dispose()
+
+    @staticmethod
+    async def _assert_0005_indexes_absent() -> None:
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.connect() as connection:
+                names = set(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' "
+                                "AND indexname IN ('ix_outbox_aggregate', "
+                                "'ix_outbox_confirmed_clear_cursor', "
+                                "'ix_pending_import_active_user_created')"
+                            )
+                        )
+                    ).scalars()
+                )
+        finally:
+            await engine.dispose()
+        if names:
+            raise AssertionError(f"0005 downgrade left indexes behind: {sorted(names)}")
+
+    @staticmethod
+    async def _assert_0005_indexes_and_explain() -> None:
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        expected = {
+            "ix_outbox_aggregate",
+            "ix_outbox_confirmed_clear_cursor",
+            "ix_pending_import_active_user_created",
+        }
+        try:
+            async with engine.begin() as connection:
+                names = set(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' "
+                                "AND indexname IN ('ix_outbox_aggregate', "
+                                "'ix_outbox_confirmed_clear_cursor', "
+                                "'ix_pending_import_active_user_created')"
+                            )
+                        )
+                    ).scalars()
+                )
+                await connection.execute(text("SET LOCAL enable_seqscan = off"))
+                aggregate_plan = (
+                    await connection.execute(
+                        text(
+                            "EXPLAIN (FORMAT JSON) SELECT id FROM outbox_messages "
+                            "WHERE aggregate_type = 'schedule' AND aggregate_id = 'probe'"
+                        )
+                    )
+                ).scalar_one()
+                clear_plan = (
+                    await connection.execute(
+                        text(
+                            "EXPLAIN (FORMAT JSON) SELECT id FROM outbox_messages "
+                            "WHERE event_type = 'ALL_CLEAR_CONFIRMED' "
+                            "AND created_at >= now() - interval '20 minutes' "
+                            "ORDER BY created_at, id LIMIT 100"
+                        )
+                    )
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+        if names != expected:
+            raise AssertionError(f"0005 indexes mismatch: {sorted(names)}")
+        if "ix_outbox_aggregate" not in str(aggregate_plan):
+            raise AssertionError("aggregate lookup EXPLAIN did not use ix_outbox_aggregate")
+        if "ix_outbox_confirmed_clear_cursor" not in str(clear_plan):
+            raise AssertionError(
+                "confirmed-clear EXPLAIN did not use ix_outbox_confirmed_clear_cursor"
+            )
+
+    @staticmethod
+    async def _drop_0006_indexes_for_legacy_shape() -> None:
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.begin() as connection:
+                for name in (
+                    "ix_outbox_delivered_retention",
+                    "ix_outbox_dead_retention",
+                ):
+                    await connection.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+        finally:
+            await engine.dispose()
+
+    @staticmethod
+    async def _assert_0006_indexes_absent() -> None:
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.connect() as connection:
+                names = set(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' "
+                                "AND indexname IN ('ix_outbox_delivered_retention', "
+                                "'ix_outbox_dead_retention')"
+                            )
+                        )
+                    ).scalars()
+                )
+        finally:
+            await engine.dispose()
+        if names:
+            raise AssertionError(f"0006 downgrade left indexes behind: {sorted(names)}")
+
+    @staticmethod
+    async def _assert_0006_indexes_and_explain() -> None:
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        expected = {
+            "ix_outbox_delivered_retention",
+            "ix_outbox_dead_retention",
+        }
+        try:
+            async with engine.begin() as connection:
+                names = set(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' "
+                                "AND indexname IN ('ix_outbox_delivered_retention', "
+                                "'ix_outbox_dead_retention')"
+                            )
+                        )
+                    ).scalars()
+                )
+                await connection.execute(text("SET LOCAL enable_seqscan = off"))
+                delivered_plan = (
+                    await connection.execute(
+                        text(
+                            "EXPLAIN (FORMAT JSON) SELECT id FROM outbox_messages "
+                            "WHERE delivered_at IS NOT NULL AND dead_at IS NULL "
+                            "AND claimed_at IS NULL "
+                            "AND delivered_at <= now() - interval '90 days' "
+                            "ORDER BY delivered_at, id LIMIT 100"
+                        )
+                    )
+                ).scalar_one()
+                dead_plan = (
+                    await connection.execute(
+                        text(
+                            "EXPLAIN (FORMAT JSON) SELECT id FROM outbox_messages "
+                            "WHERE dead_at IS NOT NULL AND delivered_at IS NULL "
+                            "AND claimed_at IS NULL "
+                            "AND dead_at <= now() - interval '90 days' "
+                            "ORDER BY dead_at, id LIMIT 100"
+                        )
+                    )
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+        if names != expected:
+            raise AssertionError(f"0006 indexes mismatch: {sorted(names)}")
+        if "ix_outbox_delivered_retention" not in str(delivered_plan):
+            raise AssertionError(
+                "delivered retention EXPLAIN did not use ix_outbox_delivered_retention"
+            )
+        if "ix_outbox_dead_retention" not in str(dead_plan):
+            raise AssertionError("dead retention EXPLAIN did not use ix_outbox_dead_retention")
 
     @staticmethod
     async def _validate_database_name() -> None:
@@ -185,8 +569,7 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("refusing cleanup outside a time_tl_e2e database")
             preparer = connection.dialect.identifier_preparer
             table_names = [
-                preparer.quote(table.name)
-                for table in reversed(Base.metadata.sorted_tables)
+                preparer.quote(table.name) for table in reversed(Base.metadata.sorted_tables)
             ]
             await connection.execute(
                 text(f"TRUNCATE TABLE {', '.join(table_names)} RESTART IDENTITY CASCADE")
@@ -212,6 +595,173 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
                 statement = statement.where(OutboxMessage.event_type == event_type)
             return int((await session.execute(statement)).scalar_one())
 
+    @staticmethod
+    def _catalog_rows(*, renamed: bool = False) -> tuple[TerritoryDraftRow, ...]:
+        suffix = " updated" if renamed else ""
+        return (
+            TerritoryDraftRow("14", f"Kyiv oblast{suffix}", "OBLAST", None, "UA32"),
+            TerritoryDraftRow("1401", f"Kyiv raion{suffix}", "RAION", "14", "UA3202"),
+            TerritoryDraftRow(
+                "140101",
+                f"Kyiv hromada{suffix}",
+                "HROMADA",
+                "1401",
+                "UA32020010000012345",
+            ),
+        )
+
+    async def _load_and_activate_catalog(
+        self, catalog_version: str, *, renamed: bool = False
+    ) -> PostgresTerritoryCatalogRepository:
+        repository = PostgresTerritoryCatalogRepository(self.factory)
+        source_hash = ("b" if renamed else "a") * 64
+        await repository.load_draft(
+            provider="alerts.in.ua",
+            catalog_version=catalog_version,
+            source_revision=f"e2e-{catalog_version}",
+            source_sha256=source_hash,
+            rows=self._catalog_rows(renamed=renamed),
+            selectable_count=3,
+            hidden_nonselectable_count=0,
+            unresolved_total=0,
+            reconciliation_report={"unresolved_total": 0},
+        )
+        await repository.activate(
+            provider="alerts.in.ua",
+            catalog_version=catalog_version,
+            expected_source_sha256=source_hash,
+            expected_record_count=3,
+            expected_unresolved_total=0,
+        )
+        return repository
+
+    def test_upgrade_0003_to_0006_and_downgrades_are_verified(self) -> None:
+        self.assertTrue(self.upgrade_0003_to_0004_verified)
+        self.assertTrue(self.downgrade_0004_to_0003_verified)
+        self.assertTrue(self.upgrade_0004_to_0005_verified)
+        self.assertTrue(self.downgrade_0005_to_0004_verified)
+        self.assertTrue(self.upgrade_0005_to_0006_verified)
+        self.assertTrue(self.downgrade_0006_to_0005_verified)
+
+    async def test_terminal_outbox_retention_is_bounded_and_skips_locked_rows(self) -> None:
+        now = datetime.now(UTC)
+        old = now - timedelta(days=91)
+        fresh = now - timedelta(days=1)
+
+        def message(
+            event_key: str,
+            *,
+            delivered_at: datetime | None = None,
+            dead_at: datetime | None = None,
+            claimed_at: datetime | None = None,
+            attempts: int = 0,
+        ) -> OutboxMessage:
+            return OutboxMessage(
+                event_key=event_key,
+                aggregate_type="retention-e2e",
+                aggregate_id=event_key,
+                event_type="RETENTION_PROBE",
+                payload={},
+                available_at=old,
+                claimed_at=claimed_at,
+                delivered_at=delivered_at,
+                dead_at=dead_at,
+                attempts=attempts,
+            )
+
+        async with self.factory() as session:
+            async with session.begin():
+                session.add_all(
+                    [
+                        message("old-delivered", delivered_at=old, attempts=2),
+                        message("old-dead", dead_at=old, attempts=3),
+                        message(
+                            "old-claimed",
+                            delivered_at=old,
+                            claimed_at=now,
+                            attempts=4,
+                        ),
+                        message("fresh-delivered", delivered_at=fresh, attempts=5),
+                        message("fresh-dead", dead_at=fresh, attempts=6),
+                        message("pending", attempts=7),
+                    ]
+                )
+
+        repository = PostgresSenderRepository(
+            self.factory, stale_after_seconds=120, clock=lambda: now
+        )
+        self.assertEqual(await repository.prune_terminal_outbox(now, limit=1), 1)
+        self.assertEqual(await repository.prune_terminal_outbox(now, limit=1), 1)
+        self.assertEqual(await repository.prune_terminal_outbox(now, limit=1), 0)
+
+        async with self.factory() as session:
+            survivors = dict(
+                (
+                    await session.execute(
+                        select(OutboxMessage.event_key, OutboxMessage.attempts).where(
+                            OutboxMessage.aggregate_type == "retention-e2e"
+                        )
+                    )
+                ).all()
+            )
+        self.assertEqual(
+            survivors,
+            {
+                "old-claimed": 4,
+                "fresh-delivered": 5,
+                "fresh-dead": 6,
+                "pending": 7,
+            },
+        )
+
+        async with self.factory() as session:
+            async with session.begin():
+                session.add_all(
+                    [
+                        message("locked-old-delivered", delivered_at=old, attempts=8),
+                        message("unlocked-old-delivered", delivered_at=old, attempts=9),
+                    ]
+                )
+
+        async with self.factory() as locking_session:
+            async with locking_session.begin():
+                await locking_session.execute(
+                    select(OutboxMessage)
+                    .where(OutboxMessage.event_key == "locked-old-delivered")
+                    .with_for_update()
+                )
+                self.assertEqual(await repository.prune_terminal_outbox(now, limit=1), 1)
+                async with self.factory() as checking_session:
+                    remaining_during_lock = set(
+                        (
+                            await checking_session.execute(
+                                select(OutboxMessage.event_key).where(
+                                    OutboxMessage.event_key.in_(
+                                        ("locked-old-delivered", "unlocked-old-delivered")
+                                    )
+                                )
+                            )
+                        ).scalars()
+                    )
+                self.assertEqual(remaining_during_lock, {"locked-old-delivered"})
+
+        self.assertEqual(await repository.prune_terminal_outbox(now, limit=1), 1)
+        async with self.factory() as session:
+            remaining = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(OutboxMessage)
+                        .where(
+                            OutboxMessage.event_key.in_(
+                                ("locked-old-delivered", "unlocked-old-delivered")
+                            )
+                        )
+                    )
+                ).scalar_one()
+            )
+        self.assertEqual(remaining, 0)
+
     async def test_atomic_rollback_restart_two_clear_return_and_sender_dedupe(self) -> None:
         telegram_user_id = 8_000_021
         base = datetime.now(UTC)
@@ -219,6 +769,7 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         worker_local = worker_now.astimezone(ZoneInfo("Europe/Kyiv"))
         if (worker_local.hour, worker_local.minute) == (23, 59):
             worker_now += timedelta(minutes=1)
+        catalog = await self._load_and_activate_catalog("e2e-v1")
         account_repository = AsyncPostgresAccountRepository(self.factory)
         account = await account_repository.get_or_create(telegram_user_id)
         account.mode = BotNotificationMode.LESSONS_AND_SIRENS
@@ -242,19 +793,14 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         }
         await account_repository.save(account)
 
+        await PostgresRegionConfirmationService(self.factory, catalog).confirm_region(account)
         alerts = PostgresAlertRepository(self.factory)
-        scope = RegionScope.from_hierarchy("14")
-        await alerts.confirm_region_scope_for_telegram_user(
-            telegram_user_id,
-            confirmed_region_id="14",
-            region_name="Київська область",
-            scope=scope,
-        )
+        active_revision = (await alerts.poll_state()).fetch_revision + 1
 
         episode = AlertEpisode("14", "AIR", "e2e-episode")
         active = OfficialAlertSnapshot(
             update_id="e2e-active-1",
-            fetch_revision=1,
+            fetch_revision=active_revision,
             kind=ProviderSnapshotKind.FULL_200,
             covered_region_ids=frozenset({"14"}),
             active_episodes=(episode,),
@@ -263,7 +809,8 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
             is_fresh=True,
         )
         created = await alerts.apply_snapshot_and_poll_state_atomically(
-            active, AlertPollState(fetch_revision=1, last_modified="active-1")
+            active,
+            AlertPollState(fetch_revision=active_revision, last_modified="active-1"),
         )
         self.assertEqual(len(created), 1)
         self.assertEqual(await self._snapshot_state(), AlertState.ACTIVE)
@@ -276,7 +823,7 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
 
         first_clear = OfficialAlertSnapshot(
             update_id="e2e-clear-candidate",
-            fetch_revision=2,
+            fetch_revision=active_revision + 1,
             kind=ProviderSnapshotKind.FULL_200,
             covered_region_ids=frozenset({"14"}),
             active_episodes=(),
@@ -285,14 +832,15 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
             is_fresh=True,
         )
         await alerts.apply_snapshot_and_poll_state_atomically(
-            first_clear, AlertPollState(fetch_revision=2, last_modified="clear-1")
+            first_clear,
+            AlertPollState(fetch_revision=active_revision + 1, last_modified="clear-1"),
         )
         self.assertEqual(await self._snapshot_state(), AlertState.STALE)
         self.assertEqual(await self._outbox_count("ALL_CLEAR_CONFIRMED"), 0)
 
         second_clear = OfficialAlertSnapshot(
             update_id="e2e-clear-confirmed",
-            fetch_revision=3,
+            fetch_revision=active_revision + 2,
             kind=ProviderSnapshotKind.FULL_200,
             covered_region_ids=frozenset({"14"}),
             active_episodes=(),
@@ -301,7 +849,8 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
             is_fresh=True,
         )
         await alerts.apply_snapshot_and_poll_state_atomically(
-            second_clear, AlertPollState(fetch_revision=3, last_modified="clear-2")
+            second_clear,
+            AlertPollState(fetch_revision=active_revision + 2, last_modified="clear-2"),
         )
         self.assertEqual(await self._snapshot_state(), AlertState.CLEAR_CONFIRMED)
         self.assertEqual(await self._outbox_count("ALL_CLEAR_CONFIRMED"), 1)
@@ -312,7 +861,7 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         faulting_alerts = PostgresAlertRepository(faulting_factory)  # type: ignore[arg-type]
         rolled_back_realert = OfficialAlertSnapshot(
             update_id="e2e-realert-must-rollback",
-            fetch_revision=4,
+            fetch_revision=active_revision + 3,
             kind=ProviderSnapshotKind.FULL_200,
             covered_region_ids=frozenset({"14"}),
             active_episodes=(AlertEpisode("14", "AIR", "e2e-episode-2"),),
@@ -323,14 +872,17 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(DBAPIError):
             await faulting_alerts.apply_snapshot_and_poll_state_atomically(
                 rolled_back_realert,
-                AlertPollState(fetch_revision=4, last_modified="must-rollback"),
+                AlertPollState(
+                    fetch_revision=active_revision + 3,
+                    last_modified="must-rollback",
+                ),
             )
 
         await self._restart_database_clients()
         async with self.factory() as session:
             poll = await session.get(PollRow, 1)
             self.assertIsNotNone(poll)
-            self.assertEqual(poll.fetch_revision, 3)
+            self.assertEqual(poll.fetch_revision, active_revision + 2)
             self.assertEqual(poll.last_modified, "clear-2")
         self.assertEqual(await self._snapshot_state(), AlertState.CLEAR_CONFIRMED)
         self.assertEqual(await self._outbox_count(), 2)
@@ -365,8 +917,274 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await sender.run_once(worker_now, sleep=no_sleep), 2)
         self.assertEqual(await sender.run_once(worker_now, sleep=no_sleep), 0)
         self.assertEqual(len(recording.sent), 2)
-        self.assertTrue(any("підключайтеся" in item.text for item in recording.sent))
-        self.assertTrue(any("Відбій" in item.text for item in recording.sent))
+        self.assertTrue(all(item.text.strip() for item in recording.sent))
+        async with self.factory() as session:
+            delivered_types = set(
+                (
+                    await session.execute(
+                        select(OutboxMessage.event_type).where(
+                            OutboxMessage.delivered_at.is_not(None)
+                        )
+                    )
+                ).scalars()
+            )
+        self.assertEqual(
+            delivered_types,
+            {"ALL_CLEAR_CONFIRMED", "RETURN_TO_ACTIVE_LESSON"},
+        )
+
+    async def test_catalog_activation_serializes_and_preserves_user_data(self) -> None:
+        catalog = await self._load_and_activate_catalog("e2e-preserve-v1")
+        telegram_user_id = 8_000_029
+        account_repository = AsyncPostgresAccountRepository(self.factory)
+        account = await account_repository.get_or_create(telegram_user_id)
+        account.mode = BotNotificationMode.LESSONS_AND_SIRENS
+        account.region_id = "140101"
+        account.region_name = "Kyiv hromada"
+        account.reminder_lead_minutes = 11
+        account.profiles = {
+            "preserved-profile": ScheduleProfile(
+                "preserved-profile",
+                "Preserved profile",
+                overrides=(
+                    DateOverride(
+                        day=datetime.now(ZoneInfo("Europe/Kyiv")).date(),
+                        day_off=False,
+                        lessons=(Lesson(time(8), time(8, 45), "Preserved lesson"),),
+                    ),
+                ),
+                active=True,
+            )
+        }
+        await account_repository.save(account)
+        await PostgresRegionConfirmationService(self.factory, catalog).confirm_region(account)
+
+        alerts = PostgresAlertRepository(self.factory)
+        active = OfficialAlertSnapshot(
+            update_id="preservation-active",
+            fetch_revision=2,
+            kind=ProviderSnapshotKind.FULL_200,
+            covered_region_ids=frozenset({"14", "1401", "140101"}),
+            active_episodes=(AlertEpisode("14", "AIR", "preservation-episode"),),
+            fetched_at=datetime.now(UTC),
+            is_complete=True,
+            is_fresh=True,
+        )
+        created = await alerts.apply_snapshot_and_poll_state_atomically(
+            active,
+            AlertPollState(fetch_revision=2, last_modified="preservation-v1"),
+        )
+        self.assertEqual(len(created), 1)
+        self.assertEqual(await self._outbox_count(), 1)
+
+        v2_hash = "b" * 64
+        await catalog.load_draft(
+            provider="alerts.in.ua",
+            catalog_version="e2e-preserve-v2",
+            source_revision="e2e-preserve-v2",
+            source_sha256=v2_hash,
+            rows=self._catalog_rows(renamed=True),
+            selectable_count=3,
+            hidden_nonselectable_count=0,
+            unresolved_total=0,
+            reconciliation_report={"unresolved_total": 0},
+        )
+        confirmation = PostgresRegionConfirmationService(self.factory, catalog)
+        await asyncio.gather(
+            catalog.activate(
+                provider="alerts.in.ua",
+                catalog_version="e2e-preserve-v2",
+                expected_source_sha256=v2_hash,
+                expected_record_count=3,
+                expected_unresolved_total=0,
+            ),
+            confirmation.confirm_region(account),
+        )
+
+        await self._restart_database_clients()
+        catalog = PostgresTerritoryCatalogRepository(self.factory)
+        self.assertEqual(
+            await catalog.assert_runtime_ready(provider="alerts.in.ua"),
+            "e2e-preserve-v2",
+        )
+        restored = await AsyncPostgresAccountRepository(self.factory).get_or_create(
+            telegram_user_id
+        )
+        self.assertEqual(restored.mode, BotNotificationMode.LESSONS_AND_SIRENS)
+        self.assertEqual(restored.region_id, "140101")
+        # Either operation may win the advisory lock.  Both serial orders are
+        # valid: confirmation-before-activation keeps the confirmed display
+        # label, while activation-before-confirmation refreshes it from v2.
+        self.assertIn(restored.region_name, {"Kyiv hromada", "Kyiv hromada updated"})
+        self.assertEqual(restored.reminder_lead_minutes, 11)
+        self.assertEqual(tuple(restored.profiles), ("preserved-profile",))
+        self.assertEqual(
+            restored.profiles["preserved-profile"].overrides[0].lessons[0].title,
+            "Preserved lesson",
+        )
+
+        async with self.factory() as session:
+            scope = (
+                await session.execute(
+                    select(AlertScope).join(User).where(User.telegram_user_id == telegram_user_id)
+                )
+            ).scalar_one()
+            snapshot = await session.get(AlertSnapshot, scope.id)
+            episode_count = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(AlertEpisodeRow)
+                        .where(AlertEpisodeRow.scope_id == scope.id)
+                    )
+                ).scalar_one()
+            )
+            pointer = await session.get(ActiveTerritoryCatalog, "alerts.in.ua")
+            old_version = await session.get(
+                TerritoryCatalogVersion, ("alerts.in.ua", "e2e-preserve-v1")
+            )
+            poll = await session.get(PollRow, 1)
+        self.assertEqual(scope.territory_provider, "alerts.in.ua")
+        self.assertEqual(scope.territory_catalog_version, "e2e-preserve-v2")
+        self.assertEqual(scope.applicable_region_ids, ["14", "1401", "140101"])
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.state, "UNKNOWN")
+        self.assertIsNone(snapshot.last_fetch_revision)
+        self.assertIsNone(snapshot.last_full_active_episodes)
+        self.assertEqual(snapshot.processed_update_ids, [])
+        self.assertFalse(snapshot.pending_clear_candidate)
+        self.assertEqual(episode_count, 0)
+        self.assertIsNotNone(pointer)
+        self.assertEqual(pointer.catalog_version, "e2e-preserve-v2")
+        self.assertIsNotNone(old_version)
+        self.assertEqual(old_version.status, "RETIRED")
+        self.assertIsNotNone(poll)
+        self.assertEqual(poll.fetch_revision, 3)
+        self.assertIsNone(poll.last_modified)
+        self.assertIsNone(poll.last_success_at)
+        self.assertEqual(await self._outbox_count(), 1)
+        sender_repository = PostgresSenderRepository(
+            self.factory,
+            stale_after_seconds=120,
+            clock=lambda: datetime.now(UTC),
+        )
+        self.assertEqual(
+            await sender_repository.claim_batch_skip_locked(datetime.now(UTC), limit=10),
+            (),
+        )
+        async with self.factory() as session:
+            stale_outbox = (await session.execute(select(OutboxMessage))).scalar_one()
+        self.assertIsNotNone(stale_outbox.dead_at)
+        self.assertEqual(stale_outbox.last_error_code, "delivery_policy_changed")
+
+    async def test_account_delete_serializes_with_sender_and_prevents_later_send(self) -> None:
+        target_chat_id = 8_000_041
+        other_chat_id = 8_000_042
+        now = datetime.now(UTC)
+        accounts = AsyncPostgresAccountRepository(self.factory)
+        target = await accounts.get_or_create(target_chat_id)
+        target.mode = BotNotificationMode.LESSONS
+        target.profiles = {
+            "delete-race": ScheduleProfile("delete-race", "Delete race", active=True)
+        }
+        await accounts.save(target)
+        await accounts.get_or_create(other_chat_id)
+
+        async with self.factory() as session:
+            async with session.begin():
+                target_row = (
+                    await session.execute(
+                        select(User).where(User.telegram_user_id == target_chat_id)
+                    )
+                ).scalar_one()
+                outbox = OutboxMessage(
+                    event_key="delete-race-reminder",
+                    aggregate_type="schedule",
+                    aggregate_id=str(target_row.id),
+                    event_type="LESSON_REMINDER",
+                    payload={"lesson_title": "Race lesson", "profile_revision": 1},
+                    available_at=now,
+                    claimed_at=now,
+                )
+                session.add(outbox)
+                await session.flush()
+                message_id = str(outbox.id)
+
+        repository = PostgresSenderRepository(
+            self.factory, stale_after_seconds=120, clock=lambda: now
+        )
+        entered_transport = asyncio.Event()
+        release_transport = asyncio.Event()
+        sent = 0
+
+        async def deliver() -> None:
+            nonlocal sent
+            entered_transport.set()
+            await release_transport.wait()
+            sent += 1
+
+        delivery_task = asyncio.create_task(
+            repository.deliver_if_authorized(
+                message_id,
+                now,
+                deliver,
+                expected_recipient=DeliveryRecipient(target_chat_id),
+            )
+        )
+        await asyncio.wait_for(entered_transport.wait(), timeout=5)
+        delete_task = asyncio.create_task(accounts.delete_account(target_chat_id))
+        await asyncio.sleep(0.05)
+        self.assertFalse(delete_task.done())
+        release_transport.set()
+
+        self.assertTrue(await asyncio.wait_for(delivery_task, timeout=5))
+        self.assertTrue(await asyncio.wait_for(delete_task, timeout=5))
+        self.assertEqual(sent, 1)
+
+        async with self.factory() as session:
+            target_count = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(User)
+                        .where(User.telegram_user_id == target_chat_id)
+                    )
+                ).scalar_one()
+            )
+            other_count = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(User)
+                        .where(User.telegram_user_id == other_chat_id)
+                    )
+                ).scalar_one()
+            )
+            orphan_count = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(OutboxMessage)
+                        .where(OutboxMessage.event_key == "delete-race-reminder")
+                    )
+                ).scalar_one()
+            )
+        self.assertEqual((target_count, other_count, orphan_count), (0, 1, 0))
+
+        callback_called = False
+
+        async def forbidden_delivery() -> None:
+            nonlocal callback_called
+            callback_called = True
+
+        with self.assertRaises(LookupError):
+            await repository.deliver_if_authorized(
+                message_id,
+                now,
+                forbidden_delivery,
+                expected_recipient=DeliveryRecipient(target_chat_id),
+            )
+        self.assertFalse(callback_called)
 
 
 if __name__ == "__main__":

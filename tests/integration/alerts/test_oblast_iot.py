@@ -46,9 +46,7 @@ def adapter(transport):
 class OblastIotProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_and_p_are_active_n_is_absent_with_official_uid_order(self):
         statuses = "AP" + "N" * 25
-        transport = Transport(
-            json_response(200, statuses, **{"Last-Modified": "m1"})
-        )
+        transport = Transport(json_response(200, statuses, **{"Last-Modified": "m1"}))
 
         result = await adapter(transport).fetch(fetch_revision=1, last_modified=None)
 
@@ -182,9 +180,9 @@ class OblastIotProviderTests(unittest.IsolatedAsyncioTestCase):
         timed_out = await adapter(Transport(TimeoutError())).fetch(
             fetch_revision=1, last_modified=None
         )
-        limited = await adapter(
-            Transport(raw_response(429, **{"Retry-After": "45"}))
-        ).fetch(fetch_revision=2, last_modified=None)
+        limited = await adapter(Transport(raw_response(429, **{"Retry-After": "45"}))).fetch(
+            fetch_revision=2, last_modified=None
+        )
         denied = await adapter(Transport(raw_response(403))).fetch(
             fetch_revision=3, last_modified=None
         )

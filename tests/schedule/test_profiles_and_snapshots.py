@@ -115,8 +115,11 @@ class SnapshotTests(unittest.TestCase):
         sessions, proposal = self.propose(snapshot)
         self.assertTrue(proposal.links_present)
         self.assertIn("join_links", proposal.included_fields)
-        with self.assertRaises(ConfirmationError):
-            confirm_import(ProfileCollection(), proposal, sessions=sessions, confirmed=True)
+        without_links = confirm_import(
+            ProfileCollection(), proposal, sessions=sessions, confirmed=True
+        )
+        self.assertIsNone(without_links.rules[0].lessons[0].join_url)
+        sessions, proposal = self.propose(snapshot)
         imported = confirm_import(
             ProfileCollection(),
             proposal,
@@ -232,6 +235,32 @@ class SnapshotTests(unittest.TestCase):
                 sessions=InMemoryImportSessionRepository(),
                 verifier=AcceptVerifier(True),
             )
+
+    def test_metadata_source_label_and_created_at_are_strictly_bounded(self):
+        oversized_label = copy.deepcopy(self.snapshot)
+        oversized_label["metadata"]["source_display_label"] = "x" * 161
+        with self.assertRaisesRegex(SnapshotError, "must not exceed 160"):
+            propose_import(oversized_label, sessions=InMemoryImportSessionRepository())
+
+        blank_label = copy.deepcopy(self.snapshot)
+        blank_label["metadata"]["source_display_label"] = "   "
+        with self.assertRaisesRegex(SnapshotError, "non-empty"):
+            propose_import(blank_label, sessions=InMemoryImportSessionRepository())
+
+        for invalid_created_at in (
+            "2026-09-20",
+            "2026-09-20 10:00:00+00:00",
+            "2026-09-20T10:00:00",
+            "x" * 65,
+        ):
+            malformed = copy.deepcopy(self.snapshot)
+            malformed["metadata"]["created_at"] = invalid_created_at
+            with self.subTest(created_at=invalid_created_at):
+                with self.assertRaisesRegex(SnapshotError, "created_at"):
+                    propose_import(malformed, sessions=InMemoryImportSessionRepository())
+
+        with self.assertRaisesRegex(ValueError, "must not exceed 160"):
+            export_snapshot(self.original, source_display_label="x" * 161)
 
     def test_unknown_version_and_prohibited_identity_fail(self):
         bad_version = copy.deepcopy(self.snapshot)

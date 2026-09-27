@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, date, datetime, time
+from uuid import uuid4
 
+from time_tl.application.schedule_editor import (
+    StaleLessonSelection,
+    recurring_lesson_fingerprint,
+)
 from time_tl.bot.models import NotificationMode
 from time_tl.bot.service import InMemoryAccountRepository, Region, TelegramApplication
 from time_tl.domain.schedule import (
@@ -25,6 +31,27 @@ class FakeResolver:
         return self.result
 
 
+class AssigningStorageRefRepository(InMemoryAccountRepository):
+    """Model PostgreSQL assigning opaque lesson references on every insert."""
+
+    def save(self, account):
+        profiles = {}
+        for profile_id, profile in account.profiles.items():
+            rules = []
+            for rule in profile.rules:
+                lessons = tuple(
+                    replace(
+                        lesson,
+                        storage_ref=(lesson.storage_ref or f"lesson:rule:{uuid4()}"),
+                    )
+                    for lesson in rule.lessons
+                )
+                rules.append(replace(rule, lessons=lessons))
+            profiles[profile_id] = replace(profile, rules=tuple(rules))
+        account.profiles = profiles
+        super().save(account)
+
+
 class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.kyiv = Region("31", "м. Київ")
@@ -37,7 +64,7 @@ class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     async def _onboard(self, user_id: int = 1) -> None:
         self.app.choose_mode(user_id, NotificationMode.LESSONS_AND_SIRENS)
-        await self.app.submit_location(user_id, 50.4501, 30.5234)
+        self.app.propose_manual_region(user_id, "31")
         self.app.confirm_region(user_id, confirmed=True)
 
     def test_first_start_explains_safety_and_offers_exact_three_modes(self) -> None:
@@ -46,25 +73,30 @@ class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
         callbacks = [button.callback_data for row in view.rows for button in row]
         self.assertEqual(callbacks, ["mode:lessons", "mode:lessons_and_sirens", "mode:sirens"])
 
-    async def test_location_only_persists_confirmed_region_not_coordinates(self) -> None:
+    def test_region_prompt_is_manual_only_without_location_request(self) -> None:
+        view = self.app.choose_mode(6, NotificationMode.SIRENS)
+        buttons = [button for row in view.rows for button in row]
+        self.assertIn("вручну", view.text)
+        self.assertEqual(["region:list"], [button.callback_data for button in buttons])
+        self.assertFalse(any(button.request_location for button in buttons))
+
+    async def test_location_is_rejected_without_resolution_or_coordinate_storage(self) -> None:
         self.app.choose_mode(7, NotificationMode.SIRENS)
         view = await self.app.submit_location(7, 49.8397, 24.0297)
-        self.assertIn("м. Київ", view.text)
-        account_before = self.repo.accounts[7]
-        self.assertIsNone(account_before.region_id)
-        self.assertNotIn("latitude", vars(account_before))
-        self.assertNotIn("longitude", vars(account_before))
-        self.app.confirm_region(7, confirmed=True)
+        self.assertIn("не використовується", view.text)
+        self.assertIn("вручну", view.text)
+        self.assertEqual([], self.resolver.calls)
         account = self.repo.accounts[7]
-        self.assertEqual(account.region_id, "31")
-        self.assertEqual(account.region_name, "м. Київ")
-        self.assertNotIn("50", repr(account))
+        self.assertIsNone(account.region_id)
+        self.assertNotIn(7, self.app._pending_regions)
+        self.assertNotIn("latitude", vars(account))
+        self.assertNotIn("longitude", vars(account))
 
     def test_manual_region_requires_confirmation_and_can_be_rejected(self) -> None:
         self.app.propose_manual_region(3, "46")
         view = self.app.confirm_region(3, confirmed=False)
         self.assertIsNone(self.repo.accounts[3].region_id)
-        self.assertIn("Геолокація", view.text)
+        self.assertIn("вручну", view.text)
         self.app.propose_manual_region(3, "46")
         self.app.confirm_region(3, confirmed=True)
         self.assertEqual(self.repo.accounts[3].region_id, "46")
@@ -81,6 +113,48 @@ class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.app.create_profile(1, name)
         with self.assertRaises(ProfileLimitReached):
             self.app.create_profile(1, "Четвертий")
+
+    def test_maximum_import_preview_is_bounded_sanitized_and_revocable(self) -> None:
+        source = TelegramApplication(
+            regions=(self.kyiv,),
+            resolver=self.resolver,
+            repository=InMemoryAccountRepository(),
+        )
+        profile_id = source.create_profile(80, "Максимальний")
+        for index in range(100):
+            weekday, hour = divmod(index, 15)
+            source.add_lesson(
+                80,
+                profile_id,
+                weekday=weekday,
+                start=time(hour),
+                end=time(hour, 30),
+                title=f"Дуже довга назва уроку {index + 1} " + "А" * 100,
+            )
+        profile = source.repository.get_or_create(80).profiles[profile_id]
+        raw = encode_snapshot(
+            export_snapshot(
+                profile,
+                source_display_label="<небезпечне & джерело>" * 5,
+            )
+        )
+
+        token, preview = self.app.preview_import(90, raw)
+
+        self.assertLessEqual(len(preview.text), 3_500)
+        self.assertNotIn("<", preview.text)
+        self.assertNotIn(">", preview.text)
+        self.assertNotIn("&", preview.text)
+        self.assertIn("Попередній перегляд", preview.text)
+        for row in preview.rows:
+            for button in row:
+                if button.callback_data is not None:
+                    self.assertLessEqual(len(button.callback_data.encode("utf-8")), 64)
+        self.assertIn((90, token), self.app._imports)
+        self.app.revoke_import_preview(90, token)
+        self.assertNotIn((90, token), self.app._imports)
+        with self.assertRaises(ConfirmationError):
+            self.app.import_sessions.assert_pending(token, "not-used", datetime.now(UTC))
 
     async def test_arbitrary_lessons_parity_weekend_toggle_and_override(self) -> None:
         await self._onboard()
@@ -123,6 +197,132 @@ class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
         profile = self.app.set_day_off(1, profile_id, date(2026, 10, 3))
         self.assertEqual(resolve_day(profile, date(2026, 10, 3)).lessons, ())
 
+    async def test_edit_toggle_and_delete_use_fresh_selector_and_preserve_active(self) -> None:
+        await self._onboard()
+        profile_id = self.app.create_profile(1, "8-А")
+        profile = self.app.add_lesson(
+            1,
+            profile_id,
+            weekday=0,
+            start=time(9),
+            end=time(10),
+            title="Математика",
+            join_url="https://school.example/join",
+        )
+        fingerprint = recurring_lesson_fingerprint(profile, 0, 0)
+
+        edited = self.app.edit_lesson(
+            1,
+            profile_id,
+            rule_index=0,
+            lesson_index=0,
+            expected_fingerprint=fingerprint,
+            start=time(10),
+            end=time(11),
+            title="Алгебра",
+        )
+        lesson = edited.rules[0].lessons[0]
+        self.assertTrue(edited.active)
+        self.assertEqual((lesson.start, lesson.end, lesson.title), (time(10), time(11), "Алгебра"))
+        self.assertEqual(lesson.join_url, "https://school.example/join")
+        with self.assertRaises(StaleLessonSelection):
+            self.app.delete_lesson(
+                1,
+                profile_id,
+                rule_index=0,
+                lesson_index=0,
+                expected_fingerprint=fingerprint,
+            )
+
+        fingerprint = recurring_lesson_fingerprint(edited, 0, 0)
+        toggled = self.app.set_lesson_enabled_by_selector(
+            1,
+            profile_id,
+            rule_index=0,
+            lesson_index=0,
+            expected_fingerprint=fingerprint,
+            enabled=False,
+        )
+        self.assertFalse(toggled.rules[0].lessons[0].enabled)
+        fingerprint = recurring_lesson_fingerprint(toggled, 0, 0)
+        deleted = self.app.delete_lesson(
+            1,
+            profile_id,
+            rule_index=0,
+            lesson_index=0,
+            expected_fingerprint=fingerprint,
+        )
+        self.assertTrue(deleted.active)
+        self.assertEqual(len(deleted.rules), 1)
+        self.assertEqual(deleted.rules[0].lessons, ())
+
+    def test_each_mutation_rehydrates_db_assigned_lesson_identity(self) -> None:
+        repository = AssigningStorageRefRepository()
+        app = TelegramApplication(
+            regions=(self.kyiv,), resolver=self.resolver, repository=repository
+        )
+        profile_id = app.create_profile(77, "DB identity")
+        first = app.add_lesson(
+            77,
+            profile_id,
+            weekday=0,
+            start=time(9),
+            end=time(10),
+            title="A",
+            join_url="https://school.example/a",
+        )
+        first_ref = first.rules[0].lessons[0].storage_ref
+        self.assertIsNotNone(first_ref)
+
+        second = app.add_lesson(
+            77,
+            profile_id,
+            weekday=0,
+            start=time(10),
+            end=time(11),
+            title="B",
+        )
+        second_ref = second.rules[0].lessons[1].storage_ref
+        self.assertEqual(second.rules[0].lessons[0].storage_ref, first_ref)
+        self.assertIsNotNone(second_ref)
+
+        first_fingerprint = recurring_lesson_fingerprint(second, 0, 0)
+        edited = app.edit_lesson(
+            77,
+            profile_id,
+            rule_index=0,
+            lesson_index=0,
+            expected_fingerprint=first_fingerprint,
+            start=time(8),
+            end=time(9),
+            title="A edited",
+        )
+        self.assertEqual(edited.rules[0].lessons[0].storage_ref, first_ref)
+        self.assertEqual(edited.rules[0].lessons[0].join_url, "https://school.example/a")
+        self.assertEqual(edited.rules[0].lessons[1].storage_ref, second_ref)
+
+        second_fingerprint = recurring_lesson_fingerprint(edited, 0, 1)
+        deleted = app.delete_lesson(
+            77,
+            profile_id,
+            rule_index=0,
+            lesson_index=1,
+            expected_fingerprint=second_fingerprint,
+        )
+        self.assertEqual(deleted.rules[0].lessons[0].storage_ref, first_ref)
+
+        first_fingerprint = recurring_lesson_fingerprint(deleted, 0, 0)
+        toggled = app.set_lesson_enabled_by_selector(
+            77,
+            profile_id,
+            rule_index=0,
+            lesson_index=0,
+            expected_fingerprint=first_fingerprint,
+            enabled=False,
+        )
+        self.assertEqual(toggled.rules[0].lessons[0].storage_ref, first_ref)
+        self.assertFalse(toggled.rules[0].lessons[0].enabled)
+
     async def test_activation_requires_preview_then_confirmation(self) -> None:
         await self._onboard()
         first = self.app.create_profile(1, "Основний")
@@ -162,7 +362,7 @@ class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(imported.name, source.name)
         self.assertTrue(imported.active)
 
-    async def test_import_with_join_link_demands_separate_confirmation(self) -> None:
+    async def test_import_without_link_confirmation_strips_join_link(self) -> None:
         await self._onboard()
         source_id = self.app.create_profile(1, "Посилання")
         source = self.app.add_lesson(
@@ -184,8 +384,9 @@ class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         token, preview = self.app.preview_import(9, raw)
         self.assertIn("окреме підтвердження", preview.text)
-        with self.assertRaises(ConfirmationError):
-            self.app.confirm_import(9, token)
+        self.app.confirm_import(9, token)
+        imported = next(iter(self.repo.accounts[9].profiles.values()))
+        self.assertIsNone(imported.rules[0].lessons[0].join_url)
 
     def test_reminder_lead_is_limited_to_safe_choices(self) -> None:
         self.app.set_reminder_lead(1, 15)

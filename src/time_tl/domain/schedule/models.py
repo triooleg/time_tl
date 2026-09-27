@@ -6,6 +6,21 @@ from datetime import date, time
 from enum import StrEnum
 from urllib.parse import urlparse
 
+from .quotas import (
+    MAX_LESSON_JOIN_URL_LENGTH,
+    MAX_LESSON_TITLE_LENGTH,
+    MAX_LESSONS_PER_OVERRIDE,
+    MAX_LESSONS_PER_RULE,
+    MAX_OVERRIDE_LESSONS_PER_PROFILE,
+    MAX_OVERRIDES_PER_PROFILE,
+    MAX_PROFILE_ID_LENGTH,
+    MAX_PROFILE_NAME_LENGTH,
+    MAX_RECURRING_LESSONS_PER_PROFILE,
+    MAX_RULES_PER_PROFILE,
+    require_length,
+    require_quota,
+)
+
 
 class Parity(StrEnum):
     ANY = "ANY"
@@ -35,7 +50,17 @@ class Lesson:
             raise ValueError("lesson end must be after start")
         if not self.title.strip():
             raise ValueError("lesson title must not be empty")
+        require_length(
+            code="lesson_title_too_long",
+            value=self.title,
+            limit=MAX_LESSON_TITLE_LENGTH,
+        )
         if self.join_url is not None:
+            require_length(
+                code="lesson_join_url_too_long",
+                value=self.join_url,
+                limit=MAX_LESSON_JOIN_URL_LENGTH,
+            )
             parsed = urlparse(self.join_url)
             if parsed.scheme.lower() != "https" or not parsed.netloc:
                 raise ValueError("lesson join_url must use https")
@@ -57,6 +82,11 @@ class ScheduleRule:
             raise ValueError("weekday must be in range 0..6")
         if self.valid_from and self.valid_to and self.valid_from > self.valid_to:
             raise ValueError("valid_from must not be after valid_to")
+        require_quota(
+            code="max_lessons_per_rule",
+            actual=len(self.lessons),
+            limit=MAX_LESSONS_PER_RULE,
+        )
         _validate_lessons(self.lessons)
 
     @property
@@ -88,6 +118,11 @@ class DateOverride:
     def __post_init__(self) -> None:
         if self.day_off and self.lessons:
             raise ValueError("a day-off override cannot contain lessons")
+        require_quota(
+            code="max_lessons_per_override",
+            actual=len(self.lessons),
+            limit=MAX_LESSONS_PER_OVERRIDE,
+        )
         _validate_lessons(self.lessons)
 
 
@@ -105,11 +140,41 @@ class ScheduleProfile:
             raise ValueError("profile_id must not be empty")
         if not self.name.strip():
             raise ValueError("profile name must not be empty")
+        require_length(
+            code="profile_id_too_long",
+            value=self.profile_id,
+            limit=MAX_PROFILE_ID_LENGTH,
+        )
+        require_length(
+            code="profile_name_too_long",
+            value=self.name,
+            limit=MAX_PROFILE_NAME_LENGTH,
+        )
         if self.timezone != "Europe/Kyiv":
             raise ValueError("v1 supports only Europe/Kyiv")
         days = [item.day for item in self.overrides]
         if len(days) != len(set(days)):
             raise ValueError("only one override is allowed per date")
+        require_quota(
+            code="max_rules_per_profile",
+            actual=len(self.rules),
+            limit=MAX_RULES_PER_PROFILE,
+        )
+        require_quota(
+            code="max_recurring_lessons_per_profile",
+            actual=sum(len(rule.lessons) for rule in self.rules),
+            limit=MAX_RECURRING_LESSONS_PER_PROFILE,
+        )
+        require_quota(
+            code="max_overrides_per_profile",
+            actual=len(self.overrides),
+            limit=MAX_OVERRIDES_PER_PROFILE,
+        )
+        require_quota(
+            code="max_override_lessons_per_profile",
+            actual=sum(len(override.lessons) for override in self.overrides),
+            limit=MAX_OVERRIDE_LESSONS_PER_PROFILE,
+        )
 
 
 def _validate_lessons(lessons: Iterable[Lesson]) -> None:

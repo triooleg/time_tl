@@ -5,6 +5,7 @@ from .lease import InMemorySingletonLease, PostgresAdvisoryLease, SingletonLease
 from .provider import (
     AlertsInUaAdapter,
     FetchResult,
+    FullTerritoryAlertsInUaAdapter,
     OblastAlertsInUaAdapter,
     OperatorCircuitOpen,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "AlertsInUaAdapter",
     "AsyncHttpTransport",
     "FetchResult",
+    "FullTerritoryAlertsInUaAdapter",
     "HttpRequest",
     "HttpResponse",
     "InMemoryAlertRepository",

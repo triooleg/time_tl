@@ -87,13 +87,14 @@ class DurableOutbox:
             if key not in self.delivered and key not in self.dead and item.available_at <= now
         )[:limit]
 
-    async def deliver_if_authorized(self, message_id, delivered_at, deliver):
+    async def deliver_if_authorized(self, message_id, delivered_at, deliver, *, expected_recipient):
         del delivered_at
         record = self.records[message_id]
         authorized = (
             self.target.mode is NotificationMode.LESSONS_AND_ALERTS
             and self.target.alert_state is AlertState.CLEAR_CONFIRMED
             and record.payload.get("profile_revision") == self.target.profile_revision
+            and expected_recipient.chat_id == self.target.telegram_chat_id
             and message_id not in self.delivered
         )
         if not authorized:
@@ -145,9 +146,7 @@ class RestartSafeSimulationE2E(unittest.IsolatedAsyncioTestCase):
         profile = account.profiles[profile_id]
         self.assertTrue(profile.active)
 
-        alert_repo = InMemoryAlertRepository(
-            [("student-101", RegionScope.from_hierarchy("14"))]
-        )
+        alert_repo = InMemoryAlertRepository([("student-101", RegionScope.from_hierarchy("14"))])
         clock = 100.0
 
         async def poll(item: HttpResponse | BaseException) -> None:
@@ -231,6 +230,17 @@ class RestartSafeSimulationE2E(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await ScheduleWorker(outbox).run_once(clear_at), 1)
         self.assertEqual(await ScheduleWorker(outbox).run_once(clear_at), 0)
         self.assertEqual(len(outbox.records), 1)
+        # Production claim enriches safety-sensitive messages from the current
+        # confirmed user setting; mirror that boundary in this in-memory E2E.
+        for key, item in tuple(outbox.records.items()):
+            outbox.records[key] = replace(
+                item,
+                payload={
+                    **item.payload,
+                    "confirmed_region_id": "14",
+                    "confirmed_region_name": "Київська область",
+                },
+            )
 
         telegram = RecordingTelegram()
 
@@ -251,7 +261,7 @@ class RestartSafeSimulationE2E(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(telegram.sent), 1)
         self.assertEqual(telegram.sent[0].chat_id, chat_id)
-        self.assertIn("підключайтеся", telegram.sent[0].text)
+        self.assertIn("підключайтеся", telegram.sent[0].text.lower())
 
 
 if __name__ == "__main__":

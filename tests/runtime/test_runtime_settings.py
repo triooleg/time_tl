@@ -154,15 +154,11 @@ class RuntimeAlertSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved.alert_stale_after_seconds, 180)
         self.assertEqual(resolved.owner_config_revision, 7)
         assert resolved.alerts_in_ua_token is not None
-        self.assertEqual(
-            resolved.alerts_in_ua_token.get_secret_value(), "official-provider-token"
-        )
+        self.assertEqual(resolved.alerts_in_ua_token.get_secret_value(), "official-provider-token")
 
     async def test_alert_runtime_reader_refuses_cross_revision_drift(self) -> None:
         rows = {
-            "owner_configuration_state": SimpleNamespace(
-                value={"active_revision": 8}
-            ),
+            "owner_configuration_state": SimpleNamespace(value={"active_revision": 8}),
             "owner_configuration_active": SimpleNamespace(
                 value={
                     "revision": 8,
@@ -186,9 +182,7 @@ class RuntimeAlertSettingsTests(unittest.IsolatedAsyncioTestCase):
         def factory() -> FakeRuntimeSession:
             raise AssertionError("environment-managed runtime must not read owner rows")
 
-        reader = PostgresAlertRuntimeSettingsReader(
-            factory, default_poll=15, default_stale=120
-        )
+        reader = PostgresAlertRuntimeSettingsReader(factory, default_poll=15, default_stale=120)
         self.assertEqual(await reader.read(), (15, 120))
 
 

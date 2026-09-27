@@ -186,11 +186,13 @@ class DurableImportCoordinator:
             durable.payload, token=import_token, now=checked_at
         )
         del pending
-        if proposal.links_present and not confirm_links:
-            raise ConfirmationError(
-                "importing lesson links requires separate explicit confirmation"
-            )
-        replacement = ReplacementProposal(uuid4().hex, proposal, replace_profile_id)
+        choice = "links" if confirm_links else "nolinks"
+        replacement = ReplacementProposal(
+            f"{choice}-{uuid4().hex}",
+            proposal,
+            replace_profile_id,
+            include_join_links=confirm_links,
+        )
         await sessions.bind_replacement(
             import_token,
             proposal.fingerprint,
@@ -203,6 +205,12 @@ class DurableImportCoordinator:
     async def confirm_replacement(self, user_id: int, replacement_token: str) -> Any:
         sessions = self._sessions(user_id)
         checked_at = datetime.now(UTC)
+        if replacement_token.startswith("links-"):
+            include_join_links = True
+        elif replacement_token.startswith("nolinks-"):
+            include_join_links = False
+        else:
+            raise ConfirmationError("replacement proposal choice is invalid")
 
         async def operation(session: Any, locked: Any) -> Any:
             if locked.replace_profile_id is None:
@@ -219,7 +227,7 @@ class DurableImportCoordinator:
                 proposal,
                 sessions=local,
                 replace_profile_id=locked.replace_profile_id,
-                confirm_include_join_links=proposal.links_present,
+                confirm_include_join_links=include_join_links,
                 now=checked_at,
             )
             stored = confirm_import_replacement(

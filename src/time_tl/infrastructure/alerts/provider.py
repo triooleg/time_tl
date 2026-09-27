@@ -35,6 +35,16 @@ def _parse_retry_after(value: str | None, now: datetime) -> float:
             return 60.0
 
 
+def _parse_http_date(value: str) -> datetime:
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("invalid HTTP date") from error
+    if parsed.tzinfo is None:
+        raise ValueError("HTTP date must include a timezone")
+    return parsed.astimezone(UTC)
+
+
 class OperatorCircuitOpen(RuntimeError):
     """401/403 circuit can only be closed by an operator action."""
 
@@ -96,11 +106,17 @@ class AlertsInUaAdapter:
         self._token, self._transport = token, transport
         self._covered_region_ids, self._timeout_seconds = covered_region_ids, timeout_seconds
         self._now = now or (lambda: datetime.now(UTC))
+        self._validated_last_modified: str | None = None
 
     async def fetch(self, *, fetch_revision: int, last_modified: str | None) -> FetchResult:
         headers = {"Accept": "application/json", "Authorization": f"Bearer {self._token}"}
-        if last_modified:
-            headers["If-Modified-Since"] = last_modified
+        conditional_marker = (
+            last_modified
+            if last_modified is not None and last_modified == self._validated_last_modified
+            else None
+        )
+        if conditional_marker is not None:
+            headers["If-Modified-Since"] = conditional_marker
         try:
             response = await self._transport.send(
                 HttpRequest("GET", self.ENDPOINT, headers, self._timeout_seconds)
@@ -109,7 +125,7 @@ class AlertsInUaAdapter:
             return FetchResult(failure=SourceFailure(SourceFailureKind.TIMEOUT))
         normalized = {key.lower(): value for key, value in response.headers.items()}
         if response.status == 304:
-            if last_modified is None:
+            if conditional_marker is None:
                 return self._invalid(SourceFailureKind.INVALID_RESPONSE)
             return FetchResult(
                 snapshot=self._snapshot(fetch_revision, ProviderSnapshotKind.NOT_MODIFIED_304, ()),
@@ -123,6 +139,10 @@ class AlertsInUaAdapter:
                 episodes = self._parse_active_payload(response.body)
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
                 return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+            if any(item.location_uid not in self._covered_region_ids for item in episodes):
+                return self._invalid(SourceFailureKind.PARTIAL_RESPONSE)
+            episodes = tuple(item for item in episodes if item.alert_type == "air_raid")
+            self._validated_last_modified = marker
             return FetchResult(
                 snapshot=self._snapshot(fetch_revision, ProviderSnapshotKind.FULL_200, episodes),
                 last_modified=marker,
@@ -192,6 +212,179 @@ class AlertsInUaAdapter:
         if len(parsed) != len(set(parsed)):
             raise ValueError("duplicate alert episode")
         return tuple(sorted(parsed))
+
+    def _retry_after(self, value: str | None) -> float:
+        return _parse_retry_after(value, self._now())
+
+
+class FullTerritoryAlertsInUaAdapter:
+    """Strict adapter for the official all-territory IoT snapshot.
+
+    Character positions are numeric provider UIDs, not CSV row positions.
+    The supplied UIDs must come from the byte-pinned official catalogue.
+    A persisted Last-Modified value is never trusted as a 304 baseline after
+    restart, but it remains a monotonic floor for the first unconditional 200.
+    """
+
+    ENDPOINT = "https://api.alerts.in.ua/v1/iot/active_air_raid_alerts.json"
+
+    def __init__(
+        self,
+        *,
+        token: str,
+        transport: AsyncHttpTransport,
+        region_uids: tuple[str, ...],
+        timeout_seconds: float = 10.0,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        if not token or not token.strip():
+            raise ValueError("alerts.in.ua token is required")
+        if not region_uids:
+            raise ValueError("verified region_uids registry is required")
+        if any(not uid.isdecimal() for uid in region_uids):
+            raise ValueError("region_uids must contain decimal provider UIDs")
+        numeric_uids = tuple(int(uid) for uid in region_uids)
+        if len(set(numeric_uids)) != len(numeric_uids):
+            raise ValueError("region_uids must be unique provider UIDs")
+
+        self._token, self._transport = token, transport
+        self._region_uid_by_index = {int(uid): uid for uid in region_uids}
+        self._covered_region_ids = frozenset(region_uids)
+        self._expected_length = max(numeric_uids) + 1
+        self._timeout_seconds = timeout_seconds
+        self._now = now or (lambda: datetime.now(UTC))
+        self._validated_last_modified: str | None = None
+        self._validated_last_modified_at: datetime | None = None
+        self._validated_content_digest: str | None = None
+
+    async def fetch(self, *, fetch_revision: int, last_modified: str | None) -> FetchResult:
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {self._token}"}
+        conditional_marker = (
+            last_modified
+            if last_modified is not None and last_modified == self._validated_last_modified
+            else None
+        )
+        if conditional_marker is not None:
+            headers["If-Modified-Since"] = conditional_marker
+        try:
+            response = await self._transport.send(
+                HttpRequest("GET", self.ENDPOINT, headers, self._timeout_seconds)
+            )
+        except (TimeoutError, OSError):
+            return FetchResult(failure=SourceFailure(SourceFailureKind.TIMEOUT))
+
+        normalized = {key.lower(): value for key, value in response.headers.items()}
+        if response.status == 304:
+            if conditional_marker is None:
+                return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+            response_marker = normalized.get("last-modified")
+            if response_marker is not None:
+                try:
+                    _parse_http_date(response_marker)
+                except ValueError:
+                    return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+                if response_marker != conditional_marker:
+                    return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+            return FetchResult(
+                snapshot=self._snapshot(fetch_revision, ProviderSnapshotKind.NOT_MODIFIED_304, ()),
+                last_modified=conditional_marker,
+            )
+        if response.status == 200:
+            marker = normalized.get("last-modified")
+            if not marker:
+                return self._invalid(SourceFailureKind.PARTIAL_RESPONSE)
+            try:
+                marker_at = _parse_http_date(marker)
+                persisted_floor = (
+                    _parse_http_date(last_modified) if last_modified is not None else None
+                )
+                episodes = self._parse_payload(response.body)
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+            if (
+                self._validated_last_modified_at is not None
+                and marker_at < self._validated_last_modified_at
+            ) or (persisted_floor is not None and marker_at < persisted_floor):
+                return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+            content_digest = self._episodes_digest(episodes)
+            if (
+                self._validated_last_modified_at is not None
+                and marker_at == self._validated_last_modified_at
+                and self._validated_content_digest != content_digest
+            ):
+                return self._invalid(SourceFailureKind.INVALID_RESPONSE)
+            self._validated_last_modified = marker
+            self._validated_last_modified_at = marker_at
+            self._validated_content_digest = content_digest
+            return FetchResult(
+                snapshot=self._snapshot(fetch_revision, ProviderSnapshotKind.FULL_200, episodes),
+                last_modified=marker,
+            )
+        if response.status in (401, 403):
+            return FetchResult(
+                failure=SourceFailure(SourceFailureKind.HTTP_ERROR), open_operator_circuit=True
+            )
+        if response.status == 429:
+            return FetchResult(
+                failure=SourceFailure(SourceFailureKind.HTTP_ERROR),
+                retry_after_seconds=self._retry_after(normalized.get("retry-after")),
+            )
+        return FetchResult(failure=SourceFailure(SourceFailureKind.HTTP_ERROR))
+
+    def _snapshot(
+        self, revision: int, kind: ProviderSnapshotKind, episodes: tuple[AlertEpisode, ...]
+    ) -> OfficialAlertSnapshot:
+        return OfficialAlertSnapshot(
+            update_id=_content_bound_update_id("alerts-in-ua-full-iot", revision, kind, episodes),
+            fetch_revision=revision,
+            kind=kind,
+            covered_region_ids=self._covered_region_ids,
+            active_episodes=episodes,
+            fetched_at=self._now(),
+            is_complete=True,
+            is_fresh=True,
+        )
+
+    def _parse_payload(self, body: bytes) -> tuple[AlertEpisode, ...]:
+        if not body:
+            raise ValueError("empty response")
+        statuses = json.loads(body.decode("utf-8"))
+        if not isinstance(statuses, str):
+            raise TypeError("full territory snapshot must be a JSON string")
+        if len(statuses) != self._expected_length:
+            raise ValueError("full territory snapshot length differs from the pinned UID range")
+        if any(status not in {" ", "A", "P", "N"} for status in statuses):
+            raise ValueError("full territory snapshot contains an unknown status")
+
+        episodes: list[AlertEpisode] = []
+        for index, status in enumerate(statuses):
+            uid = self._region_uid_by_index.get(index)
+            if uid is None:
+                if status != " ":
+                    raise ValueError("unknown UID position does not contain the space sentinel")
+                continue
+            if status == " ":
+                raise ValueError("known UID position contains the space sentinel")
+            if status in {"A", "P"}:
+                alert_type = "air_raid" if status == "A" else "air_raid_partial"
+                episodes.append(AlertEpisode(uid, alert_type, f"air-raid:{uid}"))
+        return tuple(episodes)
+
+    @staticmethod
+    def _episodes_digest(episodes: tuple[AlertEpisode, ...]) -> str:
+        canonical = json.dumps(
+            [
+                [episode.location_uid, episode.alert_type, episode.episode_id]
+                for episode in episodes
+            ],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        return sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _invalid(kind: SourceFailureKind) -> FetchResult:
+        return FetchResult(failure=SourceFailure(kind))
 
     def _retry_after(self, value: str | None) -> float:
         return _parse_retry_after(value, self._now())
@@ -312,9 +505,7 @@ class OblastAlertsInUaAdapter:
         self, revision: int, kind: ProviderSnapshotKind, episodes: tuple[AlertEpisode, ...]
     ) -> OfficialAlertSnapshot:
         return OfficialAlertSnapshot(
-            update_id=_content_bound_update_id(
-                "alerts-in-ua-oblast-iot", revision, kind, episodes
-            ),
+            update_id=_content_bound_update_id("alerts-in-ua-oblast-iot", revision, kind, episodes),
             fetch_revision=revision,
             kind=kind,
             covered_region_ids=self.COVERED_REGION_IDS,

@@ -104,6 +104,22 @@ class JsonAlertRepository:
             self._snapshots.update(staged)
             self._persist()
 
+    async def apply_failure_and_poll_state_atomically(
+        self, failure: SourceFailure, poll_state: AlertPollState
+    ) -> None:
+        async with self._lock:
+            if poll_state.fetch_revision != self._poll_state.fetch_revision + 1:
+                raise ValueError("fetch revision must be the exact next durable revision")
+            staged: dict[str, AlertSnapshot] = {}
+            for scope_id, scope in self._scopes.items():
+                machine = AlertStateMachine(scope, self._snapshots.get(scope_id))
+                machine.apply_failure(failure)
+                staged[scope_id] = machine.snapshot()
+            next_snapshots = {**self._snapshots, **staged}
+            self._persist_values(poll_state, next_snapshots, self._outbox)
+            self._snapshots = next_snapshots
+            self._poll_state = poll_state
+
     async def apply_process_restart_atomically(self) -> None:
         async with self._lock:
             failure = SourceFailure(SourceFailureKind.PROCESS_RESTART)
@@ -113,7 +129,11 @@ class JsonAlertRepository:
                 machine.apply_failure(failure)
                 staged[scope_id] = machine.snapshot()
             next_snapshots = {**self._snapshots, **staged}
-            next_poll_state = replace(self._poll_state, last_modified=None)
+            next_poll_state = replace(
+                self._poll_state,
+                fetch_revision=self._poll_state.fetch_revision + 1,
+                last_modified=None,
+            )
             self._persist_values(next_poll_state, next_snapshots, self._outbox)
             self._snapshots = next_snapshots
             self._poll_state = next_poll_state

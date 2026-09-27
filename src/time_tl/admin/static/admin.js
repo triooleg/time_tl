@@ -75,6 +75,14 @@
     setText(cards[3],textMetric('Load',host.load));
     setText(document.getElementById('metrics-heartbeat'),host.source_status==='available'?'Heartbeat отримано':'Метрики недоступні');
 
+    const convergence=data.owner_configuration?.convergence;
+    const convergenceState=convergence?.state==='converged'
+      ?`Усі воркери застосували ACTIVE v${convergence.active_revision}.`
+      :convergence?.state==='partial'
+        ?`Часткове застосування ACTIVE v${convergence.active_revision}: очікуємо ${convergence.missing_or_mismatched_roles.join(', ')}.`
+        :`Очікуємо застосування ACTIVE v${convergence?.active_revision??'—'} усіма воркерами.`;
+    setText(document.getElementById('owner-convergence'),convergenceState);
+
     const byName=new Map((data.workers||[]).map(worker=>[worker.name,worker]));
     document.querySelectorAll('#server tbody tr').forEach(row=>{
       const name=row.cells[0]?.textContent;

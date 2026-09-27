@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime, time
 
-from time_tl.application.schedule_worker import ConfirmedClear, ScheduleTarget, ScheduleWorker
+from time_tl.application.schedule_worker import (
+    ConfirmedClear,
+    ScheduleTarget,
+    ScheduleWorker,
+    _lesson_key,
+)
 from time_tl.domain.alerts import AlertState, NotificationMode
 from time_tl.domain.schedule import Lesson, ScheduleProfile, ScheduleRule
 
@@ -43,6 +48,21 @@ def target(
 class ScheduleWorkerTests(unittest.IsolatedAsyncioTestCase):
     NOW = datetime(2026, 9, 21, 5, 56, tzinfo=UTC)  # 08:56 Europe/Kyiv
 
+    def test_persisted_lesson_key_survives_edit_and_sibling_position_shift(self):
+        storage_ref = "lesson:rule:123e4567-e89b-12d3-a456-426614174000"
+        original = Lesson(time(9), time(10), "Math", storage_ref=storage_ref)
+        edited = Lesson(time(11), time(12), "Algebra", storage_ref=storage_ref)
+
+        first_key = _lesson_key(1, original)
+        shifted_key = _lesson_key(7, edited)
+
+        self.assertEqual(first_key, shifted_key)
+        self.assertNotIn(storage_ref, first_key)
+        self.assertNotEqual(
+            _lesson_key(1, Lesson(time(9), time(10), "Math")),
+            _lesson_key(2, Lesson(time(9), time(10), "Math")),
+        )
+
     async def test_due_reminder_is_deduplicated_across_restart(self):
         repo = MemoryRepo((target(),))
         self.assertEqual(await ScheduleWorker(repo).run_once(self.NOW), 1)
@@ -67,11 +87,18 @@ class ScheduleWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_confirmed_clear_returns_only_to_active_lesson(self):
         clear_at = datetime(2026, 9, 21, 6, 15, tzinfo=UTC)
         active = target()
-        repo = MemoryRepo(clears=(ConfirmedClear("clear-7", clear_at, active),))
+        binding = {
+            "provider": "alerts.in.ua",
+            "catalog_version": "2026-09-24",
+            "selected_region_id": "31",
+            "applicable_region_ids": ["31"],
+        }
+        repo = MemoryRepo(clears=(ConfirmedClear("clear-7", clear_at, active, binding),))
         self.assertEqual(await ScheduleWorker(repo).run_once(clear_at), 1)
         event = next(iter(repo.events.values()))
         self.assertEqual(event.event_type, "RETURN_TO_ACTIVE_LESSON")
         self.assertNotIn("join_url", event.payload)
+        self.assertEqual(event.payload["scope_binding"], binding)
 
     async def test_historical_clear_never_creates_late_return_message(self):
         clear_at = datetime(2026, 9, 21, 6, 15, tzinfo=UTC)

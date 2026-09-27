@@ -26,6 +26,7 @@ from time_tl.domain.alerts import RegionScope, SourceFailure, SourceFailureKind
 from time_tl.entrypoints.health import serve_health
 from time_tl.infrastructure.alerts import (
     FetchResult,
+    FullTerritoryAlertsInUaAdapter,
     InMemorySingletonLease,
     OblastAlertsInUaAdapter,
 )
@@ -33,10 +34,22 @@ from time_tl.infrastructure.alerts import (
 from .contracts import RuntimeContractError, validate_runtime_contract
 from .httpx_transport import HttpxTransport
 from .local_alerts import JsonAlertRepository
+from .region_registry_full import load_catalog
 from .regions import OBLAST_REGION_IDS, OBLAST_REGIONS
 
 LOGGER = logging.getLogger(__name__)
 ALERT_ADVISORY_LOCK_KEY = 0x54494D45544C  # stable signed-int64 value: ASCII "TIMETL"
+SENDER_ADVISORY_LOCK_KEY = 0x54494D455453  # distinct stable value: ASCII "TIMETS"
+
+
+def _build_inbound_allowlist_guard(settings: Settings) -> Any | None:
+    """Restrict inbound users only in STAGING; PRODUCTION is intentionally public."""
+
+    if settings.environment is not Environment.STAGING:
+        return None
+    from time_tl.bot.safety import TelegramAllowlistGuard
+
+    return TelegramAllowlistGuard.from_ids(settings.test_chat_allowlist)
 
 
 def build_sender_transport(settings: Settings, client_factory: Any) -> Any:
@@ -86,10 +99,8 @@ class PostgresAlertRuntimeSettingsReader:
             if (
                 state_row is None
                 or active_row is None
-                or int(state_row.value.get("active_revision", 0))
-                != self._expected_revision
-                or int(active_row.value.get("revision", 0))
-                != self._expected_revision
+                or int(state_row.value.get("active_revision", 0)) != self._expected_revision
+                or int(active_row.value.get("revision", 0)) != self._expected_revision
             ):
                 raise RuntimeContractError(
                     "active owner configuration changed; controlled restart required"
@@ -145,13 +156,21 @@ class RejectingCoordinateResolver:
 def _provider(settings: Settings, covered_region_ids: frozenset[str]) -> Any:
     if settings.alert_provider is AlertProvider.ALERTS_IN_UA:
         assert settings.alerts_in_ua_token is not None
-        if covered_region_ids != OblastAlertsInUaAdapter.COVERED_REGION_IDS:
-            raise RuntimeContractError(
-                "alerts.in.ua aggregate-oblast provider requires the reviewed 27-UID registry"
+        if covered_region_ids == OblastAlertsInUaAdapter.COVERED_REGION_IDS:
+            return OblastAlertsInUaAdapter(
+                token=settings.alerts_in_ua_token.get_secret_value(),
+                transport=HttpxTransport(),
             )
-        return OblastAlertsInUaAdapter(
+        catalog_region_uids = tuple(item.uid for item in load_catalog().records)
+        full_region_ids = frozenset(catalog_region_uids)
+        if covered_region_ids != full_region_ids:
+            raise RuntimeContractError(
+                "alerts.in.ua full provider requires the byte-pinned UID registry"
+            )
+        return FullTerritoryAlertsInUaAdapter(
             token=settings.alerts_in_ua_token.get_secret_value(),
             transport=HttpxTransport(),
+            region_uids=catalog_region_uids,
         )
     return OfflineSimulationProvider()
 
@@ -239,9 +258,8 @@ async def resolve_owner_runtime_settings(settings: Settings) -> Settings:
             "ALERT_STALE_AFTER_SECONDS": candidate.stale_after_seconds,
             "TELEGRAM_TRANSPORT": candidate.telegram_transport,
             "TELEGRAM_BOT_TOKEN": candidate.telegram_token,
-            "TEST_CHAT_ALLOWLIST": ",".join(
-                str(item) for item in candidate.staging_allowlist
-            ),
+            "BOT_ONBOARDING_TEXT": candidate.onboarding_text,
+            "TEST_CHAT_ALLOWLIST": ",".join(str(item) for item in candidate.staging_allowlist),
             # Re-run the strict environment-backed validators over the resolved values.
             "OWNER_CONFIG_SOURCE": OwnerConfigSource.ENVIRONMENT,
             "OWNER_CONFIG_REVISION": candidate.revision,
@@ -280,12 +298,55 @@ async def _heartbeat_loop(
         await asyncio.sleep(15)
 
 
-async def _serve_worker(
-    worker: AlertWorker, settings: Settings, heartbeat_repository: Any | None = None
+async def _owner_config_revision_watch_loop(
+    settings: Settings, *, interval_seconds: float = 5.0
 ) -> None:
+    """Exit the process when the owner activates a different configuration."""
+
+    if settings.owner_config_revision is None:
+        raise RuntimeContractError("active owner configuration revision is required")
+    from time_tl.infrastructure.db.engine import create_engine, create_session_factory
+    from time_tl.infrastructure.db.models import RuntimeSetting
+
+    engine = create_engine(settings.database_url.get_secret_value())
+    factory = create_session_factory(engine)
+    try:
+        while True:
+            async with factory() as session:
+                state_row = await session.get(RuntimeSetting, "owner_configuration_state")
+                active_row = await session.get(RuntimeSetting, "owner_configuration_active")
+            active_revision = (
+                int(state_row.value.get("active_revision", 0)) if state_row is not None else 0
+            )
+            payload_revision = (
+                int(active_row.value.get("revision", 0)) if active_row is not None else 0
+            )
+            if (
+                active_revision != settings.owner_config_revision
+                or payload_revision != settings.owner_config_revision
+            ):
+                raise RuntimeContractError(
+                    "active owner configuration changed; clean restart required"
+                )
+            await asyncio.sleep(interval_seconds)
+    finally:
+        await engine.dispose()
+
+
+async def _serve_worker(
+    worker: AlertWorker,
+    settings: Settings,
+    heartbeat_repository: Any | None = None,
+    *,
+    prepared: bool = False,
+) -> None:
+    if not prepared and not await worker.acquire_and_prepare():
+        raise RuntimeError("alert-worker failed to acquire singleton lease")
     async with asyncio.TaskGroup() as tasks:
         tasks.create_task(serve_health(settings.health_host, settings.health_port, "alert-worker"))
         tasks.create_task(_worker_must_not_exit(worker))
+        if settings.owner_config_revision is not None:
+            tasks.create_task(_owner_config_revision_watch_loop(settings))
         if heartbeat_repository is not None:
             tasks.create_task(
                 _heartbeat_loop(
@@ -297,7 +358,7 @@ async def _serve_worker(
 
 
 async def _worker_must_not_exit(worker: AlertWorker) -> None:
-    await worker.serve(asyncio.sleep)
+    await worker.serve_prepared(asyncio.sleep)
     raise RuntimeError("alert-worker lost or failed to acquire singleton lease")
 
 
@@ -307,16 +368,17 @@ async def run_alert_worker(settings: Settings) -> None:
     if settings.environment in {Environment.LOCAL, Environment.SIMULATION}:
         await _serve_worker(build_alert_worker(settings), settings)
         return
-    await _run_postgres_alert_worker(settings, verified_region_ids=OBLAST_REGION_IDS)
+    verified_region_ids = frozenset(item.uid for item in load_catalog().records)
+    await _run_postgres_alert_worker(settings, verified_region_ids=verified_region_ids)
 
 
 async def _run_postgres_alert_worker(
     settings: Settings, *, verified_region_ids: frozenset[str]
 ) -> None:
-    """Compose durable polling for reviewed one-oblast user scopes."""
-    if verified_region_ids != OblastAlertsInUaAdapter.COVERED_REGION_IDS:
+    """Compose durable polling for the reviewed full provider UID catalogue."""
+    if verified_region_ids != frozenset(item.uid for item in load_catalog().records):
         raise RuntimeContractError(
-            "alert-worker requires the reviewed 27-UID aggregate-oblast registry"
+            "alert-worker requires the reviewed full alerts.in.ua UID registry"
         )
     from time_tl.infrastructure.db.alerts import PostgresAlertRepository
     from time_tl.infrastructure.db.engine import create_engine, create_session_factory
@@ -326,6 +388,7 @@ async def _run_postgres_alert_worker(
     database_url = settings.database_url.get_secret_value()
     engine = create_engine(database_url)
     factory = create_session_factory(engine)
+    await _assert_territory_runtime_ready(factory)
     repository = PostgresAlertRepository(factory)
     heartbeat_repository = PostgresWorkerHeartbeatRepository(factory)
     provider = _provider(settings, verified_region_ids)
@@ -347,7 +410,9 @@ async def _run_postgres_alert_worker(
                 runtime_settings=runtime_settings,
                 stale_after_seconds=settings.alert_stale_after_seconds,
             )
-            await _serve_worker(worker, settings, heartbeat_repository)
+            if not await worker.acquire_and_prepare():
+                raise RuntimeError("alert-worker failed to acquire singleton lease")
+            await _serve_worker(worker, settings, heartbeat_repository, prepared=True)
     finally:
         await engine.dispose()
 
@@ -355,8 +420,9 @@ async def _run_postgres_alert_worker(
 class PostgresRegionConfirmationService:
     """Atomically save a confirmed region and create/reset its AlertScope."""
 
-    def __init__(self, factory: Any) -> None:
+    def __init__(self, factory: Any, territory_catalog: Any | None = None) -> None:
         self._factory = factory
+        self._territory_catalog = territory_catalog
 
     async def confirm_region(self, account: Any) -> None:
         from sqlalchemy import delete, select
@@ -368,6 +434,14 @@ class PostgresRegionConfirmationService:
             raise ValueError("confirmed region is required")
         async with self._factory() as session:
             async with session.begin():
+                resolved = None
+                if self._territory_catalog is not None:
+                    resolved = await self._territory_catalog.resolve_scope_in_session(
+                        session,
+                        provider="alerts.in.ua",
+                        region_id=account.region_id,
+                    )
+                    account.region_name = resolved.path[-1].name
                 user = (
                     await session.execute(
                         select(User)
@@ -392,18 +466,38 @@ class PostgresRegionConfirmationService:
                         select(AlertScope).where(AlertScope.user_id == user.id).with_for_update()
                     )
                 ).scalar_one_or_none()
-                changed = scope is not None and scope.selected_region_id != account.region_id
+                next_ids = (
+                    list(resolved.applicable_region_ids)
+                    if resolved is not None
+                    else [account.region_id]
+                )
+                changed = scope is not None and (
+                    scope.selected_region_id != account.region_id
+                    or sorted(scope.applicable_region_ids) != sorted(next_ids)
+                    or scope.territory_provider
+                    != (resolved.provider if resolved is not None else None)
+                    or scope.territory_catalog_version
+                    != (resolved.catalog_version if resolved is not None else None)
+                )
                 if scope is None:
                     scope = AlertScope(
                         user_id=user.id,
                         selected_region_id=account.region_id,
-                        applicable_region_ids=[account.region_id],
+                        applicable_region_ids=next_ids,
+                        territory_provider=(resolved.provider if resolved is not None else None),
+                        territory_catalog_version=(
+                            resolved.catalog_version if resolved is not None else None
+                        ),
                     )
                     session.add(scope)
                     await session.flush()
                 else:
                     scope.selected_region_id = account.region_id
-                    scope.applicable_region_ids = [account.region_id]
+                    scope.applicable_region_ids = next_ids
+                    scope.territory_provider = resolved.provider if resolved is not None else None
+                    scope.territory_catalog_version = (
+                        resolved.catalog_version if resolved is not None else None
+                    )
                 if changed:
                     await session.execute(
                         delete(AlertEpisode).where(AlertEpisode.scope_id == scope.id)
@@ -420,7 +514,7 @@ class PostgresRegionConfirmationService:
 @asynccontextmanager
 async def postgres_bot_dependencies(
     settings: Settings,
-) -> AsyncIterator[tuple[Any, Any, Any, Any, Any, Any]]:
+) -> AsyncIterator[tuple[Any, Any, Any, Any, Any, Any, Any]]:
     """Construct ready persistence plus a fail-safe resolver without connecting to Telegram."""
     from time_tl.infrastructure.db.accounts import AsyncPostgresAccountRepository
     from time_tl.infrastructure.db.codec import FernetLessonLinkCodec
@@ -437,7 +531,11 @@ async def postgres_bot_dependencies(
         factory,
         link_codec,
     )
-    region_confirmation = PostgresRegionConfirmationService(factory)
+    from time_tl.infrastructure.db.territories import PostgresTerritoryCatalogRepository
+
+    await _assert_territory_runtime_ready(factory)
+    territory_catalog = PostgresTerritoryCatalogRepository(factory)
+    region_confirmation = PostgresRegionConfirmationService(factory, territory_catalog)
     from time_tl.infrastructure.db.import_sessions import AsyncPostgresImportSessionAdapter
 
     def import_sessions(user_id: int) -> AsyncPostgresImportSessionAdapter:
@@ -452,6 +550,7 @@ async def postgres_bot_dependencies(
             tuple(Region(item.uid, item.name_uk) for item in OBLAST_REGIONS),
             import_sessions,
             region_confirmation,
+            territory_catalog,
             PostgresWorkerHeartbeatRepository(factory),
         )
     finally:
@@ -476,6 +575,7 @@ async def run_bot(settings: Settings) -> None:
         regions,
         import_sessions,
         region_confirmation,
+        territory_catalog,
         heartbeat_repository,
     ):
         from time_tl.runtime.imports import (
@@ -489,25 +589,36 @@ async def run_bot(settings: Settings) -> None:
             resolver=resolver,
             repository=repository,
             region_confirmation=region_confirmation,
+            territory_catalog=territory_catalog,
             durable_imports=DurableImportCoordinator(
                 import_sessions,
                 PostgresTransactionalProfileStore(repository),
             ),
+            onboarding_text=settings.bot_onboarding_text,
         )
         bot = Bot(token=settings.telegram_bot_token.get_secret_value())
-        dispatcher = Dispatcher()
-        from time_tl.bot.safety import TelegramAllowlistGuard
+        from time_tl.bot.safety import (
+            BoundedMemoryStorage,
+            BoundedTelegramIngressGuard,
+        )
 
-        guard = TelegramAllowlistGuard.from_ids(settings.test_chat_allowlist)
-        dispatcher.include_router(build_async_router(application, allowlist_guard=guard))
+        dispatcher = Dispatcher(
+            storage=BoundedMemoryStorage(max_records=2_048, idle_ttl_seconds=3_600.0)
+        )
+        allowlist_guard = _build_inbound_allowlist_guard(settings)
+        router = build_async_router(
+            application,
+            allowlist_guard=allowlist_guard,
+            ingress_guard=BoundedTelegramIngressGuard(),
+        )
+        dispatcher.include_router(router)
         try:
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(serve_health(settings.health_host, settings.health_port, "bot"))
                 tasks.create_task(_polling_must_not_exit(dispatcher, bot))
+                tasks.create_task(_owner_config_revision_watch_loop(settings))
                 tasks.create_task(
-                    _heartbeat_loop(
-                        heartbeat_repository, "bot", settings.owner_config_revision
-                    )
+                    _heartbeat_loop(heartbeat_repository, "bot", settings.owner_config_revision)
                 )
         finally:
             await bot.session.close()
@@ -610,17 +721,12 @@ def run_admin_bootstrap(settings: Settings, output: str) -> None:
     asyncio.run(bootstrap())
 
 
-async def activate_owner_settings(
-    settings: Settings, revision: int, evidence_id: str
-) -> None:
+async def activate_owner_settings(settings: Settings, revision: int, evidence_id: str) -> None:
     """Operator-only activation gate used after review and exact-version approval."""
 
     if settings.admin_backend is not AdminBackend.POSTGRES:
         raise RuntimeContractError("owner settings activation requires PostgreSQL admin backend")
-    if (
-        settings.owner_telegram_fernet_key is None
-        or settings.owner_alerts_fernet_key is None
-    ):
+    if settings.owner_telegram_fernet_key is None or settings.owner_alerts_fernet_key is None:
         raise RuntimeContractError("owner settings activation requires both encryption keys")
     from time_tl.admin.settings import OwnerSettingsService, OwnerSettingsValidationError
 
@@ -643,11 +749,14 @@ async def activate_owner_settings(
         await engine.dispose()
 
 
-async def _apply_alert_restart_fence(factory: Any) -> None:
-    """Close durable freshness before any downstream worker can inspect it."""
-    from time_tl.infrastructure.db.alerts import PostgresAlertRepository
+async def _assert_territory_runtime_ready(factory: Any) -> str:
+    """Shared production startup gate; no health/polling loop starts before it passes."""
 
-    await PostgresAlertRepository(factory).apply_process_restart_atomically()
+    from time_tl.infrastructure.db.territories import PostgresTerritoryCatalogRepository
+
+    return await PostgresTerritoryCatalogRepository(factory).assert_runtime_ready(
+        provider="alerts.in.ua"
+    )
 
 
 async def run_schedule_worker(settings: Settings) -> None:
@@ -670,7 +779,7 @@ async def run_schedule_worker(settings: Settings) -> None:
     assert settings.lesson_link_fernet_key is not None
     engine = create_engine(settings.database_url.get_secret_value())
     factory = create_session_factory(engine)
-    await _apply_alert_restart_fence(factory)
+    await _assert_territory_runtime_ready(factory)
     codec = FernetLessonLinkCodec(
         settings.lesson_link_fernet_key.get_secret_value().encode("ascii")
     )
@@ -694,6 +803,7 @@ async def run_schedule_worker(settings: Settings) -> None:
                 serve_health(settings.health_host, settings.health_port, "schedule-worker")
             )
             tasks.create_task(loop())
+            tasks.create_task(_owner_config_revision_watch_loop(settings))
             tasks.create_task(
                 _heartbeat_loop(
                     heartbeat_repository,
@@ -703,6 +813,19 @@ async def run_schedule_worker(settings: Settings) -> None:
             )
     finally:
         await engine.dispose()
+
+
+async def _lease_must_remain_held(lease: Any, *, interval_seconds: float = 5.0) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        if not await lease.renew():
+            raise RuntimeError("sender-worker lost singleton lease")
+
+
+async def _serve_sender_singleton(lease: Any, serve: Any) -> None:
+    if not await lease.acquire():
+        raise RuntimeError("sender-worker failed to acquire singleton lease")
+    await serve()
 
 
 async def run_sender_worker(settings: Settings) -> None:
@@ -719,6 +842,7 @@ async def run_sender_worker(settings: Settings) -> None:
     from time_tl.application.sender_worker import build_sender_worker
     from time_tl.infrastructure.db.codec import FernetLessonLinkCodec
     from time_tl.infrastructure.db.engine import create_engine, create_session_factory
+    from time_tl.infrastructure.db.lease import dedicated_advisory_lease
     from time_tl.infrastructure.db.workers import (
         PostgresJoinLinkResolver,
         PostgresSenderRepository,
@@ -730,16 +854,17 @@ async def run_sender_worker(settings: Settings) -> None:
     assert settings.lesson_link_fernet_key is not None
     engine = create_engine(settings.database_url.get_secret_value())
     factory = create_session_factory(engine)
-    await _apply_alert_restart_fence(factory)
+    await _assert_territory_runtime_ready(factory)
     codec = FernetLessonLinkCodec(
         settings.lesson_link_fernet_key.get_secret_value().encode("ascii")
     )
     bot = Bot(token=settings.telegram_bot_token.get_secret_value())
+    sender_repository = PostgresSenderRepository(
+        factory,
+        stale_after_seconds=settings.alert_stale_after_seconds,
+    )
     worker = build_sender_worker(
-        PostgresSenderRepository(
-            factory,
-            stale_after_seconds=settings.alert_stale_after_seconds,
-        ),
+        sender_repository,
         build_sender_transport(settings, lambda: cast(TelegramClient, bot)),
         join_links=PostgresJoinLinkResolver(factory, codec),
         messages_per_second=settings.sender_messages_per_second,
@@ -752,12 +877,26 @@ async def run_sender_worker(settings: Settings) -> None:
             await worker.run_once(datetime.now(UTC), sleep=asyncio.sleep)
             await asyncio.sleep(settings.sender_worker_interval_seconds)
 
-    try:
+    async def retention_loop() -> None:
+        while True:
+            try:
+                await sender_repository.prune_terminal_outbox(datetime.now(UTC))
+            except Exception as exc:
+                LOGGER.warning(
+                    "terminal outbox retention failed: %s",
+                    type(exc).__name__,
+                )
+            await asyncio.sleep(300)
+
+    async def serve_owned(lease: Any) -> None:
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(
                 serve_health(settings.health_host, settings.health_port, "sender-worker")
             )
             tasks.create_task(loop())
+            tasks.create_task(retention_loop())
+            tasks.create_task(_lease_must_remain_held(lease))
+            tasks.create_task(_owner_config_revision_watch_loop(settings))
             tasks.create_task(
                 _heartbeat_loop(
                     heartbeat_repository,
@@ -765,6 +904,12 @@ async def run_sender_worker(settings: Settings) -> None:
                     settings.owner_config_revision,
                 )
             )
+
+    try:
+        async with dedicated_advisory_lease(
+            settings.database_url.get_secret_value(), SENDER_ADVISORY_LOCK_KEY
+        ) as lease:
+            await _serve_sender_singleton(lease, lambda: serve_owned(lease))
     finally:
         await bot.session.close()
         await engine.dispose()

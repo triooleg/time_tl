@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -14,6 +15,7 @@ from time_tl.domain.schedule.resolver import resolve_day
 
 KYIV = ZoneInfo("Europe/Kyiv")
 RETURN_TO_LESSON_MAX_AGE = timedelta(minutes=2)
+SCHEDULE_TARGET_PAGE_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,7 @@ class ConfirmedClear:
     event_id: str
     confirmed_at: datetime
     target: ScheduleTarget
+    scope_binding: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not self.event_id:
@@ -48,6 +51,19 @@ class ConfirmedClear:
             raise ValueError("confirmed_at must be timezone-aware")
         if self.target.alert_state is not AlertState.CLEAR_CONFIRMED:
             raise ValueError("return-to-lesson requires CLEAR_CONFIRMED")
+
+
+@dataclass(frozen=True)
+class ConfirmedClearPage:
+    items: tuple[ConfirmedClear, ...]
+    next_confirmed_at: datetime | None
+    next_message_id: str | None
+
+    def __post_init__(self) -> None:
+        if (self.next_confirmed_at is None) is not (self.next_message_id is None):
+            raise ValueError("clear page cursor must be complete")
+        if self.next_confirmed_at is not None and self.next_confirmed_at.tzinfo is None:
+            raise ValueError("clear page cursor time must be timezone-aware")
 
 
 @dataclass(frozen=True)
@@ -72,14 +88,68 @@ class ScheduleWorker:
     async def run_once(self, now: datetime) -> int:
         if now.tzinfo is None:
             raise ValueError("worker clock must be timezone-aware")
-        messages: list[PlannedOutboxMessage] = []
-        for target in await self._repository.list_schedule_targets(now):
-            messages.extend(self._due_reminders(target, now))
-        for clear in await self._repository.list_confirmed_clears(now):
-            message = self._return_to_lesson(clear, now)
-            if message is not None:
-                messages.append(message)
-        return await self._repository.enqueue_deduplicated(tuple(messages))
+        inserted = 0
+
+        async def enqueue_page(page: tuple[ScheduleTarget, ...]) -> int:
+            messages = tuple(
+                message for target in page for message in self._due_reminders(target, now)
+            )
+            if not messages:
+                return 0
+            return await self._repository.enqueue_deduplicated(messages)
+
+        page_loader = getattr(self._repository, "list_schedule_targets_page", None)
+        if page_loader is None:
+            inserted += await enqueue_page(await self._repository.list_schedule_targets(now))
+        else:
+            cursor: str | None = None
+            while True:
+                page = await page_loader(
+                    now,
+                    after_user_id=cursor,
+                    limit=SCHEDULE_TARGET_PAGE_SIZE,
+                )
+                if not page:
+                    break
+                next_cursor = page[-1].user_id
+                if next_cursor == cursor:
+                    raise RuntimeError("schedule target cursor did not advance")
+                inserted += await enqueue_page(page)
+                cursor = next_cursor
+
+        async def enqueue_clear_page(clears: tuple[ConfirmedClear, ...]) -> int:
+            messages = tuple(
+                message
+                for clear in clears
+                if (message := self._return_to_lesson(clear, now)) is not None
+            )
+            if not messages:
+                return 0
+            return await self._repository.enqueue_deduplicated(messages)
+
+        clear_page_loader = getattr(self._repository, "list_confirmed_clears_page", None)
+        if clear_page_loader is None:
+            inserted += await enqueue_clear_page(await self._repository.list_confirmed_clears(now))
+        else:
+            clear_cursor: tuple[datetime, str] | None = None
+            while True:
+                clear_page = await clear_page_loader(
+                    now,
+                    after_confirmed_at=(clear_cursor[0] if clear_cursor else None),
+                    after_message_id=(clear_cursor[1] if clear_cursor else None),
+                    limit=SCHEDULE_TARGET_PAGE_SIZE,
+                )
+                inserted += await enqueue_clear_page(clear_page.items)
+                if clear_page.next_confirmed_at is None:
+                    break
+                next_cursor = (
+                    clear_page.next_confirmed_at,
+                    clear_page.next_message_id,
+                )
+                if next_cursor == clear_cursor or next_cursor[1] is None:
+                    raise RuntimeError("confirmed-clear cursor did not advance")
+                clear_cursor = (next_cursor[0], next_cursor[1])
+        return inserted
 
     @staticmethod
     def _due_reminders(target: ScheduleTarget, now: datetime) -> list[PlannedOutboxMessage]:
@@ -151,6 +221,11 @@ class ScheduleWorker:
                         "valid_until": valid_until.isoformat(),
                         "profile_revision": target.profile_revision,
                         "join_link_ref": _join_link_ref(lesson),
+                        **(
+                            {"scope_binding": dict(clear.scope_binding)}
+                            if clear.scope_binding is not None
+                            else {}
+                        ),
                     },
                     available_at=clear.confirmed_at,
                 )
@@ -158,6 +233,11 @@ class ScheduleWorker:
 
 
 def _lesson_key(position: int, lesson: Lesson) -> str:
+    if lesson.storage_ref is not None:
+        # Persisted lesson identity survives edits and sibling deletion. Hash it
+        # so an outbox key never exposes an internal row reference.
+        digest = hashlib.blake2s(lesson.storage_ref.encode("utf-8"), digest_size=8)
+        return f"ref:{digest.hexdigest()}"
     return f"{position}:{lesson.start.strftime('%H%M')}"
 
 

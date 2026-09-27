@@ -67,6 +67,7 @@ class Settings(BaseSettings):
         default=TelegramTransport.DISABLED, alias="TELEGRAM_TRANSPORT"
     )
     telegram_bot_token: SecretStr | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
+    bot_onboarding_text: str = Field(default="", alias="BOT_ONBOARDING_TEXT")
     lesson_link_fernet_key: SecretStr | None = Field(default=None, alias="LESSON_LINK_FERNET_KEY")
     test_chat_allowlist_raw: str = Field(default="", alias="TEST_CHAT_ALLOWLIST")
     database_url: SecretStr = Field(alias="DATABASE_URL")
@@ -91,15 +92,11 @@ class Settings(BaseSettings):
     owner_telegram_fernet_key: SecretStr | None = Field(
         default=None, alias="OWNER_TELEGRAM_FERNET_KEY"
     )
-    owner_alerts_fernet_key: SecretStr | None = Field(
-        default=None, alias="OWNER_ALERTS_FERNET_KEY"
-    )
+    owner_alerts_fernet_key: SecretStr | None = Field(default=None, alias="OWNER_ALERTS_FERNET_KEY")
     owner_config_source: OwnerConfigSource = Field(
         default=OwnerConfigSource.ENVIRONMENT, alias="OWNER_CONFIG_SOURCE"
     )
-    owner_config_revision: int | None = Field(
-        default=None, ge=1, alias="OWNER_CONFIG_REVISION"
-    )
+    owner_config_revision: int | None = Field(default=None, ge=1, alias="OWNER_CONFIG_REVISION")
     host_metrics_url: str | None = Field(default=None, alias="HOST_METRICS_URL")
     admin_host: str = Field(default="127.0.0.1", alias="ADMIN_HOST")
     admin_port: int = Field(default=8081, ge=1024, le=65535, alias="ADMIN_PORT")
@@ -251,14 +248,10 @@ class Settings(BaseSettings):
                 raise ValueError("production messaging service requires live Telegram transport")
         if database_managed and self.service_role in {"bot", "sender-worker"}:
             if not _has_secret(self.owner_telegram_fernet_key):
-                raise ValueError(
-                    "database-managed messaging requires OWNER_TELEGRAM_FERNET_KEY"
-                )
+                raise ValueError("database-managed messaging requires OWNER_TELEGRAM_FERNET_KEY")
         if database_managed and self.service_role == "alert-worker":
             if not _has_secret(self.owner_alerts_fernet_key):
-                raise ValueError(
-                    "database-managed alerts require OWNER_ALERTS_FERNET_KEY"
-                )
+                raise ValueError("database-managed alerts require OWNER_ALERTS_FERNET_KEY")
         if self.alert_stale_after_seconds <= self.alert_poll_interval_seconds:
             raise ValueError("stale threshold must exceed the provider poll interval")
         return self

@@ -21,6 +21,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from time_tl.config import AdminBackend, Settings
+from time_tl.entrypoints.operator_preflight import (
+    OperatorPreflightError,
+    OperatorPreflightEvidence,
+    probe_candidate,
+)
 
 from .app import (
     _CSS,
@@ -42,6 +47,7 @@ from .security import (
     verify_password,
 )
 from .settings import (
+    ActivationCandidate,
     OwnerConfigurationUpdate,
     OwnerSettingsConflictError,
     OwnerSettingsError,
@@ -201,7 +207,11 @@ def _safe_aggregates(raw: dict[str, Any]) -> dict[str, Any]:
                 details = item.get("details")
                 if isinstance(details, dict):
                     revision = details.get("applied_config_revision")
-                    if isinstance(revision, int) and not isinstance(revision, bool) and revision > 0:
+                    if (
+                        isinstance(revision, int)
+                        and not isinstance(revision, bool)
+                        and revision > 0
+                    ):
                         worker["applied_config_revision"] = revision
                 workers.append(worker)
     raw_provider = raw.get("provider")
@@ -268,6 +278,8 @@ def create_async_admin_app(
     proxy_policy: ProxyPolicy | None = None,
     bootstrap_artifact_path: str | Path | None = None,
     docs_root: str | Path = "docs",
+    activation_preflight: Callable[[ActivationCandidate], Awaitable[OperatorPreflightEvidence]]
+    | None = None,
 ) -> FastAPI:
     """Build the async app; persistence is mandatory and never downgraded."""
 
@@ -277,6 +289,23 @@ def create_async_admin_app(
     proxies = proxy_policy or ProxyPolicy()
     bootstrap_artifact = BootstrapArtifactCleaner(bootstrap_artifact_path)
     help_root = Path(docs_root).resolve()
+
+    async def default_activation_preflight(
+        candidate: ActivationCandidate,
+    ) -> OperatorPreflightEvidence:
+        if len(candidate.staging_allowlist) != 1:
+            raise OperatorPreflightError(
+                "STAGING self-activation requires exactly one approved chat ID"
+            )
+        from aiogram import Bot
+
+        return await probe_candidate(
+            candidate,
+            candidate.staging_allowlist[0],
+            bot_factory=Bot,
+        )
+
+    run_activation_preflight = activation_preflight or default_activation_preflight
 
     async def cleanup_bootstrap_at_expiry() -> None:
         account = await repository.account("admin")
@@ -490,20 +519,26 @@ def create_async_admin_app(
         saved_message = ""
         if request.query_params.get("setup") == "saved":
             saved_message = "Чернетку збережено. Реальні сервіси не активовано."
-        elif request.query_params.get("setup") == "pending":
-            saved_message = "Запит активації збережено. Потрібна окрема операторська перевірка."
-        page = _dashboard_html(
-                session.csrf_token,
-                settings.environment.value,
-                int(poll),
-                int(stale),
-                saved_message or (
-                    "Налаштування збережено. Наступний цикл застосує нові значення."
-                    if request.query_params.get("saved")
-                    else ""
-                ),
-                owner_view,
+        elif request.query_params.get("setup") == "activated":
+            saved_message = (
+                "Read-only preflight пройдено. Версію позначено ACTIVE; "
+                "дочекайтеся збігу applied revision усіх воркерів."
             )
+        elif request.query_params.get("setup") == "rolled-back":
+            saved_message = "Попередню активну версію відновлено. Дочекайтеся збігу heartbeat."
+        page = _dashboard_html(
+            session.csrf_token,
+            settings.environment.value,
+            int(poll),
+            int(stale),
+            saved_message
+            or (
+                "Налаштування збережено. Наступний цикл застосує нові значення."
+                if request.query_params.get("saved")
+                else ""
+            ),
+            owner_view,
+        )
         page = page.replace(
             "Агрегований PostgreSQL backend ще не підключено.",
             "Очікуємо локальні агрегати.",
@@ -524,6 +559,29 @@ def create_async_admin_app(
                 owner_public = (await owner_settings.view()).public_dict()
             except OwnerSettingsError:
                 owner_public = {"status": "unavailable"}
+        if owner_public is not None and isinstance(aggregates.get("workers"), list):
+            active_revision = owner_public.get("active_revision")
+            required_roles = {"bot", "alert-worker", "schedule-worker", "sender-worker"}
+            applied = {
+                str(worker.get("name")): worker.get("applied_config_revision")
+                for worker in aggregates["workers"]
+                if isinstance(worker, dict) and worker.get("name") in required_roles
+            }
+            matching = sorted(
+                role for role in required_roles if applied.get(role) == active_revision
+            )
+            owner_public["convergence"] = {
+                "state": (
+                    "converged"
+                    if active_revision is not None and len(matching) == len(required_roles)
+                    else "partial"
+                    if matching
+                    else "pending"
+                ),
+                "active_revision": active_revision,
+                "matching_roles": matching,
+                "missing_or_mismatched_roles": sorted(required_roles - set(matching)),
+            }
         sanitized_provider = aggregates.pop("provider")
         provider = dict(sanitized_provider) if isinstance(sanitized_provider, dict) else {}
         provider.update(
@@ -574,9 +632,7 @@ def create_async_admin_app(
         )
         if not authenticated:
             if remaining:
-                return HTMLResponse(
-                    f"Забагато спроб. Повторіть через {_duration(remaining)}", 429
-                )
+                return HTMLResponse(f"Забагато спроб. Повторіть через {_duration(remaining)}", 429)
             return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
 
         async def validation_response(message: str) -> HTMLResponse:
@@ -608,8 +664,7 @@ def create_async_admin_app(
                 )
             except ValueError as exc:
                 raise OwnerSettingsValidationError(
-                    "STAGING allowlist має містити лише числові Telegram chat ID, "
-                    "розділені комами."
+                    "STAGING allowlist має містити лише числові Telegram chat ID, розділені комами."
                 ) from exc
             command = OwnerConfigurationUpdate(
                 expected_revision=int(data.get("expected_revision", "0")),
@@ -624,12 +679,12 @@ def create_async_admin_app(
                 clear_telegram_token=data.get("clear_telegram_token") == "yes",
                 clear_alerts_in_ua_token=data.get("clear_alerts_in_ua_token") == "yes",
                 clear_staging_allowlist=data.get("clear_staging_allowlist") == "yes",
+                onboarding_text=data.get("onboarding_text"),
             )
             await owner_settings.save(command, session.username)
         except (KeyError, ValueError):
             return await validation_response(
-                "Перевірте числові поля: версію, інтервал опитування та "
-                "поріг застарівання."
+                "Перевірте числові поля: версію, інтервал опитування та поріг застарівання."
             )
         except OwnerSettingsValidationError as exc:
             return await validation_response(str(exc))
@@ -640,7 +695,16 @@ def create_async_admin_app(
         return RedirectResponse("/?setup=saved#service-setup", 303)
 
     @app.post("/settings/service/request-activation")
-    async def request_service_activation(request: Request) -> Response:
+    async def legacy_request_service_activation(request: Request) -> Response:
+        del request
+        return HTMLResponse(
+            "Окремий операторський handoff більше не використовується. "
+            "Оновіть сторінку та скористайтеся перевіркою й активацією STAGING.",
+            410,
+        )
+
+    @app.post("/settings/service/activate")
+    async def activate_service_settings(request: Request) -> Response:
         session, _ = await session_for(request, False)
         if not session or session.must_change_password:
             return redirect_login(True)
@@ -649,27 +713,103 @@ def create_async_admin_app(
         data = _form(await request.body())
         if not compare_digest(session.csrf_token, data.get("csrf", "")):
             return Response(status_code=403)
-        if data.get("acknowledge") != "yes":
-            return HTMLResponse("Потрібне явне підтвердження.", 422)
+        if data.get("activation_ack", "").strip() != "АКТИВУВАТИ STAGING":
+            return HTMLResponse("Введіть точне підтвердження активації STAGING.", 422)
         authenticated, remaining = await owner_reauthenticated(
             request, session, data.get("current_password", "")
         )
         if not authenticated:
             if remaining:
-                return HTMLResponse(
-                    f"Забагато спроб. Повторіть через {_duration(remaining)}", 429
-                )
+                return HTMLResponse(f"Забагато спроб. Повторіть через {_duration(remaining)}", 429)
             return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
+        pending_created = False
+        revision = 0
         try:
             revision = int(data.get("expected_revision", "0"))
+            view = await owner_settings.view()
+            if view.environment == "production" or settings.environment.value == "production":
+                return HTMLResponse(
+                    "PRODUCTION потребує окремого схвалення точної release-версії.", 403
+                )
+            if view.environment != settings.environment.value or view.environment != "staging":
+                return HTMLResponse("Самоактивація дозволена лише для поточного STAGING.", 422)
             await owner_settings.request_activation(revision, session.username)
+            pending_created = True
+            candidate = await owner_settings.activation_candidate(revision)
+            evidence = await run_activation_preflight(candidate)
+            evidence_id = f"owner-preflight-v1-r{revision}-{token_urlsafe(18)}"
+            await owner_settings.mark_active(
+                revision,
+                session.username,
+                evidence_id,
+                {
+                    "check_profile": "telegram_get_me+alerts_full_snapshot",
+                    "covered_region_count": evidence.covered_region_count,
+                    "allowlist_count": evidence.allowlist_count,
+                },
+            )
+        except OperatorPreflightError as exc:
+            if pending_created:
+                message = str(exc).lower()
+                failure_code = (
+                    "telegram_get_me_failed"
+                    if "telegram" in message
+                    else "alerts_full_snapshot_failed"
+                    if "alerts" in message
+                    else "preflight_failed"
+                )
+                await owner_settings.record_preflight_failure(
+                    revision, session.username, failure_code
+                )
+            return HTMLResponse("Read-only preflight не пройдено. Активну версію не змінено.", 502)
         except (ValueError, OwnerSettingsValidationError):
             return HTMLResponse("Конфігурація ще не готова до активації.", 422)
         except OwnerSettingsConflictError:
             return HTMLResponse("Конфігурацію змінено. Оновіть сторінку.", 409)
         except OwnerSettingsError:
             return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
-        return RedirectResponse("/?setup=pending#service-setup", 303)
+        return RedirectResponse("/?setup=activated#service-setup", 303)
+
+    @app.post("/settings/service/rollback")
+    async def rollback_service_settings(request: Request) -> Response:
+        session, _ = await session_for(request, False)
+        if not session or session.must_change_password:
+            return redirect_login(True)
+        if owner_settings is None:
+            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+        data = _form(await request.body())
+        if not compare_digest(session.csrf_token, data.get("csrf", "")):
+            return Response(status_code=403)
+        authenticated, remaining = await owner_reauthenticated(
+            request, session, data.get("current_password", "")
+        )
+        if not authenticated:
+            if remaining:
+                return HTMLResponse(f"Забагато спроб. Повторіть через {_duration(remaining)}", 429)
+            return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
+        try:
+            expected_active = int(data.get("expected_active_revision", "0"))
+            view = await owner_settings.view()
+            expected_ack = f"ПОВЕРНУТИ {view.rollback_revision}"
+            if (
+                view.rollback_revision is None
+                or data.get("rollback_ack", "").strip() != expected_ack
+            ):
+                return HTMLResponse("Введіть точне підтвердження rollback.", 422)
+            if settings.environment.value == "production":
+                return HTMLResponse("Rollback PRODUCTION потребує окремого release-рішення.", 403)
+            await owner_settings.rollback(
+                expected_active, settings.environment.value, session.username
+            )
+        except ValueError:
+            return HTMLResponse("Невірна активна версія.", 422)
+        except OwnerSettingsValidationError as exc:
+            return HTMLResponse(str(exc), 422)
+        except OwnerSettingsConflictError:
+            return HTMLResponse("Активну версію змінено. Оновіть сторінку.", 409)
+        except OwnerSettingsError:
+            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+        return RedirectResponse("/?setup=rolled-back#service-setup", 303)
 
     @app.post("/settings/provider")
     async def save_provider(request: Request) -> Response:

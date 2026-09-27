@@ -4,7 +4,7 @@ x-app: &app
   build:
     context: .
     dockerfile: Dockerfile
-  image: time-tl-bot:${TIME_TL_IMAGE_TAG:-local}
+  image: time-tl-bot:${TIME_TL_IMAGE_TAG:?TIME_TL_IMAGE_TAG must be an immutable release tag}
   restart: unless-stopped
   init: true
   read_only: true
@@ -78,6 +78,7 @@ services:
       ALERT_PROVIDER: fake
       TELEGRAM_TRANSPORT: disabled
       LESSON_LINK_FERNET_KEY: ${LESSON_LINK_FERNET_KEY:-}
+    deploy: {replicas: 1}
 
   sender-worker:
     <<: *app
@@ -91,6 +92,7 @@ services:
       OWNER_TELEGRAM_FERNET_KEY: ${OWNER_TELEGRAM_FERNET_KEY:-}
       LESSON_LINK_FERNET_KEY: ${LESSON_LINK_FERNET_KEY:-}
       TEST_CHAT_ALLOWLIST: ${TEST_CHAT_ALLOWLIST:-}
+    deploy: {replicas: 1}
 
   admin-web:
     <<: *app

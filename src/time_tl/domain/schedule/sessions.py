@@ -14,6 +14,24 @@ T = TypeVar("T")
 # Production must implement this repository with durable PostgreSQL rows and
 # transaction/row locking. The in-memory implementation is for local tests only.
 PRODUCTION_PENDING_STORE = "durable PostgreSQL pending_import_sessions"
+MAX_PENDING_IMPORTS_PER_USER = 3
+MAX_PENDING_IMPORTS_GLOBAL = 1_000
+
+
+class ImportSessionLimitExceeded(ConfirmationError):
+    """Typed, user-safe rejection when pending import capacity is exhausted."""
+
+    def __init__(self, *, scope: str, limit: int) -> None:
+        if scope not in {"user", "global"}:
+            raise ValueError("unknown import-session limit scope")
+        self.scope = scope
+        self.limit = limit
+        message = (
+            f"У вас уже є {limit} незавершені імпорти. Підтвердьте або скасуйте один із них."
+            if scope == "user"
+            else "Імпорт розкладу тимчасово перевантажений. Спробуйте пізніше."
+        )
+        super().__init__(message)
 
 
 @dataclass(frozen=True)

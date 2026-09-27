@@ -40,6 +40,9 @@ class AlertRepository(Protocol):
     async def apply_snapshot_and_poll_state_atomically(
         self, update: OfficialAlertSnapshot, poll_state: AlertPollState
     ) -> tuple[AlertOutboxItem, ...]: ...
+    async def apply_failure_and_poll_state_atomically(
+        self, failure: SourceFailure, poll_state: AlertPollState
+    ) -> None: ...
     async def apply_failure_atomically(self, failure: SourceFailure) -> None: ...
     async def apply_process_restart_atomically(self) -> None: ...
 
@@ -122,11 +125,29 @@ class InMemoryAlertRepository:
                 staged[scope_id] = machine.snapshot()
             self._snapshots.update(staged)
 
+    async def apply_failure_and_poll_state_atomically(
+        self, failure: SourceFailure, poll_state: AlertPollState
+    ) -> None:
+        async with self._lock:
+            if poll_state.fetch_revision != self._poll_state.fetch_revision + 1:
+                raise ValueError("fetch revision must be the exact next durable revision")
+            staged = {}
+            for scope_id, scope in self._scopes.items():
+                machine = AlertStateMachine(scope, self._snapshots.get(scope_id))
+                machine.apply_failure(failure)
+                staged[scope_id] = machine.snapshot()
+            self._snapshots.update(staged)
+            self._poll_state = poll_state
+
     async def apply_process_restart_atomically(self) -> None:
         async with self._lock:
             staged = self._restart_safe_snapshots()
             self._snapshots.update(staged)
-            self._poll_state = replace(self._poll_state, last_modified=None)
+            self._poll_state = replace(
+                self._poll_state,
+                fetch_revision=self._poll_state.fetch_revision + 1,
+                last_modified=None,
+            )
 
     async def snapshot_for(self, scope_id: str) -> AlertSnapshot | None:
         async with self._lock:

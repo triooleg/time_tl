@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from collections.abc import Sequence
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from time_tl.bot.models import NotificationMode
@@ -12,12 +14,16 @@ from time_tl.bot.service import UserAccount
 from time_tl.domain.schedule import DateOverride, Lesson, Parity, ScheduleProfile, ScheduleRule
 
 from .codec import LessonLinkCodec
-from .models import DateOverride as DateOverrideRow
 from .models import (
+    AlertEpisode,
+    AlertScope,
+    AlertSnapshot,
+    OutboxMessage,
     OverrideLesson,
     RuleLesson,
     User,
 )
+from .models import DateOverride as DateOverrideRow
 from .models import (
     ScheduleProfile as ProfileRow,
 )
@@ -31,6 +37,10 @@ _MODE_TO_DB = {
     NotificationMode.SIRENS: "ALERTS_ONLY",
 }
 _DB_TO_MODE = {value: key for key, value in _MODE_TO_DB.items()}
+
+
+class _AccountDeleteRetry(RuntimeError):
+    pass
 
 
 class AsyncPostgresAccountRepository:
@@ -54,10 +64,119 @@ class AsyncPostgresAccountRepository:
                     await session.flush()
                 return await self._load(session, row)
 
+    async def get_existing(self, telegram_user_id: int) -> UserAccount | None:
+        """Hydrate an existing account without locking or creating any row."""
+        async with self._factory() as session:
+            row = (
+                await session.execute(select(User).where(User.telegram_user_id == telegram_user_id))
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return await self._load(session, row)
+
     async def save(self, account: UserAccount) -> None:
         async with self._factory() as session:
             async with session.begin():
                 await self.save_in_session(session, account)
+
+    async def delete_account(self, telegram_user_id: int) -> bool:
+        """Delete one account using the sender-compatible outbox -> owner lock order.
+
+        A sender already holding an outbox row is allowed to finish before
+        deletion. If a concurrent mutation owns the user row, NOWAIT aborts
+        this transaction (releasing outbox locks) and retries instead of
+        creating an inverse user -> outbox deadlock.
+        """
+        for attempt in range(3):
+            try:
+                return await self._delete_account_once(telegram_user_id)
+            except _AccountDeleteRetry:
+                if attempt == 2:
+                    raise RuntimeError("account changed during deletion") from None
+                await asyncio.sleep(0.05 * (attempt + 1))
+            except DBAPIError as exc:
+                if not self._is_lock_not_available(exc) or attempt == 2:
+                    raise
+                await asyncio.sleep(0.05 * (attempt + 1))
+        raise AssertionError("unreachable account deletion retry state")
+
+    async def _delete_account_once(self, telegram_user_id: int) -> bool:
+        async with self._factory() as session:
+            async with session.begin():
+                user_id = (
+                    await session.execute(
+                        select(User.id).where(User.telegram_user_id == telegram_user_id)
+                    )
+                ).scalar_one_or_none()
+                if user_id is None:
+                    return False
+                scope_id = (
+                    await session.execute(
+                        select(AlertScope.id).where(AlertScope.user_id == user_id)
+                    )
+                ).scalar_one_or_none()
+                targets = [
+                    and_(
+                        OutboxMessage.aggregate_type == "schedule",
+                        OutboxMessage.aggregate_id == str(user_id),
+                    )
+                ]
+                if scope_id is not None:
+                    targets.append(
+                        and_(
+                            OutboxMessage.aggregate_type == "alert_scope",
+                            OutboxMessage.aggregate_id == str(scope_id),
+                        )
+                    )
+                predicate = or_(*targets)
+                await session.execute(
+                    select(OutboxMessage.id)
+                    .where(predicate)
+                    .order_by(OutboxMessage.id)
+                    .with_for_update()
+                )
+                user = (
+                    await session.execute(
+                        select(User).where(User.id == user_id).with_for_update(nowait=True)
+                    )
+                ).scalar_one_or_none()
+                if user is None:
+                    return False
+                locked_scope_id = (
+                    await session.execute(
+                        select(AlertScope.id)
+                        .where(AlertScope.user_id == user.id)
+                        .with_for_update(nowait=True)
+                    )
+                ).scalar_one_or_none()
+                if locked_scope_id != scope_id:
+                    raise _AccountDeleteRetry
+                await session.execute(delete(OutboxMessage).where(predicate))
+                await session.execute(delete(User).where(User.id == user.id))
+                return True
+
+    @staticmethod
+    def _is_lock_not_available(error: DBAPIError) -> bool:
+        pending: list[BaseException] = [error]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if (
+                getattr(current, "sqlstate", None) == "55P03"
+                or getattr(current, "pgcode", None) == "55P03"
+            ):
+                return True
+            for candidate in (
+                getattr(current, "orig", None),
+                current.__cause__,
+                current.__context__,
+            ):
+                if isinstance(candidate, BaseException):
+                    pending.append(candidate)
+        return False
 
     async def load_for_update_in_session(
         self, session: AsyncSession, telegram_user_id: int
@@ -83,19 +202,95 @@ class AsyncPostgresAccountRepository:
             row = User(telegram_user_id=account.user_id)
             session.add(row)
             await session.flush()
-        row.mode = _MODE_TO_DB.get(account.mode) if account.mode else None
-        row.confirmed_region_id = account.region_id
-        row.region_name = account.region_name
-        row.reminder_lead_minutes = account.reminder_lead_minutes
-        row.alerts_enabled = account.mode in {
+        next_mode = _MODE_TO_DB.get(account.mode) if account.mode else None
+        next_alerts_enabled = account.mode in {
             NotificationMode.LESSONS_AND_SIRENS,
             NotificationMode.SIRENS,
         }
+        await self._apply_alert_mode_transition(
+            session,
+            row,
+            next_mode=next_mode,
+            next_alerts_enabled=next_alerts_enabled,
+        )
+        row.mode = next_mode
+        row.confirmed_region_id = account.region_id
+        row.region_name = account.region_name
+        row.reminder_lead_minutes = account.reminder_lead_minutes
+        row.alerts_enabled = next_alerts_enabled
         row.lessons_enabled = account.mode in {
             NotificationMode.LESSONS,
             NotificationMode.LESSONS_AND_SIRENS,
         }
         await self._sync_profiles(session, row.id, account.profiles)
+
+    async def _apply_alert_mode_transition(
+        self,
+        session: AsyncSession,
+        user: User,
+        *,
+        next_mode: str | None,
+        next_alerts_enabled: bool,
+    ) -> None:
+        previous_alerts_enabled = bool(user.alerts_enabled)
+        alerts_changed = previous_alerts_enabled != next_alerts_enabled
+        return_changed = (user.mode == "LESSONS_AND_ALERTS") != (next_mode == "LESSONS_AND_ALERTS")
+        if not alerts_changed and not return_changed:
+            return
+
+        scope = None
+        if alerts_changed:
+            scope = (
+                await session.execute(
+                    select(AlertScope).where(AlertScope.user_id == user.id).with_for_update()
+                )
+            ).scalar_one_or_none()
+
+        invalidation_targets = []
+        if alerts_changed and scope is not None:
+            invalidation_targets.append(
+                and_(
+                    OutboxMessage.aggregate_type == "alert_scope",
+                    OutboxMessage.aggregate_id == str(scope.id),
+                    OutboxMessage.event_type.in_(("ALERT_STARTED", "ALL_CLEAR_CONFIRMED")),
+                )
+            )
+        if return_changed:
+            invalidation_targets.append(
+                and_(
+                    OutboxMessage.aggregate_type == "schedule",
+                    OutboxMessage.aggregate_id == str(user.id),
+                    OutboxMessage.event_type == "RETURN_TO_ACTIVE_LESSON",
+                )
+            )
+        if invalidation_targets:
+            await session.execute(
+                update(OutboxMessage)
+                .where(
+                    OutboxMessage.delivered_at.is_(None),
+                    OutboxMessage.dead_at.is_(None),
+                    or_(*invalidation_targets),
+                )
+                .values(
+                    dead_at=func.now(),
+                    last_error_code="mode_generation_invalidated",
+                )
+            )
+
+        if previous_alerts_enabled or not next_alerts_enabled or scope is None:
+            return
+        await session.execute(delete(AlertEpisode).where(AlertEpisode.scope_id == scope.id))
+        snapshot = (
+            await session.execute(
+                select(AlertSnapshot).where(AlertSnapshot.scope_id == scope.id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if snapshot is not None:
+            snapshot.state = "UNKNOWN"
+            snapshot.last_fetch_revision = None
+            snapshot.last_full_active_episodes = None
+            snapshot.processed_update_ids = []
+            snapshot.pending_clear_candidate = False
 
     async def sync_profiles_in_session(
         self,
@@ -221,9 +416,7 @@ class AsyncPostgresAccountRepository:
             rule_row.position = position
             await session.flush()
             await self._sync_rule_lessons(session, rule_row.id, rule.lessons)
-        unused_rule_ids = [
-            item.id for item in existing_rules if item.id not in used_rule_ids
-        ]
+        unused_rule_ids = [item.id for item in existing_rules if item.id not in used_rule_ids]
         if unused_rule_ids:
             await session.execute(delete(RuleRow).where(RuleRow.id.in_(unused_rule_ids)))
 
@@ -243,9 +436,7 @@ class AsyncPostgresAccountRepository:
         for override in profile.overrides:
             override_row = override_by_day.get(override.day)
             if override_row is None:
-                override_row = DateOverrideRow(
-                    id=uuid4(), profile_id=profile_id, day=override.day
-                )
+                override_row = DateOverrideRow(id=uuid4(), profile_id=profile_id, day=override.day)
                 session.add(override_row)
             used_override_ids.add(override_row.id)
             override_row.day_off = override.day_off
@@ -311,9 +502,7 @@ class AsyncPostgresAccountRepository:
             .scalars()
             .all()
         )
-        await self._sync_lessons(
-            session, rows, lessons, parent_id=override_id, kind="override"
-        )
+        await self._sync_lessons(session, rows, lessons, parent_id=override_id, kind="override")
 
     async def _sync_lessons(
         self,
@@ -324,9 +513,7 @@ class AsyncPostgresAccountRepository:
         parent_id: UUID,
         kind: str,
     ) -> None:
-        by_id: dict[UUID, RuleLesson | OverrideLesson] = {
-            item.id: item for item in existing
-        }
+        by_id: dict[UUID, RuleLesson | OverrideLesson] = {item.id: item for item in existing}
         for index, existing_lesson in enumerate(existing):
             existing_lesson.position = -1 - index
         await session.flush()
@@ -334,9 +521,7 @@ class AsyncPostgresAccountRepository:
         for position, lesson in enumerate(desired):
             referenced = self._lesson_reference(lesson.storage_ref, kind)
             lesson_row: RuleLesson | OverrideLesson | None = (
-                by_id.get(referenced)
-                if referenced is not None and referenced not in used
-                else None
+                by_id.get(referenced) if referenced is not None and referenced not in used else None
             )
             if lesson_row is None:
                 if kind == "rule":

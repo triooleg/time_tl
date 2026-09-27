@@ -115,34 +115,18 @@ def build_router(application: TelegramApplication) -> Any:
 
 
 async def _answer(message: Any, view: View) -> None:
-    from aiogram.types import (
-        InlineKeyboardButton,
-        InlineKeyboardMarkup,
-        KeyboardButton,
-        ReplyKeyboardMarkup,
-    )
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-    location_requested = any(button.request_location for row in view.rows for button in row)
-    if location_requested:
-        markup: Any = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="📍 Надіслати геолокацію", request_location=True)],
-                [KeyboardButton(text=MANUAL_REGION_LABEL)],
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-        )
-    else:
-        rows = [
-            [
-                InlineKeyboardButton(text=b.label, callback_data=b.callback_data)
-                for b in row
-                if b.callback_data
-            ]
-            for row in view.rows
-            if any(b.callback_data for b in row)
+    rows = [
+        [
+            InlineKeyboardButton(text=b.label, callback_data=b.callback_data)
+            for b in row
+            if b.callback_data
         ]
-        markup = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+        for row in view.rows
+        if any(b.callback_data for b in row)
+    ]
+    markup = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
     await message.answer(view.text, reply_markup=markup)
 
 

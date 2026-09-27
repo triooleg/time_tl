@@ -8,12 +8,22 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from time_tl.infrastructure.telegram.transport import (
     TelegramMessage,
     TelegramSendError,
     TelegramTransport,
 )
+
+KYIV = ZoneInfo("Europe/Kyiv")
+
+
+@dataclass(frozen=True)
+class DeliveryRecipient:
+    chat_id: int
+    confirmed_region_id: str | None = None
+    confirmed_region_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -22,6 +32,7 @@ class ClaimedOutboxMessage:
     event_type: str
     payload: dict[str, object]
     attempts: int
+    recipient: DeliveryRecipient | None = None
 
 
 class SenderRepository(Protocol):
@@ -33,9 +44,19 @@ class SenderRepository(Protocol):
         message_id: str,
         delivered_at: datetime,
         deliver: Callable[[], Awaitable[None]],
+        *,
+        expected_recipient: DeliveryRecipient,
     ) -> bool: ...
     async def mark_retry(
         self, message_id: str, *, available_at: datetime, error_code: str
+    ) -> None: ...
+    async def release_unattempted(
+        self,
+        message_ids: tuple[str, ...],
+        *,
+        claimed_at: datetime,
+        available_at: datetime,
+        error_code: str,
     ) -> None: ...
     async def mark_dead(self, message_id: str, *, error_code: str) -> None: ...
 
@@ -95,9 +116,10 @@ class SenderWorker:
                     record.message_id,
                     now,
                     partial(self._send_with_timeout, message),
+                    expected_recipient=record.recipient or _recipient_from_payload(record.payload),
                 )
             except TelegramSendError as exc:
-                await self._handle_failure(
+                retry_at = await self._handle_failure(
                     record,
                     now,
                     DeliveryFailure(
@@ -107,14 +129,25 @@ class SenderWorker:
                     ),
                 )
             except DeliveryFailure as exc:
-                await self._handle_failure(record, now, exc)
+                retry_at = await self._handle_failure(record, now, exc)
             except Exception:
-                await self._handle_failure(
+                retry_at = await self._handle_failure(
                     record, now, DeliveryFailure("transport_error", retryable=True)
                 )
             else:
                 if authorized:
                     delivered += 1
+                retry_at = None
+            if retry_at is not None:
+                remaining_ids = tuple(item.message_id for item in claimed[index + 1 :])
+                if remaining_ids:
+                    await self._repository.release_unattempted(
+                        remaining_ids,
+                        claimed_at=now,
+                        available_at=retry_at,
+                        error_code="telegram_429_batch_deferred",
+                    )
+                break
         return delivered
 
     async def _send_with_timeout(self, message: TelegramMessage) -> None:
@@ -146,15 +179,42 @@ class SenderWorker:
             chat_id = int(raw_chat_id)
         except ValueError as exc:
             raise DeliveryFailure("invalid_chat_id", retryable=False) from exc
-        title = str(payload.get("lesson_title") or "уроку")
+        title = _display_text(payload.get("lesson_title"), fallback="Урок")
         if record.event_type == "LESSON_REMINDER":
-            text = f"Скоро починається {title}. Час підготуватися до підключення."
+            starts_at = _lesson_time(payload, "starts_at")
+            text = (
+                "⏰ УРОК НЕЗАБАРОМ\n\n"
+                f"📚 {title}\n"
+                f"🕐 Початок: {starts_at}\n\n"
+                "Час підготуватися до підключення."
+            )
         elif record.event_type == "RETURN_TO_ACTIVE_LESSON":
-            text = f"Тривогу підтверджено завершено. {title} ще триває — підключайтеся."
+            region_name = _confirmed_region_name(payload)
+            ends_at = _lesson_time(payload, "ends_at")
+            text = (
+                "📚 МОЖНА ПОВЕРНУТИСЯ ДО УРОКУ\n\n"
+                f"📍 Територія: {region_name}\n"
+                f"📖 Поточний урок: {title}\n"
+                f"🕐 Триває до: {ends_at}\n\n"
+                "Якщо це не суперечить поточним офіційним вказівкам, "
+                "підключайтеся до уроку."
+            )
         elif record.event_type == "ALERT_STARTED":
-            text = "У вашому регіоні оголошено тривогу. Пройдіть до укриття."
+            region_name = _confirmed_region_name(payload)
+            text = (
+                "🚨 ПОВІТРЯНА ТРИВОГА\n\n"
+                f"📍 Територія: {region_name}\n\n"
+                "Прямуйте до укриття та виконуйте офіційні вказівки. "
+                "Бот не визначає, чи зупинено ваш урок."
+            )
         elif record.event_type == "ALL_CLEAR_CONFIRMED":
-            text = "Відбій тривоги підтверджено офіційним джерелом."
+            region_name = _confirmed_region_name(payload)
+            text = (
+                "✅ ВІДБІЙ ПОВІТРЯНОЇ ТРИВОГИ\n\n"
+                f"📍 Територія: {region_name}\n\n"
+                "Відбій підтверджено офіційним джерелом. "
+                "Продовжуйте виконувати актуальні офіційні вказівки."
+            )
         else:
             raise DeliveryFailure("unsupported_event_type", retryable=False)
         join_url = None
@@ -165,16 +225,58 @@ class SenderWorker:
 
     async def _handle_failure(
         self, record: ClaimedOutboxMessage, now: datetime, failure: DeliveryFailure
-    ) -> None:
+    ) -> datetime | None:
         next_attempt = record.attempts + 1
-        if not failure.retryable or next_attempt >= self._max_attempts:
+        rate_limited = failure.retryable and failure.code == "telegram_429"
+        if not failure.retryable or (next_attempt >= self._max_attempts and not rate_limited):
             await self._repository.mark_dead(record.message_id, error_code=failure.code)
-            return
+            return None
         exponential = min(900.0, float(2 ** min(next_attempt, 9)))
         delay = max(exponential, float(failure.retry_after_seconds or 0.0))
+        available_at = now + timedelta(seconds=delay)
         await self._repository.mark_retry(
-            record.message_id, available_at=now + timedelta(seconds=delay), error_code=failure.code
+            record.message_id, available_at=available_at, error_code=failure.code
         )
+        return available_at if rate_limited else None
+
+
+def _display_text(raw: object, *, fallback: str) -> str:
+    value = " ".join(str(raw or "").split())
+    return value[:160] if value else fallback
+
+
+def _confirmed_region_name(payload: dict[str, object]) -> str:
+    raw_region = payload.get("confirmed_region_name")
+    region = _display_text(raw_region, fallback="")
+    if not region:
+        raise DeliveryFailure("missing_confirmed_region", retryable=False)
+    return region
+
+
+def _lesson_time(payload: dict[str, object], key: str) -> str:
+    raw_value = payload.get(key)
+    if not isinstance(raw_value, str):
+        raise DeliveryFailure(f"missing_{key}", retryable=False)
+    try:
+        parsed = datetime.fromisoformat(raw_value)
+    except ValueError as exc:
+        raise DeliveryFailure(f"invalid_{key}", retryable=False) from exc
+    if parsed.tzinfo is None:
+        raise DeliveryFailure(f"invalid_{key}", retryable=False)
+    return parsed.astimezone(KYIV).strftime("%H:%M")
+
+
+def _recipient_from_payload(payload: dict[str, object]) -> DeliveryRecipient:
+    raw_chat_id = payload.get("telegram_chat_id")
+    if not isinstance(raw_chat_id, (int, str)):
+        raise DeliveryFailure("invalid_chat_id", retryable=False)
+    try:
+        chat_id = int(raw_chat_id)
+    except ValueError as exc:
+        raise DeliveryFailure("invalid_chat_id", retryable=False) from exc
+    region_id = _display_text(payload.get("confirmed_region_id"), fallback="") or None
+    region_name = _display_text(payload.get("confirmed_region_name"), fallback="") or None
+    return DeliveryRecipient(chat_id, region_id, region_name)
 
 
 def build_sender_worker(
