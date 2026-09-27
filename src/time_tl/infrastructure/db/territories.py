@@ -297,16 +297,17 @@ class PostgresTerritoryCatalogRepository:
                     "alert scopes are not fully bound to the active territory catalogue"
                 )
             try:
-                path = self._path_from_rows(
-                    rows,
-                    catalog_version=pointer.catalog_version,
-                    region_id=scope.selected_region_id,
+                canonical = list(
+                    self._scope_closure_from_rows(
+                        rows,
+                        catalog_version=pointer.catalog_version,
+                        region_id=scope.selected_region_id,
+                    )
                 )
             except LookupError as error:
                 raise TerritoryRuntimeNotReadyError(
                     "alert scope selects a missing or nonselectable territory"
                 ) from error
-            canonical = [node.region_id for node in path]
             if scope.applicable_region_ids != canonical:
                 raise TerritoryRuntimeNotReadyError(
                     "alert scope hierarchy closure differs from the active catalogue"
@@ -586,9 +587,10 @@ class PostgresTerritoryCatalogRepository:
         rows: Sequence[TerritoryDraftRow],
         expected_region_ids: frozenset[str] | None,
     ) -> bool:
-        return expected_region_ids is None or frozenset(
-            row.region_id for row in rows
-        ) == expected_region_ids
+        return (
+            expected_region_ids is None
+            or frozenset(row.region_id for row in rows) == expected_region_ids
+        )
 
     def _assert_active_rows_expected(self, rows: Sequence[Territory]) -> None:
         try:
@@ -634,7 +636,7 @@ class PostgresTerritoryCatalogRepository:
         planned: list[tuple[AlertScope, tuple[str, ...]]] = []
         for scope in scopes:
             try:
-                path = self._path_from_rows(
+                applicable_ids = self._scope_closure_from_rows(
                     rows,
                     catalog_version=catalog_version,
                     region_id=scope.selected_region_id,
@@ -644,7 +646,7 @@ class PostgresTerritoryCatalogRepository:
                     "candidate catalogue cannot reconcile existing selected UID "
                     f"{scope.selected_region_id!r}"
                 ) from error
-            planned.append((scope, tuple(node.region_id for node in path)))
+            planned.append((scope, applicable_ids))
         return tuple(planned)
 
     @staticmethod
@@ -720,6 +722,52 @@ class PostgresTerritoryCatalogRepository:
         path.reverse()
         return tuple(self._node(row, catalog_version) for row in path)
 
+    def _scope_closure_from_rows(
+        self,
+        rows: Sequence[Territory],
+        *,
+        catalog_version: str,
+        region_id: str,
+    ) -> tuple[str, ...]:
+        """Return ancestors plus the selected node's complete provider subtree.
+
+        The ancestor path makes a parent alert applicable to a selected child.
+        The subtree makes a child alert applicable to a selected raion/oblast.
+        Sibling branches are never traversed for a selected hromada or raion.
+        """
+
+        path = self._path_from_rows(
+            rows,
+            catalog_version=catalog_version,
+            region_id=region_id,
+        )
+        applicable = [node.region_id for node in path]
+        seen = set(applicable)
+        depth = {"OBLAST": 0, "SPECIAL_STATUS_CITY": 0, "RAION": 1, "HROMADA": 2}
+        children: dict[str, list[Territory]] = {}
+        for row in rows:
+            if row.parent_region_id is not None:
+                children.setdefault(row.parent_region_id, []).append(row)
+        for child_rows in children.values():
+            child_rows.sort(
+                key=lambda row: (
+                    depth[row.kind],
+                    row.sort_key,
+                    row.name,
+                    row.region_id,
+                )
+            )
+
+        pending = list(reversed(children.get(region_id, [])))
+        while pending:
+            current = pending.pop()
+            if current.region_id in seen:
+                raise RuntimeError("active territory catalogue contains a cycle")
+            seen.add(current.region_id)
+            applicable.append(current.region_id)
+            pending.extend(reversed(children.get(current.region_id, [])))
+        return tuple(applicable)
+
     async def resolve_scope(self, *, provider: str, region_id: str) -> ResolvedTerritoryScope:
         version, rows = await self._active_rows(provider)
         return self._resolved_scope(
@@ -794,12 +842,16 @@ class PostgresTerritoryCatalogRepository:
             provider=provider,
             catalog_version=catalog_version,
             selected_region_id=region_id,
-            applicable_region_ids=tuple(node.region_id for node in path),
+            applicable_region_ids=self._scope_closure_from_rows(
+                rows,
+                catalog_version=catalog_version,
+                region_id=region_id,
+            ),
             path=path,
         )
 
     async def scope_closure(self, *, provider: str, region_id: str) -> tuple[str, ...]:
-        """Return applicable provider UIDs from root through selected territory."""
+        """Return ancestor UIDs plus the selected provider subtree."""
 
         resolved = await self.resolve_scope(provider=provider, region_id=region_id)
         return resolved.applicable_region_ids

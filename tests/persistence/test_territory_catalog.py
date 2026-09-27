@@ -203,7 +203,7 @@ async def test_active_read_model_serves_tree_path_and_alert_scope_closure() -> N
 
 
 @pytest.mark.asyncio
-async def test_scope_closure_preserves_all_selection_levels() -> None:
+async def test_scope_closure_includes_ancestors_and_selected_subtree() -> None:
     repository = ReadModelRepository(_stored_rows())
 
     assert await repository.scope_closure(provider="alerts.in.ua", region_id="901") == (
@@ -211,9 +211,53 @@ async def test_scope_closure_preserves_all_selection_levels() -> None:
         "90",
         "901",
     )
-    assert await repository.scope_closure(provider="alerts.in.ua", region_id="90") == ("9", "90")
-    assert await repository.scope_closure(provider="alerts.in.ua", region_id="9") == ("9",)
+    assert await repository.scope_closure(provider="alerts.in.ua", region_id="90") == (
+        "9",
+        "90",
+        "902",
+        "901",
+    )
+    assert await repository.scope_closure(provider="alerts.in.ua", region_id="9") == (
+        "9",
+        "91",
+        "911",
+        "90",
+        "902",
+        "901",
+    )
     assert await repository.scope_closure(provider="alerts.in.ua", region_id="31") == ("31",)
+
+
+@pytest.mark.asyncio
+async def test_scope_closure_is_deterministic_deduplicated_and_excludes_siblings() -> None:
+    rows = _stored_rows()
+    forward = ReadModelRepository(rows)
+    reversed_rows = ReadModelRepository(list(reversed(rows)))
+
+    hromada = await forward.scope_closure(provider="alerts.in.ua", region_id="901")
+    oblast = await forward.scope_closure(provider="alerts.in.ua", region_id="9")
+    reordered_oblast = await reversed_rows.scope_closure(
+        provider="alerts.in.ua",
+        region_id="9",
+    )
+
+    assert hromada == ("9", "90", "901")
+    assert "902" not in hromada
+    assert "911" not in hromada
+    assert oblast == reordered_oblast
+    assert len(oblast) == len(set(oblast))
+
+
+@pytest.mark.asyncio
+async def test_parent_scope_keeps_nonselectable_official_descendants_applicable() -> None:
+    rows = _stored_rows()
+    hidden_child = next(row for row in rows if row.region_id == "902")
+    hidden_child.is_selectable = False
+    repository = ReadModelRepository(rows)
+
+    closure = await repository.scope_closure(provider="alerts.in.ua", region_id="90")
+
+    assert closure == ("9", "90", "902", "901")
 
 
 def _scope(selected_region_id: str, *, legacy: bool = False) -> AlertScope:
@@ -253,9 +297,9 @@ def test_activation_plan_reconciles_legacy_scope_with_selected_and_ancestors_onl
     assert scope.applicable_region_ids == ["9", "90", "901"]
 
 
-def test_activation_reconciliation_uses_path_not_descendant_closure() -> None:
+def test_activation_reconciliation_updates_legacy_scope_to_canonical_subtree() -> None:
     repository = ReadModelRepository(_stored_rows())
-    oblast_scope = _scope("9")
+    oblast_scope = _scope("9", legacy=True)
     raion_scope = _scope("90")
 
     plan = repository._plan_scope_reconciliation(
@@ -270,8 +314,8 @@ def test_activation_reconciliation_uses_path_not_descendant_closure() -> None:
         catalog_version="2026-09-24",
     )
 
-    assert oblast_scope.applicable_region_ids == ["9"]
-    assert raion_scope.applicable_region_ids == ["9", "90"]
+    assert oblast_scope.applicable_region_ids == ["9", "91", "911", "90", "902", "901"]
+    assert raion_scope.applicable_region_ids == ["9", "90", "902", "901"]
 
 
 def test_activation_preflight_aborts_without_mutating_any_scope() -> None:
@@ -408,6 +452,7 @@ class ConfirmationSession:
     def __init__(self, results: Sequence[QueueResult], snapshot: AlertSnapshot) -> None:
         self.results = list(results)
         self.snapshot = snapshot
+        self.added: list[Any] = []
         self.statements: list[str] = []
 
     async def __aenter__(self) -> ConfirmationSession:
@@ -422,6 +467,12 @@ class ConfirmationSession:
     async def execute(self, statement: Any, _parameters: Any = None) -> QueueResult:
         self.statements.append(str(statement))
         return self.results.pop(0)
+
+    def add(self, value: Any) -> None:
+        self.added.append(value)
+
+    async def flush(self) -> None:
+        return None
 
     async def get(self, model: type[Any], identity: Any) -> Any:
         assert model is AlertSnapshot
@@ -601,6 +652,78 @@ def test_activation_rejects_any_reviewed_evidence_mismatch(
             expected_record_count=record_count,
             expected_unresolved_total=unresolved_total,
         )
+
+
+@pytest.mark.asyncio
+async def test_activation_atomically_reconciles_legacy_oblast_and_resets_unknown() -> None:
+    candidate = _catalog_version()
+    previous = _catalog_version(status="ACTIVE")
+    previous.catalog_version = "old-version"
+    pointer = ActiveTerritoryCatalog(
+        provider="alerts.in.ua",
+        catalog_version="old-version",
+    )
+    poll = AlertPollState(
+        singleton_id=1,
+        fetch_revision=7,
+        last_modified="old-etag",
+        last_success_at=datetime(2026, 9, 24, tzinfo=UTC),
+    )
+    scope = _scope("9", legacy=True)
+    snapshot = AlertSnapshot(
+        scope_id=scope.id,
+        state="CLEAR_CONFIRMED",
+        last_fetch_revision=7,
+        last_full_active_episodes=[],
+        processed_update_ids=["old-clear"],
+        pending_clear_candidate=True,
+        updated_at=datetime(2026, 9, 24, tzinfo=UTC),
+    )
+    stored = _stored_rows()[:3]
+    for row in stored:
+        row.catalog_version = "reviewed-v1"
+    session = ConfirmationSession(
+        [
+            QueueResult(),
+            QueueResult(scalar=candidate),
+            QueueResult(scalar=poll),
+            QueueResult(rows=stored),
+            QueueResult(rows=[scope]),
+            QueueResult(rows=[snapshot]),
+            QueueResult(),
+            QueueResult(scalar=pointer),
+            QueueResult(scalar=previous),
+        ],
+        snapshot,
+    )
+    repository = PostgresTerritoryCatalogRepository(ConfirmationFactory(session))
+
+    await repository.activate(
+        provider="alerts.in.ua",
+        catalog_version="reviewed-v1",
+        expected_source_sha256="a" * 64,
+        expected_record_count=3,
+        expected_unresolved_total=295,
+    )
+
+    assert session.results == []
+    assert poll.fetch_revision == 8
+    assert poll.last_modified is None
+    assert poll.last_success_at is None
+    assert scope.selected_region_id == "9"
+    assert scope.territory_provider == "alerts.in.ua"
+    assert scope.territory_catalog_version == "reviewed-v1"
+    assert scope.applicable_region_ids == ["9", "90", "901"]
+    assert snapshot.state == "UNKNOWN"
+    assert snapshot.last_fetch_revision is None
+    assert snapshot.last_full_active_episodes is None
+    assert snapshot.processed_update_ids == []
+    assert snapshot.pending_clear_candidate is False
+    assert previous.status == "RETIRED"
+    assert pointer.catalog_version == "reviewed-v1"
+    assert candidate.status == "ACTIVE"
+    assert any("DELETE FROM alert_episodes" in statement for statement in session.statements)
+    assert "FROM active_territory_catalogs" in session.statements[-2]
 
 
 @pytest.mark.asyncio

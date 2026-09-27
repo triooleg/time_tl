@@ -74,16 +74,24 @@ active_territory_catalogs
 
 Add `provider` and `catalog_revision` to an alert scope.  Keep
 `applicable_region_ids` as the persisted, audited closure for restart safety.
-Do not add duplicate oblast/raion/hromada columns to `users`; the selected leaf
-and the catalogue closure already model the hierarchy.
+The canonical closure is deterministic and contains the selected territory's
+ancestors followed by its own complete subtree. Consequently, a hromada scope
+contains only its oblast, raion and itself; a raion scope additionally contains
+all its hromadas; and an oblast scope contains all descendant raions and
+hromadas. Sibling branches are excluded for a hromada or raion selection.
+Catalog activation recomputes every persisted closure in the same transaction,
+invalidates the provider poll fence, deletes old episodes and resets snapshots
+to `UNKNOWN` before delivery may resume. Do not add duplicate
+oblast/raion/hromada columns to `users`; the selected UID and audited closure
+already model the hierarchy.
 
 ## Effective-state and deduplication contract
 
 The official alerts.in.ua documentation defines the compact
 `/v1/iot/active_air_raid_alerts.json` response for all oblasts, raions and
 hromadas as `A` (active alert for the UID), `P` (partial alert within a raion
-or hromada), and `N` (no alert). For a selected leaf and its stored oblast ->
-raion -> hromada closure:
+or hromada), and `N` (no alert). For a selected territory and its stored
+ancestor-plus-subtree closure:
 
 - `A` on the selected territory or any applicable ancestor makes the selected
   scope active;
