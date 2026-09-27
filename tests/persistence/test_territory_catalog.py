@@ -669,6 +669,34 @@ async def test_runtime_readiness_rejects_empty_or_count_mismatched_catalogue(
         await repository.assert_runtime_ready(provider="alerts.in.ua")
 
 
+@pytest.mark.parametrize(
+    "expected_region_ids",
+    [
+        frozenset({"9", "90"}),
+        frozenset({"9", "90", "901", "999"}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_runtime_readiness_rejects_foreign_or_missing_provider_uid(
+    expected_region_ids: frozenset[str],
+) -> None:
+    pointer = ActiveTerritoryCatalog(provider="alerts.in.ua", catalog_version="reviewed-v1")
+    repository, _session = _readiness_repository(
+        [
+            QueueResult(),
+            QueueResult(scalar=pointer),
+            QueueResult(scalar=_catalog_version(status="ACTIVE")),
+            QueueResult(rows=_stored_rows()[:3]),
+        ]
+    )
+
+    with pytest.raises(TerritoryRuntimeNotReadyError, match="official provider registry"):
+        await repository.assert_runtime_ready(
+            provider="alerts.in.ua",
+            expected_region_ids=expected_region_ids,
+        )
+
+
 @pytest.mark.asyncio
 async def test_runtime_readiness_rejects_legacy_or_mismatched_scope_bindings() -> None:
     pointer = ActiveTerritoryCatalog(provider="alerts.in.ua", catalog_version="reviewed-v1")

@@ -40,6 +40,7 @@ from time_tl.runtime.regions import (
     REGISTRY_SUPPORTS_AGGREGATE_OBLAST_SCOPES,
 )
 from time_tl.runtime.services import (
+    _assert_territory_runtime_ready,
     _build_inbound_allowlist_guard,
     _owner_config_revision_watch_loop,
     _provider,
@@ -138,6 +139,22 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             await run_alert_worker(settings)
         expected = frozenset(item.uid for item in load_catalog().records)
         worker.assert_awaited_once_with(settings, verified_region_ids=expected)
+
+    async def test_territory_startup_requires_exact_official_provider_uids(self) -> None:
+        readiness = AsyncMock(return_value="reviewed-v1")
+        repository = SimpleNamespace(assert_runtime_ready=readiness)
+        with patch(
+            "time_tl.infrastructure.db.territories.PostgresTerritoryCatalogRepository",
+            return_value=repository,
+        ):
+            active = await _assert_territory_runtime_ready(object())
+
+        self.assertEqual("reviewed-v1", active)
+        expected = frozenset(item.uid for item in load_catalog().records)
+        readiness.assert_awaited_once_with(
+            provider="alerts.in.ua",
+            expected_region_ids=expected,
+        )
 
     async def test_live_bot_fails_before_aiogram_polling(self) -> None:
         settings = settings_for(

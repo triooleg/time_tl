@@ -74,6 +74,11 @@ as before. UIDs absent from this byte-pinned provider list, including IoT
 positions 1805..1814, remain unresolved. A non-space value at such a position
 invalidates the complete snapshot and produces UNKNOWN/STALE, never
 CLEAR_CONFIRMED.
+
+Only UIDs present in this byte-pinned alerts.in.ua file may be persisted as
+territories or exposed in the Telegram selection tree. KATOTTG-only terms are
+validation/enrichment evidence and never become selectable territory rows.
+
 ## Refresh procedure
 
 1. Fetch the exact official source during an approved source-review task.

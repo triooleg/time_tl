@@ -189,14 +189,29 @@ class PostgresTerritoryCatalogRepository:
     def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
         self._factory = factory
 
-    async def assert_runtime_ready(self, *, provider: str) -> str:
+    async def assert_runtime_ready(
+        self,
+        *,
+        provider: str,
+        expected_region_ids: frozenset[str] | None = None,
+    ) -> str:
         """Fail closed unless the active catalogue and every scope binding agree."""
 
         async with self._factory() as session:
             async with session.begin():
-                return await self.assert_runtime_ready_in_session(session, provider=provider)
+                return await self.assert_runtime_ready_in_session(
+                    session,
+                    provider=provider,
+                    expected_region_ids=expected_region_ids,
+                )
 
-    async def assert_runtime_ready_in_session(self, session: AsyncSession, *, provider: str) -> str:
+    async def assert_runtime_ready_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        provider: str,
+        expected_region_ids: frozenset[str] | None = None,
+    ) -> str:
         await session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:provider, 0))"),
             {"provider": provider},
@@ -243,6 +258,11 @@ class PostgresTerritoryCatalogRepository:
             ) from error
         actual_count = len(prepared)
         actual_selectable = sum(row.is_selectable for row in prepared)
+        actual_region_ids = frozenset(row.region_id for row in prepared)
+        if expected_region_ids is not None and actual_region_ids != expected_region_ids:
+            raise TerritoryRuntimeNotReadyError(
+                "active territory catalogue UIDs differ from the official provider registry"
+            )
         report_unresolved = version.reconciliation_report.get("unresolved_total")
         if (
             actual_count <= 0

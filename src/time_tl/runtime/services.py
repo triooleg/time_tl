@@ -754,8 +754,10 @@ async def _assert_territory_runtime_ready(factory: Any) -> str:
 
     from time_tl.infrastructure.db.territories import PostgresTerritoryCatalogRepository
 
+    official_region_ids = frozenset(record.uid for record in load_catalog().records)
     return await PostgresTerritoryCatalogRepository(factory).assert_runtime_ready(
-        provider="alerts.in.ua"
+        provider="alerts.in.ua",
+        expected_region_ids=official_region_ids,
     )
 
 
