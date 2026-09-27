@@ -11,8 +11,10 @@ production alert decisions.
 - Scope: all currently active documented threats carrying explicit provider
   `location_uid` values
 
-This is the reviewed live full-territory source. Every returned row is validated
-before alert type filtering: root shape, documented fields, positive integer ID,
+This is the sole reviewed live alert source for the full territory hierarchy.
+The compact IoT adapters are disabled legacy/regression paths and are not live
+substitutes. Every returned row is validated before alert type filtering: root
+shape, documented fields, positive integer ID,
 canonical decimal UID, UID presence in the byte-pinned official catalogue,
 compatible catalogue/API location type, documented alert/level/threat enums,
 timezone-aware timestamps and uniqueness. A known non-air row is then excluded
@@ -21,9 +23,11 @@ the whole snapshot. Both `red` and `yellow` `air_raid` rows are ACTIVE.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful
-empty observations before `CLEAR_CONFIRMED`. Unknown UIDs, schema drift, stale or
-reused cache markers with changed content, and any source failure yield
-UNKNOWN/STALE, never clear.
+observations without an applicable episode before `CLEAR_CONFIRMED`. A valid
+`304` counts only when the same adapter process first established a validated
+complete `200` baseline. Unknown UIDs, schema drift, stale or reused cache
+markers with changed content, and any source failure yield UNKNOWN/STALE, never
+clear.
 
 ## Legacy aggregate 27-oblast IoT snapshot
 
@@ -110,7 +114,8 @@ Activation and every active Telegram read require the exact pinned UID set; an
 extra or missing UID aborts before the active pointer can be used for display.
 
 `region_registry_full.WIRE_RUNTIME` remains false for the all-territory IoT wire.
-Live workers use only the separately reviewed `ACTIVE_JSON_WIRE_RUNTIME` capability;
+Live full-hierarchy workers use only the separately reviewed
+`ACTIVE_JSON_WIRE_RUNTIME` capability and `/v1/alerts/active.json`;
 if it is false, startup aborts before owner settings, database, provider, lease,
 health or polling resources are created. LOCAL and SIMULATION keep their offline
 provider behavior.

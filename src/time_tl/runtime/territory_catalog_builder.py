@@ -1,4 +1,4 @@
-"""Build a fail-closed alerts.in.ua hierarchy from official KATOTTG JSON."""
+"""Validate and enrich the canonical alerts.in.ua hierarchy with KATOTTG JSON."""
 
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ _PARSED_CATEGORIES = _HIERARCHY_CATEGORIES | _SETTLEMENT_CATEGORIES | {"B"}
 _APOSTROPHE_TRANSLATION = str.maketrans({"\u2019": "'", "\u2018": "'"})
 
 # Exact official district renames enacted after the pinned KATOTTG 4.0.0
-# snapshot. These aliases never infer a hierarchy; the matched KATOTTG code
-# remains the source of the parent relationship.
+# snapshot. These aliases never infer or change hierarchy; alerts.in.ua remains
+# canonical for parent links and a matched KATOTTG code is enrichment only.
 # https://zakon.rada.gov.ua/laws/show/3984-20
 # https://zakon.rada.gov.ua/rada/show/v0281832-24
 _OFFICIAL_RENAMED_RAION_ALIASES = {
@@ -225,7 +225,11 @@ def build_territory_catalog(
     *,
     alerts_catalog: FullRegionCatalog | None = None,
 ) -> TerritoryCatalogBuildResult:
-    """Crosswalk pinned alerts IDs to caller-supplied official KATOTTG bytes."""
+    """Validate/enrich pinned alerts rows using caller-supplied KATOTTG bytes.
+
+    Provider UID, name, type, source order and ``parent_uid`` are canonical.
+    KATOTTG may supply a verified external code but cannot reparent a row.
+    """
 
     catalog = alerts_catalog if alerts_catalog is not None else load_catalog()
     ordered_records = tuple(sorted(catalog.records, key=lambda record: record.source_row))
