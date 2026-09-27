@@ -97,6 +97,7 @@ class AlertsInUaAdapter:
 
     ENDPOINT = "https://api.alerts.in.ua/v1/alerts/active.json"
     MAX_RESPONSE_BYTES = 1_048_576
+    MAX_ALERT_ID = (1 << 63) - 1
 
     _LOCATION_TYPES = frozenset({"oblast", "raion", "city", "hromada", "unknown"})
     _ALERT_TYPES = frozenset(
@@ -289,8 +290,12 @@ class AlertsInUaAdapter:
                 raise ValueError("alert object contains undocumented fields")
 
             alert_id = item["id"]
-            if isinstance(alert_id, bool) or not isinstance(alert_id, int) or alert_id <= 0:
-                raise TypeError("id must be a positive integer")
+            if (
+                isinstance(alert_id, bool)
+                or not isinstance(alert_id, int)
+                or not 1 <= alert_id <= self.MAX_ALERT_ID
+            ):
+                raise TypeError("id must be a positive signed int64")
             if alert_id in alert_ids:
                 raise ValueError("duplicate alert ID")
             alert_ids.add(alert_id)

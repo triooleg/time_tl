@@ -17,6 +17,8 @@ NOW = datetime(2026, 9, 20, 12, tzinfo=UTC)
 MARKER_0 = "Sun, 20 Sep 2026 09:00:00 GMT"
 MARKER_1 = "Sun, 20 Sep 2026 10:00:00 GMT"
 MARKER_2 = "Sun, 20 Sep 2026 11:00:00 GMT"
+MARKER_3 = "Sun, 20 Sep 2026 12:00:00 GMT"
+SIGNED_INT64_MAX = (1 << 63) - 1
 REGION_TYPES = {"1903": "Громада", "1803": "Район", "16": "Область"}
 
 
@@ -214,6 +216,19 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 ).fetch(fetch_revision=1, last_modified=None)
                 self.assertIsNotNone(result.failure)
 
+    def test_parser_accepts_only_positive_signed_int64_alert_ids(self):
+        provider = adapter(Transport())
+        for alert_id in (1, SIGNED_INT64_MAX):
+            with self.subTest(valid=alert_id):
+                episodes, _digest = provider._parse_active_payload(
+                    json.dumps(active(alert_id)).encode()
+                )
+                self.assertEqual(str(alert_id), episodes[0].episode_id)
+
+        for alert_id in (False, 0, -1, SIGNED_INT64_MAX + 1):
+            with self.subTest(invalid=alert_id), self.assertRaises(TypeError):
+                provider._parse_active_payload(json.dumps(active(alert_id)).encode())
+
     async def test_marker_regression_and_same_marker_changed_content_are_invalid(self):
         regression_provider = adapter(
             Transport(
@@ -349,6 +364,32 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         unknown = active(uid="999")
         await self.worker(
             Transport(response(200, unknown, **{"Last-Modified": MARKER_2}))
+        ).run_once()
+        self.assertEqual(AlertState.STALE, (await self.repo.snapshot_for("student-1")).state)
+        self.assertFalse(
+            any(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await self.repo.outbox()
+            )
+        )
+
+    async def test_out_of_range_non_air_id_after_active_never_clears(self):
+        await self.worker(
+            Transport(response(200, active(), **{"Last-Modified": MARKER_1}))
+        ).run_once()
+        invalid_non_air = active(
+            SIGNED_INT64_MAX + 1,
+            alert_type="chemical",
+        )
+        self.clock += 15
+        await self.worker(
+            Transport(response(200, invalid_non_air, **{"Last-Modified": MARKER_2}))
+        ).run_once()
+        self.assertEqual(AlertState.STALE, (await self.repo.snapshot_for("student-1")).state)
+
+        self.clock += 15
+        await self.worker(
+            Transport(response(200, invalid_non_air, **{"Last-Modified": MARKER_3}))
         ).run_once()
         self.assertEqual(AlertState.STALE, (await self.repo.snapshot_for("student-1")).state)
         self.assertFalse(
