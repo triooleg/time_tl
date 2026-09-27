@@ -10,7 +10,7 @@ from typing import Any
 from time_tl.admin.settings import ActivationCandidate, OwnerSettingsService
 from time_tl.config import AdminBackend, Environment, Settings
 from time_tl.domain.alerts import ProviderSnapshotKind
-from time_tl.infrastructure.alerts import FullTerritoryAlertsInUaAdapter
+from time_tl.infrastructure.alerts import AlertsInUaAdapter
 from time_tl.runtime.contracts import RuntimeContractError
 from time_tl.runtime.httpx_transport import HttpxTransport
 from time_tl.runtime.region_registry_full import EXPECTED_RECORD_COUNT, load_catalog
@@ -18,6 +18,10 @@ from time_tl.runtime.region_registry_full import EXPECTED_RECORD_COUNT, load_cat
 
 class OperatorPreflightError(RuntimeError):
     """A deliberately secret-free preflight failure."""
+
+
+def _active_json_transport() -> HttpxTransport:
+    return HttpxTransport(max_response_bytes=AlertsInUaAdapter.MAX_RESPONSE_BYTES)
 
 
 @dataclass(frozen=True)
@@ -30,7 +34,7 @@ class OperatorPreflightEvidence:
         return (
             f"preflight passed: revision={self.revision} "
             f"allowlist_count={self.allowlist_count} telegram=get_me_ok "
-            f"alerts=full_200 covered_regions={self.covered_region_count} "
+            f"alerts=active_json_full_200 covered_regions={self.covered_region_count} "
             "last_modified=present persisted=no"
         )
 
@@ -40,7 +44,7 @@ async def probe_candidate(
     approved_chat_id: int,
     *,
     bot_factory: Callable[[str], Any],
-    transport_factory: Callable[[], Any] = HttpxTransport,
+    transport_factory: Callable[[], Any] = _active_json_transport,
 ) -> OperatorPreflightEvidence:
     """Probe credentials and official schema without sending or persisting anything."""
 
@@ -78,12 +82,12 @@ async def probe_candidate(
     if not telegram_ok:
         raise OperatorPreflightError("Telegram identity is not a named bot")
 
-    catalog_region_uids = tuple(item.uid for item in load_catalog().records)
-    expected_coverage = frozenset(catalog_region_uids)
-    adapter = FullTerritoryAlertsInUaAdapter(
+    catalog_records = load_catalog().records
+    expected_coverage = frozenset(item.uid for item in catalog_records)
+    adapter = AlertsInUaAdapter(
         token=candidate.alerts_in_ua_token.get_secret_value(),
         transport=transport_factory(),
-        region_uids=catalog_region_uids,
+        region_types={item.uid: item.location_type for item in catalog_records},
     )
     result = await adapter.fetch(fetch_revision=1, last_modified=None)
     snapshot = result.snapshot
@@ -111,7 +115,7 @@ async def preflight_owner_settings(
     approved_chat_id: int,
     *,
     bot_factory: Callable[[str], Any] | None = None,
-    transport_factory: Callable[[], Any] = HttpxTransport,
+    transport_factory: Callable[[], Any] = _active_json_transport,
 ) -> OperatorPreflightEvidence:
     """Load a pending revision read-only and run the bounded external probes."""
 

@@ -20,7 +20,7 @@ from time_tl.config import (
 from time_tl.domain.alerts import RegionScope, SourceFailureKind
 from time_tl.infrastructure.alerts import (
     AlertPollState,
-    FullTerritoryAlertsInUaAdapter,
+    AlertsInUaAdapter,
     HttpResponse,
     OblastAlertsInUaAdapter,
 )
@@ -43,6 +43,7 @@ from time_tl.runtime.regions import (
 from time_tl.runtime.services import (
     _assert_territory_runtime_ready,
     _build_inbound_allowlist_guard,
+    _live_alert_requests_per_minute,
     _owner_config_revision_watch_loop,
     _provider,
     _run_postgres_alert_worker,
@@ -117,6 +118,10 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         )
         validate_runtime_contract(settings, "alert-worker")
 
+    def test_live_active_json_poller_is_capped_at_four_requests_per_minute(self) -> None:
+        self.assertEqual(4.0, _live_alert_requests_per_minute(5))
+        self.assertEqual(3.0, _live_alert_requests_per_minute(3))
+
     def test_staging_contract_rejects_unreviewed_aggregate_provider(self) -> None:
         settings = settings_for(
             "alert-worker",
@@ -142,7 +147,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         provider = Mock()
         serve = AsyncMock()
         with (
-            patch.object(region_registry_full, "WIRE_RUNTIME", False),
+            patch.object(region_registry_full, "ACTIVE_JSON_WIRE_RUNTIME", False),
             patch(
                 "time_tl.runtime.services.resolve_owner_runtime_settings",
                 owner_settings,
@@ -173,7 +178,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         readiness = AsyncMock()
         serve = AsyncMock()
         with (
-            patch.object(region_registry_full, "WIRE_RUNTIME", False),
+            patch.object(region_registry_full, "ACTIVE_JSON_WIRE_RUNTIME", False),
             patch("time_tl.infrastructure.db.engine.create_engine", engine),
             patch("time_tl.infrastructure.db.engine.create_session_factory", session_factory),
             patch("time_tl.infrastructure.db.lease.dedicated_advisory_lease", lease),
@@ -196,7 +201,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         worker = Mock()
         serve = AsyncMock()
         with (
-            patch.object(region_registry_full, "WIRE_RUNTIME", False),
+            patch.object(region_registry_full, "ACTIVE_JSON_WIRE_RUNTIME", False),
             patch(
                 "time_tl.runtime.services.resolve_owner_runtime_settings",
                 AsyncMock(return_value=settings),
@@ -217,7 +222,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         )
         worker = AsyncMock()
         with (
-            patch.object(region_registry_full, "WIRE_RUNTIME", True),
+            patch.object(region_registry_full, "ACTIVE_JSON_WIRE_RUNTIME", True),
             patch("time_tl.runtime.services._run_postgres_alert_worker", worker),
         ):
             await run_alert_worker(settings)
@@ -501,7 +506,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         assert result.failure is not None
         self.assertEqual(SourceFailureKind.INVALID_RESPONSE, result.failure.kind)
 
-    async def test_full_registry_composes_full_iot_provider_without_network(self) -> None:
+    async def test_full_registry_composes_active_json_provider_without_network(self) -> None:
         class Transport:
             def __init__(self) -> None:
                 self.requests = []
@@ -522,7 +527,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         with patch("time_tl.runtime.services.HttpxTransport", return_value=transport):
             provider = _provider(settings, region_ids)
 
-        self.assertIsInstance(provider, FullTerritoryAlertsInUaAdapter)
+        self.assertIsInstance(provider, AlertsInUaAdapter)
         self.assertEqual([], transport.requests)
         result = await provider.fetch(fetch_revision=10, last_modified="persisted-marker")
         self.assertEqual(1, len(transport.requests))

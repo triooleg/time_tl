@@ -25,8 +25,8 @@ from time_tl.config import (
 from time_tl.domain.alerts import RegionScope, SourceFailure, SourceFailureKind
 from time_tl.entrypoints.health import serve_health
 from time_tl.infrastructure.alerts import (
+    AlertsInUaAdapter,
     FetchResult,
-    FullTerritoryAlertsInUaAdapter,
     InMemorySingletonLease,
     OblastAlertsInUaAdapter,
 )
@@ -41,6 +41,13 @@ from .regions import OBLAST_REGION_IDS, OBLAST_REGIONS
 LOGGER = logging.getLogger(__name__)
 ALERT_ADVISORY_LOCK_KEY = 0x54494D45544C  # stable signed-int64 value: ASCII "TIMETL"
 SENDER_ADVISORY_LOCK_KEY = 0x54494D455453  # distinct stable value: ASCII "TIMETS"
+LIVE_ALERT_REQUESTS_PER_MINUTE_MAX = 4.0
+
+
+def _live_alert_requests_per_minute(configured: int) -> float:
+    """Cap the one global live poller below the documented provider soft limit."""
+
+    return min(LIVE_ALERT_REQUESTS_PER_MINUTE_MAX, float(configured))
 
 
 def _build_inbound_allowlist_guard(settings: Settings) -> Any | None:
@@ -162,16 +169,18 @@ def _provider(settings: Settings, covered_region_ids: frozenset[str]) -> Any:
                 token=settings.alerts_in_ua_token.get_secret_value(),
                 transport=HttpxTransport(),
             )
-        catalog_region_uids = tuple(item.uid for item in load_catalog().records)
-        full_region_ids = frozenset(catalog_region_uids)
+        catalog_records = load_catalog().records
+        full_region_ids = frozenset(item.uid for item in catalog_records)
         if covered_region_ids != full_region_ids:
             raise RuntimeContractError(
                 "alerts.in.ua full provider requires the byte-pinned UID registry"
             )
-        return FullTerritoryAlertsInUaAdapter(
+        return AlertsInUaAdapter(
             token=settings.alerts_in_ua_token.get_secret_value(),
-            transport=HttpxTransport(),
-            region_uids=catalog_region_uids,
+            transport=HttpxTransport(
+                max_response_bytes=AlertsInUaAdapter.MAX_RESPONSE_BYTES,
+            ),
+            region_types={item.uid: item.location_type for item in catalog_records},
         )
     return OfflineSimulationProvider()
 
@@ -366,10 +375,10 @@ async def _worker_must_not_exit(worker: AlertWorker) -> None:
 async def run_alert_worker(settings: Settings) -> None:
     if (
         settings.environment not in {Environment.LOCAL, Environment.SIMULATION}
-        and not region_registry_full.WIRE_RUNTIME
+        and not region_registry_full.ACTIVE_JSON_WIRE_RUNTIME
     ):
         raise RuntimeContractError(
-            "full-territory alert runtime wiring is disabled pending official UID coverage"
+            "active.json full-territory alert runtime wiring is disabled"
         )
     settings = await resolve_owner_runtime_settings(settings)
     validate_runtime_contract(settings, "alert-worker")
@@ -384,9 +393,9 @@ async def _run_postgres_alert_worker(
     settings: Settings, *, verified_region_ids: frozenset[str]
 ) -> None:
     """Compose durable polling for the reviewed full provider UID catalogue."""
-    if not region_registry_full.WIRE_RUNTIME:
+    if not region_registry_full.ACTIVE_JSON_WIRE_RUNTIME:
         raise RuntimeContractError(
-            "full-territory alert runtime wiring is disabled pending official UID coverage"
+            "active.json full-territory alert runtime wiring is disabled"
         )
     if verified_region_ids != frozenset(item.uid for item in load_catalog().records):
         raise RuntimeContractError(
@@ -417,7 +426,9 @@ async def _run_postgres_alert_worker(
                 repository=repository,
                 lease=lease,
                 poll_interval_seconds=float(settings.alert_poll_interval_seconds),
-                requests_per_minute=float(settings.alert_rate_limit_per_minute),
+                requests_per_minute=_live_alert_requests_per_minute(
+                    settings.alert_rate_limit_per_minute
+                ),
                 monotonic=time.monotonic,
                 runtime_settings=runtime_settings,
                 stale_after_seconds=settings.alert_stale_after_seconds,

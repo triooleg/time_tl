@@ -37,10 +37,11 @@ DATA_PATH = (
     / "locations.csv"
 )
 
-# The hierarchy is reconstructed, but runtime wiring remains closed while the
-# provider emits active UID positions absent from the official list. In
-# particular, UIDs 1805..1814 must remain unresolved rather than synthesized.
+# The all-territory IoT wire remains closed because it emits active positions
+# absent from the official UID list.  The official active.json endpoint carries
+# explicit UIDs and may be wired only through its separately reviewed adapter.
 WIRE_RUNTIME = False
+ACTIVE_JSON_WIRE_RUNTIME = True
 
 
 class RegistryValidationError(RuntimeError):

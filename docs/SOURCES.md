@@ -1,9 +1,31 @@
 # External source register
 
-Updated: 2026-09-23. Only the user-approved alerts.in.ua service is permitted for
+Updated: 2026-09-27. Only the user-approved alerts.in.ua service is permitted for
 production alert decisions.
 
-## Official 27-oblast IoT snapshot
+## Official active-alert full snapshot
+
+- Documentation: <https://devs.alerts.in.ua/#apialerts_active>
+- Endpoint: `https://api.alerts.in.ua/v1/alerts/active.json`
+- Authentication: bearer token stored only as `ALERTS_IN_UA_TOKEN`
+- Scope: all currently active documented threats carrying explicit provider
+  `location_uid` values
+
+This is the reviewed live full-territory source. Every returned row is validated
+before alert type filtering: root shape, documented fields, positive integer ID,
+canonical decimal UID, UID presence in the byte-pinned official catalogue,
+compatible catalogue/API location type, documented alert/level/threat enums,
+timezone-aware timestamps and uniqueness. A known non-air row is then excluded
+from Time TL air-raid decisions; an invalid or unknown row of any type invalidates
+the whole snapshot. Both `red` and `yellow` `air_raid` rows are ACTIVE.
+
+A validated empty `alerts` list is a complete observation. It does not bypass the
+state machine: an existing ACTIVE scope still needs two consecutive successful
+empty observations before `CLEAR_CONFIRMED`. Unknown UIDs, schema drift, stale or
+reused cache markers with changed content, and any source failure yield
+UNKNOWN/STALE, never clear.
+
+## Legacy aggregate 27-oblast IoT snapshot
 
 - Documentation: <https://devs.alerts.in.ua/#v1iotactive_air_raid_alerts_by_oblastjson>
 - Endpoint: `https://api.alerts.in.ua/v1/iot/active_air_raid_alerts_by_oblast.json`
@@ -26,6 +48,11 @@ The adapter uses stable synthetic per-oblast episode IDs. A transition between `
 and `A` does not generate a second alert-start. The provider is deliberately
 oblast-only; it does not claim a community-level all-clear.
 
+The all-territory IoT endpoint remains disabled for live wiring because its
+current positions include UIDs absent from the official location catalogue. It is
+retained only for regression evidence and is not a production substitute for
+`active.json`.
+
 ## Polling and cache contract
 
 Official guidance documents conditional requests and limits of approximately 8–10
@@ -33,7 +60,7 @@ requests/minute soft and 12 hard per source IP. Time TL stays below that boundar
 
 - exactly one global poller for all users;
 - minimum 15-second interval, normally no more than 4 requests/minute;
-- application limiter capped at 5/minute with burst 1;
+- live full-territory application limiter capped at 4/minute with burst 1;
 - conditional `If-Modified-Since` only after a validated full response in the
   current adapter process;
 - the first request after process restart is unconditional;
@@ -42,8 +69,8 @@ requests/minute soft and 12 hard per source IP. Time TL stays below that boundar
 - `401/403` opens an operator circuit.
 
 Provider HTTP redirects and environment proxy inheritance are disabled. The body is
-streamed and bounded at 4096 bytes: both an oversized `Content-Length` and an
-oversized actual decoded body fail closed.
+streamed and bounded: `active.json` has a dedicated 1 MiB maximum; both an
+oversized `Content-Length` and oversized actual body fail closed.
 
 Applying an accepted snapshot, per-scope baseline/outbox, provider success time,
 fetch revision, `Last-Modified` and backoff reset is one repository transaction.
@@ -82,9 +109,11 @@ validation/enrichment evidence and never become selectable territory rows.
 Activation and every active Telegram read require the exact pinned UID set; an
 extra or missing UID aborts before the active pointer can be used for display.
 
-While `region_registry_full.WIRE_RUNTIME` is false, any live alert-worker startup
-aborts before owner settings, database, provider, lease, health or polling resources
-are created. LOCAL and SIMULATION keep their offline provider behavior.
+`region_registry_full.WIRE_RUNTIME` remains false for the all-territory IoT wire.
+Live workers use only the separately reviewed `ACTIVE_JSON_WIRE_RUNTIME` capability;
+if it is false, startup aborts before owner settings, database, provider, lease,
+health or polling resources are created. LOCAL and SIMULATION keep their offline
+provider behavior.
 
 ## Refresh procedure
 

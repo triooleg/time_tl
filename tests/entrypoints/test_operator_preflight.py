@@ -12,19 +12,29 @@ from time_tl.entrypoints.operator_preflight import (
     probe_candidate,
 )
 from time_tl.infrastructure.alerts import HttpResponse
-from time_tl.runtime.region_registry_full import EXPECTED_RECORD_COUNT, load_catalog
+from time_tl.runtime.region_registry_full import EXPECTED_RECORD_COUNT
 
 MARKER = "Thu, 24 Sep 2026 10:00:00 GMT"
 
 
 def full_body() -> bytes:
-    uids = tuple(record.uid for record in load_catalog().records)
-    statuses = [" "] * (max(map(int, uids)) + 1)
-    for uid in uids:
-        statuses[int(uid)] = "N"
-    statuses[31] = "A"
-    statuses[1903] = "P"
-    return json.dumps("".join(statuses)).encode()
+    return json.dumps(
+        {
+            "alerts": [
+                {
+                    "id": 10,
+                    "location_title": "м. Київ",
+                    "location_type": "city",
+                    "started_at": "2026-09-24T09:00:00Z",
+                    "finished_at": None,
+                    "updated_at": "2026-09-24T09:01:00Z",
+                    "alert_type": "air_raid",
+                    "location_uid": "31",
+                    "alert_level": "red",
+                }
+            ]
+        }
+    ).encode()
 
 
 class FakeSession:
@@ -85,6 +95,7 @@ async def test_probe_is_read_only_and_summary_contains_no_secrets_or_ids() -> No
     summary = evidence.sanitized_summary()
     assert "revision=5" in summary
     assert f"covered_regions={EXPECTED_RECORD_COUNT}" in summary
+    assert "alerts=active_json_full_200" in summary
     assert "persisted=no" in summary
     assert "123" not in summary
     assert "secret" not in summary
