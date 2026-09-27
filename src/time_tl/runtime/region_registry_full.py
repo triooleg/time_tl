@@ -1,9 +1,8 @@
-"""Validated alerts.in.ua catalogue with fail-closed hierarchy wiring.
+"""Byte-pinned alerts.in.ua catalogue and official row-order hierarchy.
 
 The upstream Google Sheet is linked from the official alerts.in.ua API docs.
-It lists every UID, but its CSV export has no parent UID columns. Row order is
-not sufficient to recover the hierarchy unambiguously, so this module exposes
-the verified flat catalogue while deliberately refusing production wiring.
+Provider UID, label, type, source order and the parent derived from that order
+are authoritative. KATOTTG may validate or enrich but never replace this tree.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import StringIO
 from pathlib import Path
 from typing import NoReturn
@@ -28,6 +27,7 @@ RETRIEVED_ON = "2026-09-20"
 EXPECTED_SHA256 = "a5bf1d312ee7258b16caaaf6c06e3df56fca68b0c14a060ec7c5ee7ce40b9620"
 EXPECTED_RECORD_COUNT = 1622
 EXPECTED_TOP_LEVEL_COUNT = 27
+EXPECTED_PARENT_LINK_COUNT = 1595
 ALLOWED_TYPES = frozenset({"Область", "Місто з спеціальним статусом", "Район", "Громада"})
 TOP_LEVEL_TYPES = frozenset({"Область", "Місто з спеціальним статусом"})
 _REPOSITORY_DATA_DIR = Path(__file__).parents[3] / "data"
@@ -37,8 +37,9 @@ DATA_PATH = (
     / "locations.csv"
 )
 
-# Runtime composition must check this before using the catalogue for alert
-# propagation. It remains false until an official parent mapping is available.
+# The hierarchy is reconstructed, but runtime wiring remains closed while the
+# provider emits active UID positions absent from the official list. In
+# particular, UIDs 1805..1814 must remain unresolved rather than synthesized.
 WIRE_RUNTIME = False
 
 
@@ -57,6 +58,7 @@ class LocationRecord:
     location_type: str
     notes: str
     source_row: int
+    parent_uid: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,10 @@ class FullRegionCatalog:
     @property
     def top_level(self) -> tuple[LocationRecord, ...]:
         return tuple(record for record in self.records if record.location_type in TOP_LEVEL_TYPES)
+
+    @property
+    def parent_link_count(self) -> int:
+        return sum(record.parent_uid is not None for record in self.records)
 
 
 def load_catalog(path: Path = DATA_PATH) -> FullRegionCatalog:
@@ -120,32 +126,107 @@ def load_catalog(path: Path = DATA_PATH) -> FullRegionCatalog:
         raise RegistryValidationError(
             f"expected {EXPECTED_TOP_LEVEL_COUNT} top-level locations, got {top_level_count}"
         )
-    return FullRegionCatalog(tuple(records), digest)
+    catalog = FullRegionCatalog(_derive_row_order_hierarchy(records), digest)
+    assert_row_order_hierarchy_is_unambiguous(catalog)
+    return catalog
+
+
+def _derive_row_order_hierarchy(
+    records: list[LocationRecord],
+) -> tuple[LocationRecord, ...]:
+    result: list[LocationRecord] = []
+    current_oblast_uid: str | None = None
+    current_raion_uid: str | None = None
+    pending_roots: list[LocationRecord] = []
+
+    for record in records:
+        if record.location_type in TOP_LEVEL_TYPES:
+            pending_roots.append(record)
+            current_raion_uid = None
+            result.append(record)
+            continue
+
+        if pending_roots:
+            root_uids = tuple(item.uid for item in pending_roots)
+            if len(pending_roots) == 1:
+                root = pending_roots[0]
+                if root.location_type != "Область":
+                    raise RegistryValidationError(
+                        f"district block follows non-oblast root UID {root.uid}"
+                    )
+                current_oblast_uid = root.uid
+            elif root_uids == ("31", "30", "8", "29"):
+                # Exact reviewed official prologue. Kyiv, Sevastopol and Crimea
+                # are childless roots; the following raion block is Volyn.
+                current_oblast_uid = "8"
+            else:
+                raise RegistryValidationError(
+                    f"ambiguous consecutive root run {root_uids!r}"
+                )
+            pending_roots.clear()
+
+        if record.location_type == "Район":
+            if current_oblast_uid is None:
+                raise RegistryValidationError(
+                    f"orphan raion UID {record.uid} at source row {record.source_row}"
+                )
+            current_raion_uid = record.uid
+            result.append(replace(record, parent_uid=current_oblast_uid))
+        elif record.location_type == "Громада":
+            if current_raion_uid is None:
+                raise RegistryValidationError(
+                    f"orphan hromada UID {record.uid} at source row {record.source_row}"
+                )
+            result.append(replace(record, parent_uid=current_raion_uid))
+        else:
+            raise RegistryValidationError(
+                f"source row {record.source_row} has unknown type {record.location_type!r}"
+            )
+    return tuple(result)
 
 
 def assert_row_order_hierarchy_is_unambiguous(catalog: FullRegionCatalog) -> None:
-    """Reject the current export when row order cannot prove parentage."""
+    """Validate every provider parent and the complete 27-root tree."""
 
-    pending_top_level: list[LocationRecord] = []
+    by_uid = catalog.by_uid
+    canonical = {
+        record.uid: record.parent_uid
+        for record in _derive_row_order_hierarchy(
+            [replace(record, parent_uid=None) for record in catalog.records]
+        )
+    }
     for record in catalog.records:
+        if record.parent_uid != canonical[record.uid]:
+            raise RegistryValidationError(
+                f"UID {record.uid} disagrees with canonical provider row order"
+            )
         if record.location_type in TOP_LEVEL_TYPES:
-            pending_top_level.append(record)
+            if record.parent_uid is not None:
+                raise RegistryValidationError(f"top-level UID {record.uid} has a parent")
             continue
-        if record.location_type == "Район":
-            if len(pending_top_level) > 1:
-                rows = ", ".join(str(item.source_row) for item in pending_top_level)
-                raise HierarchyUnavailableError(
-                    "official export has no parent UID and row order is ambiguous: "
-                    f"top-level source rows {rows} precede district row {record.source_row}"
-                )
-            pending_top_level.clear()
+        if record.parent_uid is None:
+            raise RegistryValidationError(f"non-root UID {record.uid} has no parent")
+        parent = by_uid.get(record.parent_uid)
+        if parent is None:
+            raise RegistryValidationError(
+                f"UID {record.uid} references missing parent {record.parent_uid}"
+            )
+        expected = "Область" if record.location_type == "Район" else "Район"
+        if parent.location_type != expected or parent.source_row >= record.source_row:
+            raise RegistryValidationError(f"UID {record.uid} has an invalid parent")
+    if catalog.parent_link_count != EXPECTED_PARENT_LINK_COUNT:
+        raise RegistryValidationError(
+            f"expected {EXPECTED_PARENT_LINK_COUNT} parent links, "
+            f"got {catalog.parent_link_count}"
+        )
 
 
 def wire_runtime(path: Path = DATA_PATH) -> NoReturn:
-    """Production integration hook; fail closed until hierarchy is official."""
+    """Production integration hook; fail closed on unpublished IoT UIDs."""
 
     catalog = load_catalog(path)
     assert_row_order_hierarchy_is_unambiguous(catalog)
     raise HierarchyUnavailableError(
-        "official catalogue is flat; reviewed parent mappings are required before wiring"
+        "official hierarchy is valid, but IoT UIDs 1805..1814 are absent "
+        "from the official location list"
     )

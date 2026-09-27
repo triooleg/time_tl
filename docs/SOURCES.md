@@ -60,17 +60,20 @@ value for safe retry.
 - Bytes: 142029
 - SHA256: `a5bf1d312ee7258b16caaaf6c06e3df56fca68b0c14a060ec7c5ee7ce40b9620`
 
-The pinned file contains 1,622 unique UIDs: 27 top-level entries, 126 districts and
-1,469 communities. Its columns do not contain explicit parent UIDs. Row order and
-names are not a safe hierarchy, so the flat CSV is not used to propagate district/
-community all-clear.
+The pinned file contains 1,622 unique UIDs: 27 roots, 126 districts and
+1,469 communities. Its published order is canonical: districts belong to the
+active oblast block and communities to the active district block. The reviewed
+initial root run `31,30,8,29` is explicit: Kyiv, Sevastopol and Crimea are
+childless roots in this export; the following UID 38 district belongs to Volyn
+UID 8. Any different multi-root run fails closed. The resulting tree has exactly
+1,595 parent links and no orphan rows.
 
-The current runtime exposes only the reviewed top-level oblast list for manual user
-selection. `reviewed_region_resolver` remains false: coordinates are rejected and
-deleted/not stored rather than guessed. A future geolocation implementation must use
-an independently reviewed official polygon or hierarchy source and preserve that
-privacy boundary.
-
+KATOTTG validates the provider relationship and may add an external code, but it
+cannot reparent an alerts.in.ua row. A mismatch remains unresolved and hidden,
+as before. UIDs absent from this byte-pinned provider list, including IoT
+positions 1805..1814, remain unresolved. A non-space value at such a position
+invalidates the complete snapshot and produces UNKNOWN/STALE, never
+CLEAR_CONFIRMED.
 ## Refresh procedure
 
 1. Fetch the exact official source during an approved source-review task.
@@ -79,5 +82,6 @@ privacy boundary.
 4. Update artifact, tests, retrieval date and this register in one reviewed change.
 5. Keep runtime capability closed on any unexplained drift.
 
-Do not scrape the public map, substitute another provider, infer hierarchy from
-names/order or use history endpoints for realtime all-clear decisions.
+Do not scrape the public map, substitute another provider, invent hierarchy for
+UIDs absent from the pinned official order or use history endpoints for realtime
+all-clear decisions.

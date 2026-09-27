@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 from time_tl.runtime.region_registry_full import FullRegionCatalog, LocationRecord
 from time_tl.runtime.territory_catalog_builder import build_territory_catalog
@@ -12,7 +13,23 @@ def _record(uid: str, name: str, location_type: str, row: int) -> LocationRecord
 
 
 def _catalog(*records: LocationRecord) -> FullRegionCatalog:
-    return FullRegionCatalog(tuple(records), "a" * 64)
+    ordered = sorted(records, key=lambda item: item.source_row)
+    result: list[LocationRecord] = []
+    current_oblast: str | None = None
+    current_raion: str | None = None
+    for record in ordered:
+        if record.location_type in {"Область", "Місто з спеціальним статусом"}:
+            current_oblast = record.uid if record.location_type == "Область" else None
+            current_raion = None
+            result.append(record)
+        elif record.location_type == "Район":
+            assert current_oblast is not None
+            current_raion = record.uid
+            result.append(replace(record, parent_uid=current_oblast))
+        else:
+            assert current_raion is not None
+            result.append(replace(record, parent_uid=current_raion))
+    return FullRegionCatalog(tuple(result), "a" * 64)
 
 
 def _payload(*terms: dict[str, object]) -> bytes:

@@ -290,6 +290,17 @@ def build_territory_catalog(
             district_candidate_uses[candidates[0].code].append(record.uid)
 
     for record in districts:
+        provider_parent_uid = record.parent_uid
+        if provider_parent_uid is None:
+            raise TerritoryCatalogBuildError(
+                f"alerts UID {record.uid!r} has no canonical provider parent"
+            )
+        provider_parent = catalog.by_uid.get(provider_parent_uid)
+        if provider_parent is None or _kind(provider_parent) != "OBLAST":
+            raise TerritoryCatalogBuildError(
+                f"alerts UID {record.uid!r} has invalid canonical provider parent"
+            )
+
         candidates = district_candidates[record.uid]
         unique_candidate = (
             candidates[0]
@@ -297,15 +308,19 @@ def build_territory_catalog(
             else None
         )
         if unique_candidate is not None:
-            parent_uid = official_root_to_alert.get(unique_candidate.parent or "")
+            katottg_parent_uid = official_root_to_alert.get(unique_candidate.parent or "")
             official_parent = term_by_code.get(unique_candidate.parent or "")
             if (
-                parent_uid is not None
+                katottg_parent_uid == provider_parent_uid
                 and official_parent is not None
                 and official_parent.category == "O"
             ):
                 rows_by_uid[record.uid] = _draft(
-                    record, "RAION", parent_uid, unique_candidate.code, True
+                    record,
+                    "RAION",
+                    provider_parent_uid,
+                    unique_candidate.code,
+                    True,
                 )
                 district_code_by_alert[record.uid] = unique_candidate.code
                 continue
@@ -316,9 +331,14 @@ def build_territory_catalog(
             for parent_code in parent_codes
             if parent_code in official_root_to_alert
         }
-        if len(parent_uids) == 1:
-            rows_by_uid[record.uid] = _draft(record, "RAION", next(iter(parent_uids)), None, False)
-        reason = _district_failure_reason(candidates, unique_candidate)
+        if provider_parent_uid in parent_uids:
+            rows_by_uid[record.uid] = _draft(
+                record, "RAION", provider_parent_uid, None, False
+            )
+        if parent_uids and provider_parent_uid not in parent_uids:
+            reason = "KATOTTG parent disagrees with canonical alerts.in.ua parent"
+        else:
+            reason = _district_failure_reason(candidates, unique_candidate)
         _mark_unresolved(unresolved, record, "RAION", reason)
 
     district_alert_by_code = {
@@ -454,19 +474,13 @@ def build_territory_catalog(
 def _provider_district_contexts(
     records: Sequence[LocationRecord],
 ) -> dict[str, str]:
-    """Return H UID -> nearest preceding provider P UID by pinned source row."""
+    """Return H UID -> canonical provider P UID."""
 
-    result: dict[str, str] = {}
-    current_district_uid: str | None = None
-    for record in sorted(records, key=lambda item: item.source_row):
-        kind = _kind(record)
-        if kind in _ROOT_KINDS:
-            current_district_uid = None
-        elif kind == "RAION":
-            current_district_uid = record.uid
-        elif kind == "HROMADA" and current_district_uid is not None:
-            result[record.uid] = current_district_uid
-    return result
+    return {
+        record.uid: record.parent_uid
+        for record in records
+        if _kind(record) == "HROMADA" and record.parent_uid is not None
+    }
 
 
 def _versioned_alias_candidate(
