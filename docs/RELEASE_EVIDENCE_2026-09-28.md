@@ -1,10 +1,10 @@
-# Time TL RC8 incident through RC12 local compatibility — 2026-09-28
+# Time TL RC8 incident through RC13 local contract correction — 2026-09-28
 
 ## Scope
 
 This record covers the RC8 provider-envelope compatibility release, its bounded
 server operation, the later exact RC9 diagnostic-only deployment, the exact RC10
-and RC11 deployments and preflights, and the RC12 local compatibility candidate. It records
+through RC12 deployments and preflights, and the RC13 local contract correction. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
 boundary and the contained RC9 read-only diagnostic. It is not evidence of
@@ -404,8 +404,71 @@ field remains unchanged.
 | LOCAL REVIEW | Independent safety review of the code-only RC12 scope | `PASS` |
 
 The warning is the existing Starlette deprecation warning and the five skipped
-tests are the opt-in destructive PostgreSQL E2E cases. RC12 is not committed,
-tagged, packaged, deployed or preflighted. These results do not authorize a
-provider call, activation, bot/worker startup or messages. The current server
-truth remains RC11 `HOLD`, with ACTIVE revision 6, pending revision 10 and all
-delivery-capable services stopped.
+tests are the opt-in destructive PostgreSQL E2E cases. This was the LOCAL
+evidence available before exact RC12 packaging and deployment. It did not by
+itself authorize a provider call, activation, bot/worker startup or messages.
+
+## Exact RC12 server operation and HOLD
+
+The exact approved RC12 identity was:
+
+- tag: `time-tl-staging-20260928-rc12-pinned-oblast-uid`;
+- commit: `62205d230bee769adfa989a2328528f75372bcec`;
+- archive SHA-256:
+  `8d5f7c6ef71cb625c78fd42247d07e689c92327853594a02d5a4be8186b8728e`.
+
+The server archive matched the approved digest. Immutable RC12 image
+`sha256:cb5551417738fde13a857882a215a02b2d8752c738d6c654a9bd8ea479f8ee99`
+was built. `admin-web` runs RC12, is healthy and returned HTTP 200. RC12 `bot`,
+`alert-worker`, `schedule-worker` and `sender-worker` are `Created`, have no
+startup evidence and were never started. PostgreSQL remains at
+`0006_outbox_terminal_retention`; no migration ran. Owner state remains ACTIVE
+revision 6 and pending revision 10.
+
+Exactly one RC12 preflight ran at `11:17:43Z`. Telegram `getMe` passed and the
+official provider made exactly one `active.json` request. The response failed
+closed as `INVALID_RESPONSE / location_oblast_uid_unknown / count=1`. There was
+no retry, activation or message. The outbox remained 29 total rows and 24
+delivered rows.
+
+A fresh rollback backup is retained at
+`/home/trio/time-tl-bot/backups/pre-rc12-pinned-oblast-uid-20260928T111523Z`.
+The current server verdict is RC12 `HOLD`; the result is not a staging pass and
+does not advance G6, G7 or G9.
+
+## RC13 local contract correction
+
+RC13 removes authority from the optional `location_oblast_uid` hint. When
+present, that field is accepted only as a dedicated bounded input and is then
+discarded. It is separate from the one generic bounded undocumented alert-row
+field, so both may coexist without merging their contracts. The optional hint
+is excluded from canonical digest generation, alert state, persistence,
+diagnostics and logs.
+
+The required `location_uid`, compatible pinned location type and byte-pinned
+catalogue membership remain authoritative. The optional hint cannot repair or
+override a missing, malformed, unknown or type-incompatible required UID. The
+existing complete-row validation, generic-extra bounds, hierarchy scope,
+freshness/restart behavior, two-successful-observation all-clear rule and all
+fail-closed barriers remain unchanged.
+
+### RC13 local verification
+
+| Environment | Check | Result |
+|---|---|---|
+| LOCAL | Focused provider, registry and preflight regressions | `83 passed` |
+| LOCAL | Expanded alert/runtime regressions | `239 passed` |
+| LOCAL | Full suite | `531 passed, 5 skipped, 1 warning` |
+| LOCAL | Ruff | `PASS` |
+| LOCAL | strict mypy | `PASS`; 72 source files checked |
+| LOCAL | `compileall` | `PASS` |
+| LOCAL | `git diff --check` | `PASS` |
+| LOCAL REVIEW | Independent final code review | `PASS` |
+| LOCAL REVIEW | Combined code, ADR and release-evidence re-review | `PASS` |
+
+The warning is the existing Starlette deprecation warning and the five skipped
+tests are the opt-in destructive PostgreSQL E2E cases. The combined independent
+re-review found no residual safety or documentation blocker. RC13 has no commit,
+tag, archive, package, immutable image, deployment or preflight identity. These
+LOCAL results do not change the RC12 server `HOLD` state and do not authorize
+activation, service startup or messages.

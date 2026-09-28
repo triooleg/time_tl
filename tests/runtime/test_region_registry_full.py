@@ -17,7 +17,6 @@ from time_tl.runtime.region_registry_full import (
     LocationRecord,
     RegistryValidationError,
     assert_row_order_hierarchy_is_unambiguous,
-    expected_oblast_uid_by_region,
     load_catalog,
     wire_runtime,
 )
@@ -49,15 +48,6 @@ class FullRegionRegistryTests(unittest.TestCase):
         self.assertIsNone(self.catalog.by_uid["29"].parent_uid)
         self.assertEqual("16", self.catalog.by_uid["1803"].parent_uid)
         self.assertEqual("1803", self.catalog.by_uid["1903"].parent_uid)
-
-    def test_expected_oblast_mapping_covers_each_hierarchy_level(self) -> None:
-        expected = expected_oblast_uid_by_region(self.catalog)
-
-        self.assertEqual(set(self.catalog.by_uid), set(expected))
-        self.assertEqual("16", expected["16"])
-        self.assertEqual("16", expected["1803"])
-        self.assertEqual("16", expected["1903"])
-        self.assertEqual("31", expected["31"])
 
     def test_unpublished_iot_positions_are_not_invented(self) -> None:
         unknown = {str(uid) for uid in range(1805, 1815)}

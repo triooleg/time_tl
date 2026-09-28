@@ -80,33 +80,6 @@ class FullRegionCatalog:
         return sum(record.parent_uid is not None for record in self.records)
 
 
-def expected_oblast_uid_by_region(catalog: FullRegionCatalog) -> dict[str, str]:
-    """Return the pinned top-level ancestor for every provider region UID."""
-
-    assert_row_order_hierarchy_is_unambiguous(catalog)
-    by_uid = catalog.by_uid
-    result: dict[str, str] = {}
-    for record in catalog.records:
-        current = record
-        visited: set[str] = set()
-        while current.location_type not in TOP_LEVEL_TYPES:
-            if current.uid in visited or current.parent_uid is None:
-                raise RegistryValidationError(
-                    f"UID {record.uid} has no unambiguous top-level ancestor"
-                )
-            visited.add(current.uid)
-            parent = by_uid.get(current.parent_uid)
-            if parent is None:
-                raise RegistryValidationError(
-                    f"UID {record.uid} references missing ancestor {current.parent_uid}"
-                )
-            current = parent
-        result[record.uid] = current.uid
-    if set(result) != set(by_uid):
-        raise RegistryValidationError("expected oblast mapping is incomplete")
-    return result
-
-
 def load_catalog(path: Path = DATA_PATH) -> FullRegionCatalog:
     """Load and strictly validate the byte-pinned official CSV export."""
 

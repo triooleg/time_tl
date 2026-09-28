@@ -25,7 +25,6 @@ REGION_TYPES = {
     "16": "Область",
     "31": "Місто з спеціальним статусом",
 }
-EXPECTED_OBLAST_UIDS = {"1903": "16", "1803": "16", "16": "16", "31": "31"}
 META_TIMESTAMP = "2026/09/20 15:00:00 +0300"
 
 
@@ -114,7 +113,6 @@ def adapter(transport):
         token="secret-not-logged",
         transport=transport,
         region_types=REGION_TYPES,
-        expected_oblast_uids=EXPECTED_OBLAST_UIDS,
         now=lambda: NOW,
     )
 
@@ -343,15 +341,19 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bounded_undocumented_alert_fields_are_discarded_and_not_digested(self):
         payload = active()
+        payload["alerts"][0]["location_oblast_uid"] = "first-ignored-value"
         payload["alerts"][0]["provider_private_field"] = "must-not-leak"
         second_row = dict(payload["alerts"][0])
         second_row.update(id=11, alert_type="chemical")
+        second_row["location_oblast_uid"] = {"second": "ignored-value"}
         second_row["provider_private_field"] = {"same_key": "different-private-value"}
         payload["alerts"].append(second_row)
         changed = active()
+        changed["alerts"][0]["location_oblast_uid"] = False
         changed["alerts"][0]["provider_private_field"] = {"nested": [False, None]}
         changed_second_row = dict(changed["alerts"][0])
         changed_second_row.update(id=11, alert_type="chemical")
+        changed_second_row["location_oblast_uid"] = ["changed", 16]
         changed_second_row["provider_private_field"] = "changed-secret"
         changed["alerts"].append(changed_second_row)
         provider = adapter(Transport())
@@ -438,25 +440,71 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         assert summary is not None
         self.assertNotIn(private_uid, summary)
 
-    async def test_invalid_oblast_uid_diagnostics_are_opaque_and_fail_closed(self):
+    def test_known_ignored_oblast_uid_forms_do_not_change_episodes_or_digest(self):
+        absent = active()
+        del absent["alerts"][0]["location_oblast_uid"]
+        provider = adapter(Transport())
+        expected_episodes, expected_digest = provider._parse_active_payload(
+            json.dumps(absent).encode()
+        )
+        values = (
+            None,
+            False,
+            -16,
+            16,
+            16.5,
+            "not-authoritative",
+            ["bounded", 16, None],
+            {"nested": {"value": "bounded"}},
+        )
+
+        for value in values:
+            with self.subTest(value=value):
+                payload = active()
+                payload["alerts"][0]["location_oblast_uid"] = value
+                episodes, digest = provider._parse_active_payload(json.dumps(payload).encode())
+                self.assertEqual(expected_episodes, episodes)
+                self.assertEqual(expected_digest, digest)
+
+    def test_known_ignored_oblast_uid_coexists_with_one_generic_extra(self):
+        payload = active()
+        payload["alerts"][0]["location_oblast_uid"] = {"private": [16, False]}
+        payload["alerts"][0]["provider_private_field"] = "must-not-leak"
+        absent = active()
+        del absent["alerts"][0]["location_oblast_uid"]
+        provider = adapter(Transport())
+
+        episodes, digest = provider._parse_active_payload(json.dumps(payload).encode())
+        absent_episodes, absent_digest = provider._parse_active_payload(
+            json.dumps(absent).encode()
+        )
+
+        self.assertEqual(absent_episodes, episodes)
+        self.assertEqual(absent_digest, digest)
+
+    async def test_known_ignored_oblast_uid_bounds_fail_closed_and_redacted(self):
+        too_many_nodes = [[None, None, None, None] for _ in range(32)]
+        too_large = ["x" * AlertsInUaAdapter.MAX_META_EXTRA_STRING_CHARS for _ in range(20)]
         samples = (
-            (-16, "location_oblast_uid_integer"),
-            (0, "location_oblast_uid_integer"),
-            (10**100, "location_oblast_uid_unknown"),
-            ("016", "location_oblast_uid_noncanonical_string"),
-            ("999", "location_oblast_uid_unknown"),
-            ("31", "location_oblast_uid_hierarchy_mismatch"),
-            (True, "location_oblast_uid_boolean"),
-            (16.0, "location_oblast_uid_other"),
-            ({"private": "value"}, "location_oblast_uid_other"),
+            (1 << 63, "alert_ignored_value_invalid"),
+            (float("nan"), "alert_ignored_value_invalid"),
+            (
+                "x" * (AlertsInUaAdapter.MAX_META_EXTRA_STRING_CHARS + 1),
+                "alert_ignored_value_invalid",
+            ),
+            (
+                [None] * (AlertsInUaAdapter.MAX_META_EXTRA_CONTAINER_ELEMENTS + 1),
+                "alert_ignored_value_invalid",
+            ),
+            ({"two": {"three": {"four": {"five": None}}}}, "alert_ignored_value_invalid"),
+            (too_many_nodes, "alert_ignored_value_invalid"),
+            (too_large, "alert_ignored_serialized_size"),
         )
 
         for value, code in samples:
             with self.subTest(code=code):
                 payload = active()
                 payload["alerts"][0]["location_oblast_uid"] = value
-                payload["alerts"][0]["provider_private_field"] = "must-not-leak"
-
                 result = await adapter(
                     Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
                 ).fetch(fetch_revision=1, last_modified=None)
@@ -466,52 +514,29 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(1, result.diagnostic_count)
                 summary = result.sanitized_failure()
                 assert summary is not None
-                self.assertNotIn(str(value), summary)
-                self.assertNotIn("provider_private_field", summary)
+                self.assertNotIn("location_oblast_uid", summary)
                 self.assertNotIn("must-not-leak", summary)
 
-    async def test_integer_oblast_uid_matches_each_catalogue_level(self):
-        samples = (
-            ("16", "oblast", 16),
-            ("1803", "raion", 16),
-            ("1903", "hromada", 16),
-            ("31", "city", 31),
-        )
+    async def test_non_air_row_still_validates_known_ignored_value_bounds(self):
+        payload = active(alert_type="chemical")
+        payload["alerts"][0]["location_oblast_uid"] = [None] * 33
 
-        for uid, location_type, oblast_uid in samples:
-            with self.subTest(uid=uid):
-                payload = active(uid=uid, location_type=location_type)
-                payload["alerts"][0]["location_oblast_uid"] = oblast_uid
+        result = await adapter(
+            Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
+        ).fetch(fetch_revision=1, last_modified=None)
 
-                result = await adapter(
-                    Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
-                ).fetch(fetch_revision=1, last_modified=None)
+        self.assertIsNone(result.snapshot)
+        self.assertEqual("alert_ignored_value_invalid", result.diagnostic_code)
 
-                self.assertIsNotNone(result.snapshot)
-
-    def test_integer_and_string_oblast_uid_have_identical_digest(self):
-        string_payload = active()
-        integer_payload = active()
-        integer_payload["alerts"][0]["location_oblast_uid"] = 16
-        provider = adapter(Transport())
-
-        string_episodes, string_digest = provider._parse_active_payload(
-            json.dumps(string_payload).encode()
-        )
-        integer_episodes, integer_digest = provider._parse_active_payload(
-            json.dumps(integer_payload).encode()
-        )
-
-        self.assertEqual(string_episodes, integer_episodes)
-        self.assertEqual(string_digest, integer_digest)
-
-    async def test_integer_normalization_preserves_same_marker_replay(self):
-        integer_payload = active()
-        integer_payload["alerts"][0]["location_oblast_uid"] = 16
+    async def test_ignored_oblast_uid_preserves_same_marker_replay(self):
+        absent = active()
+        del absent["alerts"][0]["location_oblast_uid"]
+        ignored = active()
+        ignored["alerts"][0]["location_oblast_uid"] = {"not": "authoritative"}
         provider = adapter(
             Transport(
-                response(200, active(), **{"Last-Modified": MARKER_1}),
-                response(200, integer_payload, **{"Last-Modified": MARKER_1}),
+                response(200, absent, **{"Last-Modified": MARKER_1}),
+                response(200, ignored, **{"Last-Modified": MARKER_1}),
             )
         )
 
@@ -522,9 +547,9 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(replay.snapshot)
         self.assertIsNone(replay.failure)
 
-    async def test_invalid_oblast_uid_does_not_advance_validated_baseline(self):
+    async def test_invalid_ignored_oblast_uid_does_not_advance_validated_baseline(self):
         invalid = active()
-        invalid["alerts"][0]["location_oblast_uid"] = False
+        invalid["alerts"][0]["location_oblast_uid"] = "x" * 2049
         transport = Transport(
             response(200, active(), **{"Last-Modified": MARKER_1}),
             response(200, invalid, **{"Last-Modified": MARKER_2}),
@@ -538,29 +563,11 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(baseline.snapshot)
         self.assertIsNone(rejected.snapshot)
-        self.assertEqual("location_oblast_uid_boolean", rejected.diagnostic_code)
+        self.assertEqual("alert_ignored_value_invalid", rejected.diagnostic_code)
         self.assertIsNotNone(unchanged.snapshot)
         assert unchanged.snapshot is not None
         self.assertEqual("NOT_MODIFIED_304", unchanged.snapshot.kind.value)
         self.assertEqual(MARKER_1, unchanged.last_modified)
-
-    def test_constructor_requires_complete_valid_expected_oblast_mapping(self):
-        samples = (
-            ({key: value for key, value in EXPECTED_OBLAST_UIDS.items() if key != "1903"},),
-            ({**EXPECTED_OBLAST_UIDS, "1903": "016"},),
-            ({**EXPECTED_OBLAST_UIDS, "1903": "1903"},),
-            ({**EXPECTED_OBLAST_UIDS, "31": "16"},),
-        )
-
-        for (expected_oblast_uids,) in samples:
-            with self.subTest(expected_oblast_uids=expected_oblast_uids):
-                with self.assertRaises(ValueError):
-                    AlertsInUaAdapter(
-                        token="secret-not-logged",
-                        transport=Transport(),
-                        region_types=REGION_TYPES,
-                        expected_oblast_uids=expected_oblast_uids,
-                    )
 
     async def test_diagnostic_taxonomy_identifies_rejected_predicate(self):
         missing = active()
@@ -981,13 +988,13 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_invalid_oblast_uid_after_active_is_stale_without_outbox(self):
+    async def test_unbounded_ignored_oblast_uid_after_active_is_stale_without_outbox(self):
         await self.worker(
             Transport(response(200, active(), **{"Last-Modified": MARKER_1}))
         ).run_once()
         initial_outbox = await self.repo.outbox()
         invalid = active()
-        invalid["alerts"][0]["location_oblast_uid"] = {"private": "must-not-leak"}
+        invalid["alerts"][0]["location_oblast_uid"] = "must-not-leak" * 500
 
         self.clock += 15
         await self.worker(
@@ -1073,12 +1080,12 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ignored_field_on_non_air_row_cannot_bypass_two_observation_clear(self):
         applicable_alert = active()
-        applicable_alert["alerts"][0]["location_oblast_uid"] = 16
+        applicable_alert["alerts"][0]["location_oblast_uid"] = "must-not-enter-state"
         no_applicable_alert = active(alert_type="chemical")
-        no_applicable_alert["alerts"][0]["location_oblast_uid"] = 16
+        no_applicable_alert["alerts"][0]["location_oblast_uid"] = {"ignored": 1}
         no_applicable_alert["alerts"][0]["undocumented_provider_data"] = {"private": True}
         second_no_applicable_alert = active(alert_type="chemical")
-        second_no_applicable_alert["alerts"][0]["location_oblast_uid"] = 16
+        second_no_applicable_alert["alerts"][0]["location_oblast_uid"] = False
         second_no_applicable_alert["alerts"][0]["undocumented_provider_data"] = {"private": False}
         transport = Transport(
             response(200, applicable_alert, **{"Last-Modified": MARKER_1}),
@@ -1109,7 +1116,12 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         )
         outbox = await self.repo.outbox()
         self.assertFalse(
-            any("undocumented" in repr(item) or "private" in repr(item) for item in outbox)
+            any(
+                "undocumented" in repr(item)
+                or "private" in repr(item)
+                or "must-not-enter-state" in repr(item)
+                for item in outbox
+            )
         )
 
     async def test_ignored_field_cannot_suppress_parent_or_child_alerts(self):
@@ -1122,7 +1134,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         for uid, location_type in (("16", "oblast"), ("1903", "hromada")):
             with self.subTest(uid=uid):
                 payload = active(uid=uid, location_type=location_type)
-                payload["alerts"][0]["location_oblast_uid"] = 16
+                payload["alerts"][0]["location_oblast_uid"] = "deliberately-mismatched"
                 payload["alerts"][0]["undocumented_provider_data"] = {"must_not_affect_state": True}
                 repository = InMemoryAlertRepository([("student", scope)])
                 worker = AlertWorker(

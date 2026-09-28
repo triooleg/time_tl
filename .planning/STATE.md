@@ -101,10 +101,10 @@ been performed.
 ## Session Continuity
 
 Last session: 2026-09-28
-Stopped at: RC11 is installed, but its single diagnostic preflight identified an
-integer `location_oblast_uid`; activation was excluded and the server remains in
-`HOLD`. RC12 is a LOCAL code-only compatibility candidate and has not been
-committed, tagged, packaged, deployed or preflighted.
+Stopped at: RC12 is installed, but its single preflight rejected the provider
+response as `location_oblast_uid_unknown / count=1`; activation was excluded and
+the server remains in `HOLD`. RC13 is a LOCAL code-only contract correction with
+no commit, tag, package, deployment or preflight identity.
 The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
@@ -272,6 +272,43 @@ RC12 LOCAL evidence: 82 focused tests, 238 expanded tests and 530 full-suite
 tests passed; the full suite retained five opt-in destructive PostgreSQL E2E
 skips and one Starlette warning. Ruff, strict mypy for 72 source files,
 compileall and `git diff --check` passed. Independent safety review passed the
-code-only scope. RC12 is not committed, tagged, packaged, deployed or
-preflighted, and does not change the RC11 server `HOLD` status.
+code-only scope. This historical LOCAL statement preceded the exact RC12 release
+and is superseded for current server status by the evidence below.
+
+The exact RC12 release was subsequently approved and installed from tag
+`time-tl-staging-20260928-rc12-pinned-oblast-uid`, commit
+`62205d230bee769adfa989a2328528f75372bcec`, archive SHA-256
+`8d5f7c6ef71cb625c78fd42247d07e689c92327853594a02d5a4be8186b8728e`.
+The server archive matched that digest and immutable image
+`sha256:cb5551417738fde13a857882a215a02b2d8752c738d6c654a9bd8ea479f8ee99`
+was built. `admin-web` runs RC12, is healthy and returned HTTP 200. RC12 `bot`
+and all three workers are `Created`, have no startup evidence and were never
+started. PostgreSQL remains at `0006_outbox_terminal_retention`; no migration
+ran. Owner state remains ACTIVE revision 6 and pending revision 10.
+
+Exactly one RC12 preflight ran at `11:17:43Z`. Telegram `getMe` passed and the
+official provider made exactly one `active.json` request. The response then
+failed closed as `INVALID_RESPONSE / location_oblast_uid_unknown / count=1`.
+There was no retry, activation or message. The outbox remained 29 total rows and
+24 delivered rows. Fresh rollback backup:
+`/home/trio/time-tl-bot/backups/pre-rc12-pinned-oblast-uid-20260928T111523Z`.
+The current server truth is RC12 `HOLD`, not a staging pass.
+
+RC13 corrects the source contract locally: optional `location_oblast_uid` is a
+dedicated bounded, non-authoritative ignored input. It is separate from the one
+generic bounded undocumented alert-row field and is excluded from digest,
+alert state, persistence and logs. It cannot validate, override or contradict
+the required `location_uid`; authority remains the required `location_uid` plus
+its pinned location type and catalogue membership. All existing complete-row,
+catalogue, hierarchy, freshness, two-observation all-clear and fail-closed
+barriers remain unchanged.
+
+RC13 LOCAL evidence: 83 focused tests, 239 expanded tests and 531 full-suite
+tests passed; the full suite retained five opt-in destructive PostgreSQL E2E
+skips and one Starlette warning. Ruff, strict mypy for 72 source files,
+compileall and `git diff --check` passed. Independent final code review passed,
+and the combined code, ADR and release-evidence re-review passed after the
+documentation blocker was corrected. RC13 has no commit, tag, archive, package,
+image, deployment or preflight identity and does not change the RC12 server
+`HOLD` status.
 Resume file: none.

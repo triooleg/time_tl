@@ -96,18 +96,26 @@ as `location_oblast_uid_integer / count=1`. That response was not accepted as a
 snapshot; revision 10 was not activated and delivery-capable services remained
 stopped.
 
-The RC12 LOCAL compatibility candidate accepts this optional value as an integer
-only when it is positive, can be normalized to a canonical decimal UID present
-in the pinned catalogue, and exactly equals the expected top-level ancestor of
-the row's `location_uid`. The expected mapping is deterministically derived from
-the byte-pinned provider hierarchy and must cover every pinned UID. A top-level
-region maps to itself; each district and community maps through its pinned
-parents to its oblast or special-status city. An unknown UID, boolean,
-non-positive integer, noncanonical string, unsupported type or ancestor mismatch
-rejects the complete response. Equivalent integer and canonical string values
-are normalized before digest generation and therefore have identical content
-identity. This is LOCAL code-only evidence; RC12 has not been committed, tagged,
-packaged, deployed or preflighted.
+RC12 historically treated this optional value as an authoritative top-level
+ancestor assertion. Its exact release was installed, but the single authorized
+preflight at `11:17:43Z` failed closed as
+`location_oblast_uid_unknown / count=1`. The response was not accepted as a
+snapshot, revision 10 was not activated, and bot/workers remained stopped.
+
+The RC13 LOCAL contract correction does not use `location_oblast_uid` as
+authority. When present, it is accepted only as a dedicated bounded optional
+input and then discarded. It is separate from the one permitted generic bounded
+undocumented alert-row field, so its presence does not consume that generic
+compatibility slot. Neither its key nor value participates in the canonical
+digest or enters alert state, persistence, diagnostics or logs.
+
+The required `location_uid`, its pinned catalogue membership and its compatible
+pinned location type remain the sole location authority for each row. Ignoring
+the optional oblast hint cannot repair a missing, malformed, unknown or
+type-incompatible required UID. Complete-row validation, bounded generic-extra
+handling, parent/child applicability, freshness, restart behavior and the two-
+successful-observation requirement for `CLEAR_CONFIRMED` remain unchanged.
+RC13 has passed local code review and tests but has no release or server identity.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful

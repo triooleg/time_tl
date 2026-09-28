@@ -210,12 +210,16 @@ async def test_probe_does_not_use_previously_diagnostic_only_alert_field() -> No
 
 
 @pytest.mark.asyncio
-async def test_probe_accepts_matching_integer_oblast_uid_without_exposing_it() -> None:
+@pytest.mark.parametrize(
+    "value",
+    [None, False, -31, 31, 31.0, "not-authoritative", [31, None], {"nested": True}],
+)
+async def test_probe_ignores_bounded_oblast_uid_without_exposing_it(value: object) -> None:
     payload = json.loads(full_body())
-    payload["alerts"][0]["location_oblast_uid"] = 31
+    payload["alerts"][0]["location_oblast_uid"] = value
     payload["alerts"][0]["private_provider_field"] = "must-not-leak"
 
-    class IntegerOblastUidTransport:
+    class IgnoredOblastUidTransport:
         async def send(self, _request: object) -> HttpResponse:
             return HttpResponse(
                 200,
@@ -227,7 +231,7 @@ async def test_probe_accepts_matching_integer_oblast_uid_without_exposing_it() -
         candidate(),
         123,
         bot_factory=FakeBot,
-        transport_factory=IntegerOblastUidTransport,
+        transport_factory=IgnoredOblastUidTransport,
     )
 
     summary = evidence.sanitized_summary()
@@ -241,16 +245,11 @@ async def test_probe_accepts_matching_integer_oblast_uid_without_exposing_it() -
 @pytest.mark.parametrize(
     ("value", "code"),
     [
-        (-31, "location_oblast_uid_integer"),
-        (0, "location_oblast_uid_integer"),
-        (10**100, "location_oblast_uid_unknown"),
-        ("031", "location_oblast_uid_noncanonical_string"),
-        (16, "location_oblast_uid_hierarchy_mismatch"),
-        (True, "location_oblast_uid_boolean"),
-        (31.0, "location_oblast_uid_other"),
+        (1 << 63, "alert_ignored_value_invalid"),
+        ("private-value-must-not-leak" * 200, "alert_ignored_value_invalid"),
     ],
 )
-async def test_probe_rejects_invalid_oblast_uid_with_sanitized_category(
+async def test_probe_rejects_unbounded_ignored_value_with_sanitized_category(
     value: object,
     code: str,
 ) -> None:
@@ -276,7 +275,8 @@ async def test_probe_rejects_invalid_oblast_uid_with_sanitized_category(
 
     message = str(captured.value)
     assert f"kind=INVALID_RESPONSE code={code} count=1" in message
-    assert str(value) not in message
+    assert "location_oblast_uid" not in message
+    assert "private-value-must-not-leak" not in message
     assert "private_provider_field" not in message
     assert "must-not-leak" not in message
     assert "telegram-secret" not in message

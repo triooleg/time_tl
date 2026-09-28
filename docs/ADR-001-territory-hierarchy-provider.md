@@ -116,8 +116,18 @@ added to `users`; selected UID plus audited closure model the hierarchy.
 `https://api.alerts.in.ua/v1/alerts/active.json` is the sole live alert source
 for the full territory hierarchy. Every returned row is validated before any
 non-air row is filtered. The complete snapshot is invalid if any row has an
-unknown provider UID, undocumented or incompatible fields/enums, incompatible
-location type, duplicate ID, invalid timestamp or otherwise fails validation.
+unknown required provider UID, incompatible documented fields/enums,
+incompatible location type, duplicate ID, invalid timestamp or otherwise fails
+validation.
+
+The optional `location_oblast_uid` field is not a hierarchy authority. When
+present it is accepted only under its dedicated bounded-input predicate and is
+discarded before canonical digest generation. It cannot enter alert state,
+persistence, diagnostics or logs, and it does not consume the separately
+permitted one-field bounded compatibility slot for a generic undocumented
+alert-row key. The required `location_uid`, its pinned catalogue membership and
+its compatible pinned location type remain authoritative. A missing, malformed,
+unknown or incompatible required UID still invalidates the complete snapshot.
 
 Both documented `red` and `yellow` `air_raid` records are active. An alert
 episode applies when its UID is in the selected scope's canonical
