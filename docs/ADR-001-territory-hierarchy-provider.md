@@ -1,7 +1,7 @@
 # ADR-001: alerts.in.ua territory hierarchy and live alert source
 
 Status: **ACCEPTED / STAGING ACTIVATION REVIEW**
-Reviewed: 2026-09-27
+Reviewed: 2026-09-28
 
 ## Context
 
@@ -57,6 +57,15 @@ not an automatic fallback.
 9. Exact, versioned spelling/rename aliases may validate a known provider row
    only when UID, provider label, KATOTTG parent and KATOTTG code/name all match.
    Fuzzy matching is prohibited.
+10. The user-approved RC15 amendment permits one bounded live city-alias form
+    without changing the canonical catalogue. The wire `location_type` must be
+    exactly `city`; the canonical-decimal live UID must be greater than 5000;
+    subtracting exactly 5000 must yield a pinned official `Громада`; and the
+    normalized Ukrainian provider title must exactly equal the unique official
+    `м. X` city prefix for that record. No fuzzy match or other offset is valid.
+    Downstream identity is the canonical base UID and official pinned name, type
+    and hierarchy. The provider alias identity is never persisted or displayed.
+    This numeric wire alias is separate from the spelling aliases in Decision 9.
 
 ## Canonical catalogue contract
 
@@ -129,6 +138,17 @@ alert-row key. The required `location_uid`, its pinned catalogue membership and
 its compatible pinned location type remain authoritative. A missing, malformed,
 unknown or incompatible required UID still invalidates the complete snapshot.
 
+RC15's bounded `+5000` city alias is normalized before this authority check and
+does not add a canonical UID. It is accepted only when every predicate in
+Decision 10 passes. The provider alias UID and provider identity fields are
+excluded from the canonical digest, alert state, persistence, messages and logs;
+only the pinned base record proceeds downstream. An alias/canonical collision,
+ambiguous or mismatched city title, wrong type, missing base record, unexpected
+offset or malformed UID invalidates the complete snapshot, producing
+`UNKNOWN`/`STALE` and never clear. The initially observed exact mappings are
+`5349 -> 349` (Марганець), `5351 -> 351` (Нікополь), `5564 -> 564`
+(Запоріжжя) and `6293 -> 1293` (Харків).
+
 Both documented `red` and `yellow` `air_raid` records are active. An alert
 episode applies when its UID is in the selected scope's canonical
 ancestor-plus-subtree closure. Multiple applicable rows produce one effective
@@ -160,7 +180,9 @@ substitute for `active.json`.
 - Source/catalogue contract and implementation review: **PASS** for the current
   code-reviewed candidate.
 - Alert safety implementation review: **PASS** at code/test-review level only.
-- STAGING token preflight and exact-version deployment: **PENDING**.
+- RC14 exact-version STAGING preflight: **HOLD** after fail-closed unknown UID;
+  no activation or worker startup occurred.
+- RC15 exact package, deployment, single preflight and live review: **PENDING**.
 - STAGING canary with approved accounts, monitoring and rollback evidence:
   **PENDING**.
 - PRODUCTION/public launch: **NOT APPROVED**. Local tests and code review do not

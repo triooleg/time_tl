@@ -128,10 +128,12 @@ the pinned catalogue: 142,029 bytes, SHA-256
 `a5bf1d312ee7258b16caaaf6c06e3df56fca68b0c14a060ec7c5ee7ce40b9620`,
 1,622 records, 27 roots and 1,595 parent links. Consequently the RC13 preflight
 result is an upstream API/catalogue inconsistency, not evidence supporting an
-invented local hierarchy mapping. Any UID compatibility expansion or mapping is
-`BLOCKED` until the provider publishes an updated full catalogue with UID, type
-and parent data, corrects the API response, or supplies an official mapping. The
-raw rejected UID and response body are not recorded.
+invented local hierarchy mapping. At RC14 review time, general UID compatibility
+expansion or mapping was `BLOCKED` until the provider published an updated full
+catalogue with UID, type and parent data, corrected the API response, or supplied
+an official mapping. The later RC15 amendment below is a user-approved narrow
+alias rule and is not an official catalogue row. The raw rejected UID and
+response body are not recorded.
 
 The authoritative rule is unchanged: a required `location_uid` is usable only
 when it exists in the official pinned catalogue and its API location type is
@@ -146,6 +148,32 @@ STAGING preflight again failed closed as `location_uid_unknown / count=1`. The
 unknown UID was not used, mapped or inferred, no snapshot was accepted, and
 revision 10 was not activated. This is HOLD evidence, not source compatibility
 or launch evidence.
+
+The user-approved RC15 compatibility amendment is a bounded live alias rule,
+not a new catalogue source. The byte-pinned official table remains the sole
+canonical UID, Ukrainian name, location type and hierarchy. A live alias is
+eligible only when all of the following hold:
+
+- `location_type` is exactly `city`;
+- the live `location_uid` is canonical decimal, greater than 5000;
+- subtracting exactly 5000 produces a UID present in the pinned catalogue as
+  `Громада`;
+- the normalized Ukrainian provider title exactly matches the unique official
+  `м. X` city prefix for that pinned record.
+
+No fuzzy matching and no other numeric offset are permitted. A matched row is
+canonicalized to the base UID and official pinned name, type and hierarchy. The
+provider alias UID and provider identity fields are excluded from digest, state,
+persistence, messages and logs. Alias/canonical collision, title ambiguity or
+mismatch, wrong type, missing base or malformed input invalidates the complete
+snapshot and produces UNKNOWN or STALE, never CLEAR.
+
+The observed exact mappings are `5349 -> 349` (Марганець), `5351 -> 351`
+(Нікополь), `5564 -> 564` (Запоріжжя) and `6293 -> 1293` (Харків). These aliases
+do not become persisted or selectable identities; their official base records
+remain canonical. A changed catalogue hash or a different alias shape requires
+review before acceptance. RC15 currently has LOCAL evidence only; packaging,
+deployment and preflight are separate release gates.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful

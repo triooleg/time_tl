@@ -12,6 +12,7 @@ from time_tl.infrastructure.alerts import (
     NoCatchUpRateLimiter,
     OperatorCircuitOpen,
 )
+from time_tl.runtime.region_registry_full import load_catalog
 
 NOW = datetime(2026, 9, 20, 12, tzinfo=UTC)
 MARKER_0 = "Sun, 20 Sep 2026 09:00:00 GMT"
@@ -25,6 +26,15 @@ REGION_TYPES = {
     "1803": "Район",
     "16": "Область",
     "31": "Місто з спеціальним статусом",
+}
+OBSERVED_CITY_ALIASES = (
+    ("5349", "349", "м. Марганець", "м. Марганець та Марганецька територіальна громада"),
+    ("5351", "351", "м. Нікополь", "м. Нікополь та Нікопольська територіальна громада"),
+    ("5564", "564", "м. Запоріжжя", "м. Запоріжжя та Запорізька територіальна громада"),
+    ("6293", "1293", "м. Харків", "м. Харків та Харківська територіальна громада"),
+)
+ALIAS_REGION_TYPES = REGION_TYPES | {
+    base_uid: "Громада" for _, base_uid, _, _ in OBSERVED_CITY_ALIASES
 }
 META_TIMESTAMP = "2026/09/20 15:00:00 +0300"
 
@@ -97,6 +107,24 @@ def mixed_with_synthetic_unknown(
     return payload
 
 
+def city_alias_active(
+    live_uid: str,
+    title: str,
+    *,
+    alert_id: int = 10,
+    alert_type: str = "air_raid",
+    location_type: str = "city",
+):
+    payload = active(
+        alert_id,
+        uid=live_uid,
+        location_type=location_type,
+        alert_type=alert_type,
+    )
+    payload["alerts"][0]["location_title"] = title
+    return payload
+
+
 def official_envelope(payload=None, *, meta=None, disclaimer="Official alerts.in.ua data"):
     payload = active() if payload is None else payload
     return {
@@ -127,11 +155,11 @@ def deeply_nested_metadata_payload(depth=10_000):
     )
 
 
-def adapter(transport):
+def adapter(transport, *, region_types=REGION_TYPES):
     return AlertsInUaAdapter(
         token="secret-not-logged",
         transport=transport,
-        region_types=REGION_TYPES,
+        region_types=region_types,
         now=lambda: NOW,
     )
 
@@ -275,6 +303,136 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             )
         ).fetch(fetch_revision=1, last_modified=None)
         self.assertIsNotNone(result.failure)
+
+    async def test_bounded_city_aliases_resolve_only_to_official_catalogue_identity(self):
+        official_by_uid = load_catalog().by_uid
+        rows = []
+        for alert_id, (live_uid, base_uid, title, official_name) in enumerate(
+            OBSERVED_CITY_ALIASES,
+            start=10,
+        ):
+            self.assertEqual(official_name, official_by_uid[base_uid].name_uk)
+            rows.extend(city_alias_active(live_uid, title, alert_id=alert_id)["alerts"])
+
+        result = await adapter(
+            Transport(
+                response(200, {"alerts": rows}, **{"Last-Modified": MARKER_1})
+            ),
+            region_types=ALIAS_REGION_TYPES,
+        ).fetch(fetch_revision=1, last_modified=None)
+
+        self.assertIsNotNone(result.snapshot)
+        assert result.snapshot is not None
+        self.assertEqual(
+            {base_uid for _, base_uid, _, _ in OBSERVED_CITY_ALIASES},
+            {episode.location_uid for episode in result.snapshot.active_episodes},
+        )
+        rendered = repr(result.snapshot)
+        for live_uid, _, title, _ in OBSERVED_CITY_ALIASES:
+            self.assertNotIn(live_uid, rendered)
+            self.assertNotIn(title, rendered)
+
+    async def test_provider_identity_fields_do_not_change_canonical_digest(self):
+        live_uid, base_uid, title, official_name = OBSERVED_CITY_ALIASES[0]
+        alias_payload = city_alias_active(live_uid, title)
+        alias_payload["alerts"][0].update(
+            location_title_en="Untrusted provider alias",
+            location_oblast="Untrusted provider oblast",
+            location_raion="Untrusted provider raion",
+        )
+        canonical_payload = active(uid=base_uid, location_type="hromada")
+        canonical_payload["alerts"][0].update(
+            location_title=official_name,
+            location_title_en="Different provider translation",
+            location_oblast="Different provider oblast",
+            location_raion="Different provider raion",
+        )
+        provider = adapter(Transport(), region_types=ALIAS_REGION_TYPES)
+
+        alias_episodes, alias_digest = provider._parse_active_payload(
+            json.dumps(alias_payload).encode()
+        )
+        canonical_episodes, canonical_digest = provider._parse_active_payload(
+            json.dumps(canonical_payload).encode()
+        )
+
+        self.assertEqual(canonical_episodes, alias_episodes)
+        self.assertEqual(canonical_digest, alias_digest)
+        self.assertEqual(base_uid, alias_episodes[0].location_uid)
+
+    async def test_city_alias_rejects_offset_title_type_and_catalogue_mismatches(self):
+        samples = (
+            city_alias_active("5349", "м. Нікополь"),
+            city_alias_active("5349", "must-not-leak-title"),
+            city_alias_active("5349", "м. Марганець", location_type="hromada"),
+            city_alias_active("5016", "м. Луганськ"),
+            city_alias_active("999999", "м. Невідоме"),
+            city_alias_active("05001", "м. Невідоме"),
+        )
+        for payload in samples:
+            with self.subTest(payload=payload["alerts"][0]["location_uid"]):
+                raw_uid = str(payload["alerts"][0]["location_uid"])
+                raw_title = str(payload["alerts"][0]["location_title"])
+                result = await adapter(
+                    Transport(response(200, payload, **{"Last-Modified": MARKER_1})),
+                    region_types=ALIAS_REGION_TYPES,
+                ).fetch(fetch_revision=1, last_modified=None)
+
+                self.assertIsNone(result.snapshot)
+                summary = result.sanitized_failure()
+                assert summary is not None
+                self.assertNotIn(raw_uid, summary)
+                self.assertNotIn(raw_title, summary)
+
+    async def test_alias_and_canonical_row_collision_invalidates_whole_snapshot(self):
+        alias_row = city_alias_active("5349", "м. Марганець")["alerts"][0]
+        canonical_row = active(11, uid="349", location_type="hromada")["alerts"][0]
+        canonical_row["location_title"] = (
+            "м. Марганець та Марганецька територіальна громада"
+        )
+
+        result = await adapter(
+            Transport(
+                response(
+                    200,
+                    {"alerts": [alias_row, canonical_row]},
+                    **{"Last-Modified": MARKER_1},
+                )
+            ),
+            region_types=ALIAS_REGION_TYPES,
+        ).fetch(fetch_revision=1, last_modified=None)
+
+        self.assertIsNone(result.snapshot)
+        self.assertEqual("location_uid_alias_collision", result.diagnostic_code)
+        summary = result.sanitized_failure()
+        assert summary is not None
+        self.assertNotIn("5349", summary)
+        self.assertNotIn("Марганець", summary)
+
+    async def test_invalid_alias_does_not_advance_validated_baseline(self):
+        transport = Transport(
+            response(
+                200,
+                city_alias_active("5349", "м. Марганець"),
+                **{"Last-Modified": MARKER_1},
+            ),
+            response(
+                200,
+                city_alias_active("5349", "must-not-leak-title"),
+                **{"Last-Modified": MARKER_2},
+            ),
+            response(304, **{"Last-Modified": MARKER_1}),
+        )
+        provider = adapter(transport, region_types=ALIAS_REGION_TYPES)
+
+        valid = await provider.fetch(fetch_revision=1, last_modified=None)
+        rejected = await provider.fetch(fetch_revision=2, last_modified=MARKER_1)
+        unchanged = await provider.fetch(fetch_revision=3, last_modified=MARKER_1)
+
+        self.assertIsNotNone(valid.snapshot)
+        self.assertIsNotNone(rejected.failure)
+        self.assertEqual(MARKER_1, unchanged.last_modified)
+        self.assertEqual(MARKER_1, transport.requests[2].headers["If-Modified-Since"])
 
     async def test_red_and_yellow_air_raid_are_both_active(self):
         for level in ("red", "yellow"):
@@ -990,6 +1148,40 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((), snapshot.active_episodes)
         self.assertEqual((), await repository.outbox())
 
+    async def test_mixed_invalid_city_alias_globally_degrades_without_partial_state(self):
+        second_scope = RegionScope.from_hierarchy("31")
+        repository = InMemoryAlertRepository(
+            [("community", self.scope), ("special-city", second_scope)]
+        )
+        payload = active()
+        alias_row = city_alias_active(
+            "5349",
+            "must-not-leak-title",
+            alert_id=11,
+        )["alerts"][0]
+        payload["alerts"].append(alias_row)
+        worker = AlertWorker(
+            provider=adapter(
+                Transport(
+                    response(200, payload, **{"Last-Modified": MARKER_1})
+                ),
+                region_types=ALIAS_REGION_TYPES,
+            ),
+            repository=repository,
+            lease=InMemorySingletonLease(),
+            monotonic=lambda: self.clock,
+            jitter=lambda a, b: 7.0,
+        )
+
+        await worker.run_once()
+
+        for scope_id in ("community", "special-city"):
+            snapshot = await repository.snapshot_for(scope_id)
+            assert snapshot is not None
+            self.assertEqual(AlertState.UNKNOWN, snapshot.state)
+            self.assertEqual((), snapshot.active_episodes)
+        self.assertEqual((), await repository.outbox())
+
     async def test_unknown_uid_after_known_active_degrades_every_scope_and_preserves_active(self):
         second_scope = RegionScope.from_hierarchy("31")
         repository = InMemoryAlertRepository(
@@ -1099,6 +1291,63 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             sum(
                 item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
                 for item in await self.repo.outbox()
+            ),
+        )
+
+    async def test_city_alias_uses_canonical_scope_and_normal_two_observation_clear(self):
+        repository = InMemoryAlertRepository(
+            [("student", RegionScope.from_hierarchy("349"))]
+        )
+        transport = Transport(
+            response(
+                200,
+                city_alias_active("5349", "м. Марганець"),
+                **{"Last-Modified": MARKER_1},
+            ),
+            response(
+                200,
+                city_alias_active("5349", "м. Марганець", alert_type="chemical"),
+                **{"Last-Modified": MARKER_2},
+            ),
+            response(304, **{"Last-Modified": MARKER_2}),
+        )
+        worker = AlertWorker(
+            provider=adapter(transport, region_types=ALIAS_REGION_TYPES),
+            repository=repository,
+            lease=InMemorySingletonLease(),
+            monotonic=lambda: self.clock,
+            jitter=lambda a, b: 7.0,
+        )
+
+        await worker.run_once()
+        active_snapshot = await repository.snapshot_for("student")
+        assert active_snapshot is not None
+        self.assertEqual(AlertState.ACTIVE, active_snapshot.state)
+        self.assertEqual("349", active_snapshot.active_episodes[0].episode.location_uid)
+
+        self.clock += 15
+        await worker.run_once()
+        candidate = await repository.snapshot_for("student")
+        assert candidate is not None
+        self.assertEqual(AlertState.STALE, candidate.state)
+        self.assertTrue(candidate.pending_clear_candidate)
+        self.assertFalse(
+            any(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await repository.outbox()
+            )
+        )
+
+        self.clock += 15
+        await worker.run_once()
+        cleared = await repository.snapshot_for("student")
+        assert cleared is not None
+        self.assertEqual(AlertState.CLEAR_CONFIRMED, cleared.state)
+        self.assertEqual(
+            1,
+            sum(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await repository.outbox()
             ),
         )
 

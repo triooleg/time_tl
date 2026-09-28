@@ -104,9 +104,9 @@ services or sent a message. No production or canary deployment has occurred.
 Last session: 2026-09-28
 Stopped at: RC14 is installed, but its single preflight rejected the provider
 response as `location_uid_unknown / count=1`; activation and phase 2 startup are
-prohibited, and the server remains in `HOLD`. RC14 does not broaden UID
-compatibility; the upstream API/catalogue inconsistency remains `BLOCKED`
-pending authoritative provider evidence.
+prohibited, and the server remains in `HOLD`. RC15 is a user-approved, bounded
+LOCAL city-alias compatibility candidate with no package, deployment or
+preflight evidence.
 The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
@@ -340,10 +340,12 @@ on 2026-09-28. It was byte-identical to the pinned file: 142,029 bytes, SHA-256
 1,622 records, 27 roots and 1,595 parent links. The official alert schema requires
 `location_uid` as a string carrying an int32 value, and the official SDK provides
 no alternate mapping. The live API therefore supplied a required UID absent from
-the current official catalogue. Any compatibility expansion or mapping remains
-`BLOCKED` pending an official updated full catalogue with UID, type and parent
-data, a provider-side correction, or an official mapping. No raw UID, response
-body or secret is retained here.
+the current official catalogue. At RC14 review time, general compatibility
+expansion or mapping remained `BLOCKED` pending an official updated full
+catalogue with UID, type and parent data, a provider-side correction, or an
+official mapping. The later RC15 amendment below is a user-approved narrow rule,
+not an official catalogue update. No raw UID, response body or secret is retained
+here.
 
 The RC14 LOCAL candidate preserves the existing authoritative UID
 rule: `location_uid` is usable only when present in the official pinned catalogue
@@ -398,4 +400,34 @@ Fresh verified rollback backup:
 Its database dump is 692,590 bytes; recorded source and database hashes were
 reverified. Current verdict is RC14 `HOLD`; phase 2 remains prohibited and no
 launch claim is made.
+
+RC15 adds only a bounded `+5000` live city-alias normalization while keeping the
+byte-pinned official table as the sole canonical UID, Ukrainian name, type and
+hierarchy. A provider alias is eligible only when `location_type` is exactly
+`city`, the live UID is a canonical decimal integer greater than 5000, subtracting
+5000 yields a pinned official `Громада`, and the normalized Ukrainian provider
+title exactly matches the unique official `м. X` city prefix for that record.
+No fuzzy title match or other numeric offset is permitted.
+
+An accepted alias is replaced by its canonical base UID and the official pinned
+name, type and hierarchy before downstream use. The provider alias UID and other
+provider identity fields do not enter the digest, alert state, persistence,
+messages or logs. An alias/canonical collision, non-unique or mismatched title,
+wrong type, unknown base, malformed UID or any other predicate failure rejects
+the complete snapshot and yields UNKNOWN or STALE, never CLEAR.
+
+Observed mappings covered by the exact rule are `5349 -> 349` (Марганець),
+`5351 -> 351` (Нікополь), `5564 -> 564` (Запоріжжя) and `6293 -> 1293`
+(Харків). These are compatibility inputs; the base records remain the only
+canonical identities.
+
+RC15 LOCAL evidence: 98 focused tests passed; the full suite passed 550 tests
+with five destructive PostgreSQL E2E skips and one Starlette warning. Ruff,
+strict mypy for 72 source files, compileall and `git diff --check` passed.
+Independent safety review returned `PASS` for the LOCAL scope with no blockers.
+The user-approved alias amendment is not itself an official catalogue row. A
+changed catalogue hash or alias shape requires renewed review, and an exact
+package, deploy, single preflight and live review remain required. This LOCAL
+evidence is not deployment, preflight, activation or launch evidence; the server
+remains RC14 `HOLD`.
 Resume file: none.

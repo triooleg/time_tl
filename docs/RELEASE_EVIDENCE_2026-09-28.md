@@ -1,10 +1,10 @@
-# Time TL RC8 incident through RC14 live HOLD — 2026-09-28
+# Time TL RC8 incident through RC15 local compatibility — 2026-09-28
 
 ## Scope
 
 This record covers the RC8 provider-envelope compatibility release, its bounded
-server operation, the later exact RC9 diagnostic-only deployment, and the exact
-RC10 through RC14 deployments and preflights. It records
+server operation, the later exact RC9 diagnostic-only deployment, the exact RC10
+through RC14 deployments and preflights, and the RC15 LOCAL candidate. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
 boundary and the contained RC9 read-only diagnostic. It is not evidence of
@@ -619,3 +619,60 @@ reverified.
 The current verdict is RC14 `HOLD`. Phase 2 startup is prohibited; the bot and
 all workers remain stopped and revision 10 remains unactivated. This is not a
 successful Telegram staging run, canary or launch.
+
+## RC15 bounded city-alias compatibility candidate
+
+RC15 is a user-approved, bounded LOCAL amendment for one observed live city UID
+shape. It does not replace or extend the canonical catalogue. The byte-pinned
+official table remains the sole canonical source of UID, Ukrainian name,
+location type and parent hierarchy.
+
+A live alias is eligible only when every predicate passes:
+
+- `location_type` is exactly `city`;
+- the live UID is a canonical decimal integer greater than 5000;
+- subtracting exactly 5000 yields a pinned official record of type `Громада`;
+- the normalized Ukrainian provider title exactly equals the unique official
+  `м. X` city prefix for that record.
+
+No fuzzy title matching and no other offset are accepted. A matching row is
+canonicalized to the base UID and official pinned name, type and hierarchy. The
+provider alias UID and other provider identity fields are excluded from digest,
+alert state, persistence, messages and logs. An alias/canonical collision,
+ambiguous or mismatched title, wrong type, missing base, malformed UID or any
+other predicate failure invalidates the complete snapshot and yields UNKNOWN or
+STALE, never CLEAR.
+
+The observed mappings covered by this exact contract are:
+
+| Live alias | Canonical UID | Official city |
+|---:|---:|---|
+| 5349 | 349 | Марганець |
+| 5351 | 351 | Нікополь |
+| 5564 | 564 | Запоріжжя |
+| 6293 | 1293 | Харків |
+
+These live aliases do not become selectable or persisted identities; only their
+official base records are canonical downstream.
+
+### RC15 local verification
+
+| Environment | Check | Result |
+|---|---|---|
+| LOCAL | Focused provider and alias regressions | `98 passed` |
+| LOCAL | Full suite | `550 passed, 5 skipped, 1 warning` |
+| LOCAL | Ruff | `PASS` |
+| LOCAL | strict mypy | `PASS`; 72 source files checked |
+| LOCAL | `compileall` | `PASS` |
+| LOCAL | `git diff --check` | `PASS` |
+| LOCAL REVIEW | Independent safety review | `PASS`; no blockers for LOCAL scope |
+
+The warning is the existing Starlette deprecation warning. The five skipped
+tests remain the destructive PostgreSQL E2E cases. This compatibility amendment
+was approved by the user, but it is not an official catalogue row. A changed
+catalogue hash or different alias shape requires renewed review.
+
+These LOCAL checks are not immutable-image, deployment, preflight, activation or
+launch evidence. Exact packaging, an authorized deployment and single preflight,
+and independent live-result review remain required. The current server state
+remains RC14 `HOLD`; phase 2 remains prohibited.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from time_tl.domain.alerts import (
     SourceFailure,
     SourceFailureKind,
 )
+from time_tl.runtime.region_registry_full import load_catalog
 
 from .http import AsyncHttpTransport, HttpRequest
 
@@ -212,8 +214,18 @@ class AlertsInUaAdapter:
             "threats",
         }
     )
-    _IGNORED_ALERT_FIELDS = frozenset({"location_oblast_uid"})
-    _CANONICAL_ALERT_FIELDS = _ALLOWED_ALERT_FIELDS - _IGNORED_ALERT_FIELDS
+    _PROVIDER_IDENTITY_FIELDS = frozenset(
+        {
+            "location_title",
+            "location_title_en",
+            "location_type",
+            "location_uid",
+            "location_oblast",
+            "location_oblast_uid",
+            "location_raion",
+        }
+    )
+    _CANONICAL_ALERT_FIELDS = _ALLOWED_ALERT_FIELDS - _PROVIDER_IDENTITY_FIELDS
     _REQUIRED_THREAT_FIELDS = frozenset({"threat_type", "level", "started_at"})
     _ALLOWED_THREAT_FIELDS = _REQUIRED_THREAT_FIELDS | frozenset({"source_message"})
 
@@ -235,8 +247,31 @@ class AlertsInUaAdapter:
         unknown_types = set(region_types.values()) - set(self._PINNED_TO_PROVIDER_TYPES)
         if unknown_types:
             raise ValueError("region registry contains an unsupported pinned type")
+        official_by_uid = load_catalog().by_uid
+        if any(
+            (record := official_by_uid.get(uid)) is None
+            or record.location_type != location_type
+            for uid, location_type in region_types.items()
+        ):
+            raise ValueError("region registry must exactly match the pinned official catalogue")
         self._token, self._transport = token, transport
         self._region_types = dict(region_types)
+        self._region_names = {
+            uid: official_by_uid[uid].name_uk
+            for uid in region_types
+        }
+        city_prefix_owners: dict[str, list[str]] = {}
+        for record in official_by_uid.values():
+            if record.location_type != "Громада":
+                continue
+            prefix = self._official_city_prefix(record.name_uk)
+            if prefix is not None:
+                city_prefix_owners.setdefault(prefix, []).append(record.uid)
+        self._city_prefixes = {
+            owners[0]: prefix
+            for prefix, owners in city_prefix_owners.items()
+            if len(owners) == 1 and owners[0] in region_types
+        }
         self._covered_region_ids = frozenset(region_types)
         self._timeout_seconds = timeout_seconds
         self._now = now or (lambda: datetime.now(UTC))
@@ -424,6 +459,7 @@ class AlertsInUaAdapter:
         parsed: list[AlertEpisode] = []
         canonical_alerts: list[dict[str, object]] = []
         alert_ids: set[int] = set()
+        canonical_sources: dict[str, str] = {}
         ignored_alert_extra_key: str | None = None
         for item in alerts:
             if not isinstance(item, dict):
@@ -453,18 +489,26 @@ class AlertsInUaAdapter:
                 raise SnapshotValidationError("alert_id_duplicate")
             alert_ids.add(alert_id)
 
-            location_uid = item["location_uid"]
-            if not isinstance(location_uid, str) or not self._is_canonical_uid(location_uid):
+            provider_location_uid = item["location_uid"]
+            if not isinstance(provider_location_uid, str) or not self._is_canonical_uid(
+                provider_location_uid
+            ):
                 raise SnapshotValidationError("location_uid_format_invalid")
-            pinned_type = self._region_types.get(location_uid)
-            if pinned_type is None:
-                raise SnapshotValidationError("location_uid_unknown")
-
-            location_type = item["location_type"]
-            if not isinstance(location_type, str) or location_type not in self._LOCATION_TYPES:
+            provider_location_type = item["location_type"]
+            if (
+                not isinstance(provider_location_type, str)
+                or provider_location_type not in self._LOCATION_TYPES
+            ):
                 raise SnapshotValidationError("location_type_enum_invalid")
-            if location_type not in self._PINNED_TO_PROVIDER_TYPES[pinned_type]:
-                raise SnapshotValidationError("location_type_catalogue_mismatch")
+            self._validate_required_text(item["location_title"], "location_title")
+            location_uid, official_name, pinned_type = self._resolve_catalogue_identity(
+                provider_location_uid,
+                provider_location_type,
+                item["location_title"],
+            )
+            previous_source = canonical_sources.setdefault(location_uid, provider_location_uid)
+            if previous_source != provider_location_uid:
+                raise SnapshotValidationError("location_uid_alias_collision")
 
             alert_type = item["alert_type"]
             if not isinstance(alert_type, str) or alert_type not in self._ALERT_TYPES:
@@ -480,7 +524,6 @@ class AlertsInUaAdapter:
             if item["finished_at"] is not None:
                 raise SnapshotValidationError("finished_at_not_null")
 
-            self._validate_required_text(item["location_title"], "location_title")
             for optional_text in (
                 "location_title_en",
                 "location_oblast",
@@ -500,6 +543,11 @@ class AlertsInUaAdapter:
             canonical_alert = {
                 key: item[key] for key in self._CANONICAL_ALERT_FIELDS if key in item
             }
+            canonical_alert.update(
+                location_uid=location_uid,
+                location_title=official_name,
+                location_type=pinned_type,
+            )
             canonical_alerts.append(canonical_alert)
         if len(parsed) != len(set(parsed)):
             raise SnapshotValidationError("alert_episode_duplicate")
@@ -512,6 +560,50 @@ class AlertsInUaAdapter:
             separators=(",", ":"),
         ).encode("utf-8")
         return tuple(sorted(parsed)), sha256(canonical).hexdigest()
+
+    def _resolve_catalogue_identity(
+        self,
+        provider_uid: str,
+        provider_type: str,
+        provider_title: object,
+    ) -> tuple[str, str, str]:
+        pinned_type = self._region_types.get(provider_uid)
+        if pinned_type is not None:
+            if provider_type not in self._PINNED_TO_PROVIDER_TYPES[pinned_type]:
+                raise SnapshotValidationError("location_type_catalogue_mismatch")
+            return provider_uid, self._region_names[provider_uid], pinned_type
+
+        if provider_type != "city":
+            raise SnapshotValidationError("location_uid_unknown")
+        numeric_uid = int(provider_uid)
+        if numeric_uid <= 5000:
+            raise SnapshotValidationError("location_uid_unknown")
+        canonical_uid = str(numeric_uid - 5000)
+        if self._region_types.get(canonical_uid) != "Громада":
+            raise SnapshotValidationError("location_uid_unknown")
+        expected_title = self._city_prefixes.get(canonical_uid)
+        if expected_title is None or self._normalize_city_title(provider_title) != expected_title:
+            raise SnapshotValidationError("location_uid_alias_title_mismatch")
+        return canonical_uid, self._region_names[canonical_uid], "Громада"
+
+    @classmethod
+    def _official_city_prefix(cls, official_name: str) -> str | None:
+        normalized = cls._normalize_city_title(official_name)
+        prefix, separator, community = normalized.partition(" та ")
+        if (
+            not separator
+            or not prefix.startswith("м. ")
+            or not prefix[3:]
+            or not community.endswith(" територіальна громада")
+        ):
+            return None
+        return prefix
+
+    @staticmethod
+    def _normalize_city_title(value: object) -> str:
+        if not isinstance(value, str):
+            return ""
+        return " ".join(unicodedata.normalize("NFC", value).split())
 
     @classmethod
     def _validate_known_ignored_alert_value(cls, value: object) -> None:
