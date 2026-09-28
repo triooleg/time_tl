@@ -457,9 +457,8 @@ class AlertsInUaAdapter:
         if not isinstance(alerts, list):
             raise SnapshotValidationError("alerts_field_type_invalid")
         parsed: list[AlertEpisode] = []
-        canonical_alerts: list[dict[str, object]] = []
+        canonical_alerts: list[tuple[int, dict[str, object]]] = []
         alert_ids: set[int] = set()
-        canonical_sources: dict[str, str] = {}
         ignored_alert_extra_key: str | None = None
         for item in alerts:
             if not isinstance(item, dict):
@@ -506,10 +505,6 @@ class AlertsInUaAdapter:
                 provider_location_type,
                 item["location_title"],
             )
-            previous_source = canonical_sources.setdefault(location_uid, provider_location_uid)
-            if previous_source != provider_location_uid:
-                raise SnapshotValidationError("location_uid_alias_collision")
-
             alert_type = item["alert_type"]
             if not isinstance(alert_type, str) or alert_type not in self._ALERT_TYPES:
                 raise SnapshotValidationError("alert_type_enum_invalid")
@@ -548,11 +543,13 @@ class AlertsInUaAdapter:
                 location_title=official_name,
                 location_type=pinned_type,
             )
-            canonical_alerts.append(canonical_alert)
+            canonical_alerts.append((alert_id, canonical_alert))
         if len(parsed) != len(set(parsed)):
             raise SnapshotValidationError("alert_episode_duplicate")
         canonical_root = dict(root)
-        canonical_root["alerts"] = canonical_alerts
+        canonical_root["alerts"] = [
+            alert for _, alert in sorted(canonical_alerts, key=lambda item: item[0])
+        ]
         canonical = json.dumps(
             canonical_root,
             ensure_ascii=False,

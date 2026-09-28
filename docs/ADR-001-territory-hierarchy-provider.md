@@ -66,6 +66,12 @@ not an automatic fallback.
     Downstream identity is the canonical base UID and official pinned name, type
     and hierarchy. The provider alias identity is never persisted or displayed.
     This numeric wire alias is separate from the spelling aliases in Decision 9.
+11. RC16 amends only alias/direct collision handling. Independently validated
+    direct and `+5000` alias rows with distinct provider alert IDs are separate
+    episodes on the same official base location identity. They are not
+    semantically deduplicated without authoritative equivalence evidence. One
+    remaining episode keeps the scope ACTIVE; both must be absent before the
+    normal two-observation all-clear sequence can begin.
 
 ## Canonical catalogue contract
 
@@ -142,12 +148,20 @@ RC15's bounded `+5000` city alias is normalized before this authority check and
 does not add a canonical UID. It is accepted only when every predicate in
 Decision 10 passes. The provider alias UID and provider identity fields are
 excluded from the canonical digest, alert state, persistence, messages and logs;
-only the pinned base record proceeds downstream. An alias/canonical collision,
-ambiguous or mismatched city title, wrong type, missing base record, unexpected
-offset or malformed UID invalidates the complete snapshot, producing
-`UNKNOWN`/`STALE` and never clear. The initially observed exact mappings are
+only the pinned base record proceeds downstream. An ambiguous or mismatched city
+title, wrong type, missing base record, unexpected offset or malformed UID
+invalidates the complete snapshot, producing `UNKNOWN`/`STALE` and never clear.
+Under Decision 11, independently valid alias and direct rows may coexist only
+when their numeric provider alert IDs are distinct; a duplicate provider alert
+ID still invalidates the complete snapshot. The initially observed exact mappings are
 `5349 -> 349` (Марганець), `5351 -> 351` (Нікополь), `5564 -> 564`
 (Запоріжжя) and `6293 -> 1293` (Харків).
+
+Every independently accepted canonicalized row remains in the content digest,
+sorted by its unique numeric alert ID, and remains a separate episode. Raw
+alias/direct source identity fields do not enter the digest, state, persistence,
+messages or logs. Disappearance of only one episode cannot clear the base
+location; absence of all episodes still requires two successful observations.
 
 Both documented `red` and `yellow` `air_raid` records are active. An alert
 episode applies when its UID is in the selected scope's canonical
@@ -182,7 +196,9 @@ substitute for `active.json`.
 - Alert safety implementation review: **PASS** at code/test-review level only.
 - RC14 exact-version STAGING preflight: **HOLD** after fail-closed unknown UID;
   no activation or worker startup occurred.
-- RC15 exact package, deployment, single preflight and live review: **PENDING**.
+- RC15 exact-version STAGING preflight: **HOLD** after fail-closed alias/direct
+  collision; no activation or worker startup occurred.
+- RC16 exact package, deployment, single preflight and live review: **PENDING**.
 - STAGING canary with approved accounts, monitoring and rollback evidence:
   **PENDING**.
 - PRODUCTION/public launch: **NOT APPROVED**. Local tests and code review do not

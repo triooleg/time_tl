@@ -125,6 +125,22 @@ def city_alias_active(
     return payload
 
 
+def alias_and_direct_rows(
+    alias: tuple[str, str, str, str],
+    *,
+    alias_id: int,
+    direct_id: int,
+) -> tuple[dict[str, object], dict[str, object]]:
+    live_uid, base_uid, title, official_name = alias
+    alias_row = city_alias_active(live_uid, title, alert_id=alias_id)["alerts"][0]
+    direct_row = active(direct_id, uid=base_uid, location_type="hromada")["alerts"][0]
+    direct_row.update(
+        location_title=official_name,
+        updated_at="2026-09-20T10:02:00+00:00",
+    )
+    return alias_row, direct_row
+
+
 def official_envelope(payload=None, *, meta=None, disclaimer="Official alerts.in.ua data"):
     payload = active() if payload is None else payload
     return {
@@ -384,18 +400,47 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(raw_uid, summary)
                 self.assertNotIn(raw_title, summary)
 
-    async def test_alias_and_canonical_row_collision_invalidates_whole_snapshot(self):
-        alias_row = city_alias_active("5349", "м. Марганець")["alerts"][0]
-        canonical_row = active(11, uid="349", location_type="hromada")["alerts"][0]
-        canonical_row["location_title"] = (
-            "м. Марганець та Марганецька територіальна громада"
+    async def test_observed_alias_and_direct_rows_coexist_as_distinct_canonical_episodes(self):
+        rows = []
+        for index, alias in enumerate(OBSERVED_CITY_ALIASES[:3]):
+            rows.extend(
+                alias_and_direct_rows(
+                    alias,
+                    alias_id=10 + index * 2,
+                    direct_id=11 + index * 2,
+                )
+            )
+        provider = adapter(Transport(), region_types=ALIAS_REGION_TYPES)
+
+        episodes, digest = provider._parse_active_payload(
+            json.dumps({"alerts": rows}).encode()
+        )
+        reordered_episodes, reordered_digest = provider._parse_active_payload(
+            json.dumps({"alerts": list(reversed(rows))}).encode()
+        )
+
+        self.assertEqual(episodes, reordered_episodes)
+        self.assertEqual(digest, reordered_digest)
+        self.assertEqual(6, len(episodes))
+        for live_uid, base_uid, title, _ in OBSERVED_CITY_ALIASES[:3]:
+            matching = [episode for episode in episodes if episode.location_uid == base_uid]
+            self.assertEqual(2, len(matching))
+            rendered = repr(matching)
+            self.assertNotIn(live_uid, rendered)
+            self.assertNotIn(title, rendered)
+
+    async def test_alias_and_direct_rows_with_duplicate_provider_id_remain_invalid(self):
+        alias_row, direct_row = alias_and_direct_rows(
+            OBSERVED_CITY_ALIASES[0],
+            alias_id=10,
+            direct_id=10,
         )
 
         result = await adapter(
             Transport(
                 response(
                     200,
-                    {"alerts": [alias_row, canonical_row]},
+                    {"alerts": [alias_row, direct_row]},
                     **{"Last-Modified": MARKER_1},
                 )
             ),
@@ -403,11 +448,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         ).fetch(fetch_revision=1, last_modified=None)
 
         self.assertIsNone(result.snapshot)
-        self.assertEqual("location_uid_alias_collision", result.diagnostic_code)
-        summary = result.sanitized_failure()
-        assert summary is not None
-        self.assertNotIn("5349", summary)
-        self.assertNotIn("Марганець", summary)
+        self.assertEqual("alert_id_duplicate", result.diagnostic_code)
 
     async def test_invalid_alias_does_not_advance_validated_baseline(self):
         transport = Transport(
@@ -1151,9 +1192,13 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_mixed_invalid_city_alias_globally_degrades_without_partial_state(self):
         second_scope = RegionScope.from_hierarchy("31")
         repository = InMemoryAlertRepository(
-            [("community", self.scope), ("special-city", second_scope)]
+            [
+                ("community", RegionScope.from_hierarchy("349")),
+                ("special-city", second_scope),
+            ]
         )
-        payload = active()
+        payload = active(uid="349", location_type="hromada")
+        payload["alerts"][0]["location_title"] = OBSERVED_CITY_ALIASES[0][3]
         alias_row = city_alias_active(
             "5349",
             "must-not-leak-title",
@@ -1291,6 +1336,79 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             sum(
                 item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
                 for item in await self.repo.outbox()
+            ),
+        )
+
+    async def test_alias_and_direct_disappearance_stays_active_then_clears_normally(self):
+        repository = InMemoryAlertRepository(
+            [("student", RegionScope.from_hierarchy("349"))]
+        )
+        alias_row, direct_row = alias_and_direct_rows(
+            OBSERVED_CITY_ALIASES[0],
+            alias_id=10,
+            direct_id=11,
+        )
+        no_air_alias = dict(alias_row)
+        no_air_alias["alert_type"] = "chemical"
+        transport = Transport(
+            response(
+                200,
+                {"alerts": [alias_row, direct_row]},
+                **{"Last-Modified": MARKER_1},
+            ),
+            response(
+                200,
+                {"alerts": [alias_row]},
+                **{"Last-Modified": MARKER_2},
+            ),
+            response(
+                200,
+                {"alerts": [no_air_alias]},
+                **{"Last-Modified": MARKER_3},
+            ),
+            response(304, **{"Last-Modified": MARKER_3}),
+        )
+        worker = AlertWorker(
+            provider=adapter(transport, region_types=ALIAS_REGION_TYPES),
+            repository=repository,
+            lease=InMemorySingletonLease(),
+            monotonic=lambda: self.clock,
+            jitter=lambda a, b: 7.0,
+        )
+
+        await worker.run_once()
+        both_active = await repository.snapshot_for("student")
+        assert both_active is not None
+        self.assertEqual(AlertState.ACTIVE, both_active.state)
+        self.assertEqual(2, len(both_active.active_episodes))
+        initial_outbox = await repository.outbox()
+
+        self.clock += 15
+        await worker.run_once()
+        one_active = await repository.snapshot_for("student")
+        assert one_active is not None
+        self.assertEqual(AlertState.ACTIVE, one_active.state)
+        self.assertEqual(1, len(one_active.active_episodes))
+        self.assertEqual(initial_outbox, await repository.outbox())
+
+        self.clock += 15
+        await worker.run_once()
+        candidate = await repository.snapshot_for("student")
+        assert candidate is not None
+        self.assertEqual(AlertState.STALE, candidate.state)
+        self.assertTrue(candidate.pending_clear_candidate)
+        self.assertEqual(initial_outbox, await repository.outbox())
+
+        self.clock += 15
+        await worker.run_once()
+        cleared = await repository.snapshot_for("student")
+        assert cleared is not None
+        self.assertEqual(AlertState.CLEAR_CONFIRMED, cleared.state)
+        self.assertEqual(
+            1,
+            sum(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await repository.outbox()
             ),
         )
 

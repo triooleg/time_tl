@@ -102,11 +102,10 @@ services or sent a message. No production or canary deployment has occurred.
 ## Session Continuity
 
 Last session: 2026-09-28
-Stopped at: RC14 is installed, but its single preflight rejected the provider
-response as `location_uid_unknown / count=1`; activation and phase 2 startup are
-prohibited, and the server remains in `HOLD`. RC15 is a user-approved, bounded
-LOCAL city-alias compatibility candidate with no package, deployment or
-preflight evidence.
+Stopped at: RC15 is installed, but its single preflight rejected the provider
+response as `location_uid_alias_collision / count=1`; activation and phase 2
+startup are prohibited, and the server remains in `HOLD`. RC16 is a LOCAL
+collision-policy candidate with no package, deployment or preflight evidence.
 The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
@@ -412,9 +411,10 @@ No fuzzy title match or other numeric offset is permitted.
 An accepted alias is replaced by its canonical base UID and the official pinned
 name, type and hierarchy before downstream use. The provider alias UID and other
 provider identity fields do not enter the digest, alert state, persistence,
-messages or logs. An alias/canonical collision, non-unique or mismatched title,
-wrong type, unknown base, malformed UID or any other predicate failure rejects
-the complete snapshot and yields UNKNOWN or STALE, never CLEAR.
+messages or logs. Under the RC15 policy, an alias/canonical collision,
+non-unique or mismatched title, wrong type, unknown base, malformed UID or any
+other predicate failure rejects the complete snapshot and yields UNKNOWN or
+STALE, never CLEAR. RC16's later collision amendment is recorded below.
 
 Observed mappings covered by the exact rule are `5349 -> 349` (Марганець),
 `5351 -> 351` (Нікополь), `5564 -> 564` (Запоріжжя) and `6293 -> 1293`
@@ -428,6 +428,61 @@ Independent safety review returned `PASS` for the LOCAL scope with no blockers.
 The user-approved alias amendment is not itself an official catalogue row. A
 changed catalogue hash or alias shape requires renewed review, and an exact
 package, deploy, single preflight and live review remain required. This LOCAL
-evidence is not deployment, preflight, activation or launch evidence; the server
-remains RC14 `HOLD`.
+evidence preceded packaging and did not itself prove deployment, preflight,
+activation or launch.
+
+The exact RC15 release was subsequently approved and installed from tag
+`time-tl-staging-20260928-rc15-plus5000-city-alias`, commit
+`289aa18d28b30e454168083100d57dcc30f669f8`, archive SHA-256
+`59574cf1e7e2869f8feeec742f0cfbcaa63ddc91a3643fedb53f2e8c8661b018`.
+The verified archive contained 224 entries and was 380,541 bytes. Immutable
+image `sha256:d3cc001abd3d9b4e84708a1528bd515a7755664b70eec652c1fddc718707d4cd`
+was built. `admin-web` runs RC15, is healthy with restart count zero, and direct
+and public `/login` checks returned HTTP 200. RC15 `bot` and all three workers
+remain `Created`, with zero `StartedAt` and restart count zero. PostgreSQL remains
+at `0006_outbox_terminal_retention`; no migration ran.
+
+Exactly one RC15 STAGING preflight ran for pending revision 10. Telegram `getMe`
+passed, then exactly one official `active.json` request failed closed as
+`INVALID_RESPONSE / location_uid_alias_collision / count=1`; the preflight
+exited with status 2 and did not retry. Owner state remained latest revision 10,
+pending revision 10 and ACTIVE revision 6, with zero revision-10 activation audit
+rows. The outbox remained 29 total, 24 delivered and 5 undelivered rows, and the
+one-off count remained 0. There was no activation, service start, message,
+persistence change or proxy change, and no raw provider identity is recorded.
+
+Fresh verified rollback backup:
+`/home/trio/time-tl-bot/backups/pre-rc15-plus5000-city-alias-20260928T135219Z`.
+Its database dump is 692,590 bytes; recorded source and database hashes were
+reverified. Compose hash prefix remained `b00192`. Current server verdict is RC15
+`HOLD`; phase 2 remains prohibited.
+
+A separate read-only collision diagnostic received one HTTP 200 snapshot with
+56 rows and found three official base identities represented by both their direct
+and `+5000` alias forms: `349/5349`, `351/5351` and `564/5564`. Each base had one
+alias row and one direct row. Within each pair, location type and start time were
+equal and finish time was null, while numeric alert IDs and update timestamps
+differed. The diagnostic made no state change and does not establish semantic
+equivalence between the two provider episodes.
+
+RC16 therefore permits independently validated direct and alias rows with
+distinct unique numeric alert IDs to coexist as separate episodes on the same
+official base location identity. It performs no semantic deduplication without
+authoritative equivalence evidence. If either episode disappears while the other
+remains, the scope remains ACTIVE. Only absence of both can begin the unchanged
+two-successful-observation all-clear sequence.
+
+The canonical digest includes every accepted canonicalized row, sorted by its
+unique numeric alert ID. Raw alias/direct source identity fields remain excluded.
+A duplicate provider alert ID or any invalid row still invalidates the complete
+snapshot and yields UNKNOWN or STALE, never CLEAR.
+
+RC16 LOCAL evidence: 100 focused tests passed; the full suite passed 552 tests
+with five destructive PostgreSQL E2E skips and one Starlette warning. Ruff,
+strict mypy for 72 source files, compileall and `git diff --check` passed.
+Independent safety review returned `PASS` with no findings. Residual provider
+shape drift still requires review, and the destructive PostgreSQL cases were not
+run. This LOCAL evidence is not deployment, preflight, activation or launch
+evidence; exact packaging, deploy, one preflight and live-result review remain
+required.
 Resume file: none.

@@ -1,10 +1,10 @@
-# Time TL RC8 incident through RC15 local compatibility — 2026-09-28
+# Time TL RC8 incident through RC16 local collision policy — 2026-09-28
 
 ## Scope
 
 This record covers the RC8 provider-envelope compatibility release, its bounded
 server operation, the later exact RC9 diagnostic-only deployment, the exact RC10
-through RC14 deployments and preflights, and the RC15 LOCAL candidate. It records
+through RC15 deployments and preflights, and the RC16 LOCAL candidate. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
 boundary and the contained RC9 read-only diagnostic. It is not evidence of
@@ -638,10 +638,11 @@ A live alias is eligible only when every predicate passes:
 No fuzzy title matching and no other offset are accepted. A matching row is
 canonicalized to the base UID and official pinned name, type and hierarchy. The
 provider alias UID and other provider identity fields are excluded from digest,
-alert state, persistence, messages and logs. An alias/canonical collision,
-ambiguous or mismatched title, wrong type, missing base, malformed UID or any
-other predicate failure invalidates the complete snapshot and yields UNKNOWN or
-STALE, never CLEAR.
+alert state, persistence, messages and logs. Under the RC15 policy, an
+alias/canonical collision, ambiguous or mismatched title, wrong type, missing
+base, malformed UID or any other predicate failure invalidated the complete
+snapshot and yielded UNKNOWN or STALE, never CLEAR. RC16's later collision
+amendment is recorded below.
 
 The observed mappings covered by this exact contract are:
 
@@ -672,7 +673,91 @@ tests remain the destructive PostgreSQL E2E cases. This compatibility amendment
 was approved by the user, but it is not an official catalogue row. A changed
 catalogue hash or different alias shape requires renewed review.
 
+These LOCAL checks preceded packaging and did not themselves prove an immutable
+image, deployment, preflight, activation or launch.
+
+## Exact RC15 server operation and HOLD
+
+The exact approved RC15 identity was:
+
+- tag: `time-tl-staging-20260928-rc15-plus5000-city-alias`;
+- tag object: `b2f6b19e4910c82cb371304d836a07dd80d0f6b2`;
+- commit: `289aa18d28b30e454168083100d57dcc30f669f8`;
+- tree: `e3dbc44b12382651a2a40c6a32058224bea658d5`;
+- archive SHA-256:
+  `59574cf1e7e2869f8feeec742f0cfbcaa63ddc91a3643fedb53f2e8c8661b018`;
+- archive size and entry count: 380,541 bytes and 224 entries;
+- immutable image:
+  `sha256:d3cc001abd3d9b4e84708a1528bd515a7755664b70eec652c1fddc718707d4cd`.
+
+The server archive matched the approved digest. `admin-web` runs RC15, is
+healthy with restart count zero, and returned HTTP 200 through direct and public
+`/login` checks. RC15 `bot`, `alert-worker`, `schedule-worker` and
+`sender-worker` remain `Created`, with zero `StartedAt` and restart count zero.
+PostgreSQL remains at `0006_outbox_terminal_retention`; no migration ran. The
+Compose hash prefix remained `b00192`.
+
+Exactly one RC15 STAGING preflight ran for pending revision 10. Telegram `getMe`
+passed. Exactly one official `active.json` request then failed closed as
+`INVALID_RESPONSE / location_uid_alias_collision / count=1`; the preflight
+exited with status 2 and did not retry. Owner state before and after was latest
+revision 10, pending revision 10 and ACTIVE revision 6. Revision 10 has zero
+activation audit rows. The outbox was unchanged at 29 total, 24 delivered and 5
+undelivered rows; the one-off count remained 0.
+
+There was no activation, bot/worker start, message, persistence mutation or proxy
+change. No raw provider identity, response body or secret is included here.
+
+A fresh rollback backup is retained at
+`/home/trio/time-tl-bot/backups/pre-rc15-plus5000-city-alias-20260928T135219Z`.
+The database dump is 692,590 bytes. Recorded source and database hashes were
+reverified. The current server verdict is RC15 `HOLD`; phase 2 remains prohibited.
+
+## RC16 collision diagnosis and local policy
+
+A read-only collision diagnostic received one HTTP 200 snapshot with 56 rows.
+It found three official bases represented by one direct and one `+5000` alias
+row each:
+
+| Official base / alias | Pair count | Equal fields | Different fields |
+|---|---:|---|---|
+| 349 / 5349 | 1 direct + 1 alias | type, start, null finish | numeric alert ID, update time |
+| 351 / 5351 | 1 direct + 1 alias | type, start, null finish | numeric alert ID, update time |
+| 564 / 5564 | 1 direct + 1 alias | type, start, null finish | numeric alert ID, update time |
+
+The diagnostic changed no state. Similarity of these fields is not authoritative
+evidence that two provider rows describe one semantic episode.
+
+RC16 therefore permits independently validated direct and alias rows with
+distinct unique numeric alert IDs to coexist as separate episodes on the same
+official base location identity. It does not semantically deduplicate them
+without authoritative equivalence evidence. If either episode disappears while
+the other remains, the location remains ACTIVE. Only absence of both can begin
+the unchanged two-successful-observation all-clear sequence.
+
+Every accepted canonicalized row is included in the canonical digest, sorted by
+its unique numeric alert ID. Raw alias/direct source identity fields remain
+excluded from digest, state, persistence, messages and logs. A duplicate provider
+alert ID or any invalid row still invalidates the complete snapshot and yields
+UNKNOWN or STALE, never CLEAR.
+
+### RC16 local verification
+
+| Environment | Check | Result |
+|---|---|---|
+| LOCAL | Focused provider and collision regressions | `100 passed` |
+| LOCAL | Full suite | `552 passed, 5 skipped, 1 warning` |
+| LOCAL | Ruff | `PASS` |
+| LOCAL | strict mypy | `PASS`; 72 source files checked |
+| LOCAL | `compileall` | `PASS` |
+| LOCAL | `git diff --check` | `PASS` |
+| LOCAL REVIEW | Independent safety review | `PASS`; no findings |
+
+The warning is the existing Starlette deprecation warning. The five skipped
+tests remain the destructive PostgreSQL E2E cases. Provider response-shape drift
+remains a review trigger.
+
 These LOCAL checks are not immutable-image, deployment, preflight, activation or
-launch evidence. Exact packaging, an authorized deployment and single preflight,
-and independent live-result review remain required. The current server state
-remains RC14 `HOLD`; phase 2 remains prohibited.
+launch evidence. Exact packaging, an authorized deploy, one preflight and
+independent live-result review remain required. Current server state remains
+RC15 `HOLD`; phase 2 remains prohibited.

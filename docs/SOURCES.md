@@ -164,16 +164,40 @@ eligible only when all of the following hold:
 No fuzzy matching and no other numeric offset are permitted. A matched row is
 canonicalized to the base UID and official pinned name, type and hierarchy. The
 provider alias UID and provider identity fields are excluded from digest, state,
-persistence, messages and logs. Alias/canonical collision, title ambiguity or
-mismatch, wrong type, missing base or malformed input invalidates the complete
-snapshot and produces UNKNOWN or STALE, never CLEAR.
+persistence, messages and logs. Under RC15, alias/canonical collision, title
+ambiguity or mismatch, wrong type, missing base or malformed input invalidated
+the complete snapshot and produced UNKNOWN or STALE, never CLEAR. RC16's bounded
+collision amendment is recorded below.
 
 The observed exact mappings are `5349 -> 349` (Марганець), `5351 -> 351`
 (Нікополь), `5564 -> 564` (Запоріжжя) and `6293 -> 1293` (Харків). These aliases
 do not become persisted or selectable identities; their official base records
 remain canonical. A changed catalogue hash or a different alias shape requires
-review before acceptance. RC15 currently has LOCAL evidence only; packaging,
-deployment and preflight are separate release gates.
+review before acceptance. RC15 was subsequently packaged and installed. Its one
+authorized STAGING preflight made one `active.json` request and failed closed as
+`location_uid_alias_collision / count=1`; revision 10 remained unactivated and
+bot/workers remained stopped.
+
+A separate read-only diagnostic examined one HTTP 200 snapshot containing 56
+rows. Three official bases appeared in both direct and `+5000` alias forms:
+`349/5349`, `351/5351` and `564/5564`. Each base had exactly one direct and one
+alias row. Each pair shared location type and start time and had null finish time,
+but its numeric alert IDs and update timestamps differed. No state was changed,
+and those similarities are not authoritative proof that the provider episodes
+are semantically identical.
+
+RC16 consequently does not deduplicate the pair. Independently validated direct
+and alias rows with distinct unique numeric alert IDs coexist as separate alert
+episodes on the same official base location identity. If one disappears while
+the other remains, the location remains ACTIVE. Only absence of both episodes
+can begin the existing two-successful-observation path to `CLEAR_CONFIRMED`.
+
+The canonical digest contains all accepted canonicalized rows sorted by unique
+numeric alert ID, while raw alias/direct source identity fields remain excluded.
+A duplicate provider alert ID, invalid alias, invalid direct row or any other
+invalid row rejects the complete snapshot and yields UNKNOWN or STALE, never
+CLEAR. RC16 currently has LOCAL evidence only; exact package, deployment, one
+preflight and independent live-result review remain release gates.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful
