@@ -135,7 +135,10 @@ services:
         bind:
           create_host_path: false
       - admin-state:/var/lib/time-tl-admin
-    networks: [database, metrics]
+    # A non-internal network is required for Docker to install the published
+    # admin port binding. Access remains limited by ADMIN_BIND_ADDRESS and the
+    # verified reverse proxy; PostgreSQL and metrics stay on internal networks.
+    networks: [egress, database, metrics]
 
   migrate:
     <<: *production-app

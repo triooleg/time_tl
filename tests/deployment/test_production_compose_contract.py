@@ -92,7 +92,7 @@ def test_resolved_role_environments_and_networks_are_least_privilege() -> None:
         "alert-worker": {"egress", "database"},
         "schedule-worker": {"database"},
         "sender-worker": {"egress", "database"},
-        "admin-web": {"database", "metrics"},
+        "admin-web": {"egress", "database", "metrics"},
         "migrate": {"database"},
         "production-preflight": {"egress", "database", "metrics"},
         "production-activate": {"egress", "database", "metrics"},
@@ -141,6 +141,7 @@ def test_admin_and_private_network_contract() -> None:
     assert services["admin-web"]["ports"] == [
         "${ADMIN_BIND_ADDRESS:-127.0.0.1}:${ADMIN_PORT:-8081}:8081"
     ]
+    assert "egress" in services["admin-web"]["networks"]
     assert "ports" not in services["postgres"]
     assert "ports" not in services["node-exporter"]
     assert compose["networks"]["database"] == {"internal": True}

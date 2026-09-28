@@ -64,6 +64,10 @@ The mandatory order for an approved production candidate is:
    Reject missing read-only attestation mounts, excess per-role secrets/networks, a
    non-empty staging allowlist, public PostgreSQL/node-exporter ports, or more than
    one replica for bot/alert/schedule/sender.
+   The published admin port also requires `admin-web` to retain the non-internal
+   `egress` network; Docker does not install that host binding when every attached
+   network is internal. The host bind address and reverse proxy remain the access
+   boundary.
 6. Pull the exact references, then compare the external deployed identity with the
    signed manifest before preflight. For each container, verify `docker inspect`
    `.Config.Image` is the approved `repository@sha256:...`, its `.Image` equals the
