@@ -210,6 +210,7 @@ class AlertsInUaAdapter:
             "threats",
         }
     )
+    _DIAGNOSTIC_ONLY_ALERT_FIELDS = frozenset({"calculated"})
     _REQUIRED_THREAT_FIELDS = frozenset({"threat_type", "level", "started_at"})
     _ALLOWED_THREAT_FIELDS = _REQUIRED_THREAT_FIELDS | frozenset({"source_message"})
 
@@ -428,10 +429,20 @@ class AlertsInUaAdapter:
                     "alert_fields_missing",
                     len(self._REQUIRED_ALERT_FIELDS - keys),
                 )
-            if not keys.issubset(self._ALLOWED_ALERT_FIELDS):
+            unknown_fields = keys - self._ALLOWED_ALERT_FIELDS
+            if unknown_fields:
+                if unknown_fields == self._DIAGNOSTIC_ONLY_ALERT_FIELDS:
+                    candidate_value = item["calculated"]
+                    if candidate_value is None:
+                        diagnostic_code = "alert_schema_probe_a_null"
+                    elif isinstance(candidate_value, bool):
+                        diagnostic_code = "alert_schema_probe_a_boolean"
+                    else:
+                        diagnostic_code = "alert_schema_probe_a_other"
+                    raise SnapshotValidationError(diagnostic_code)
                 raise SnapshotValidationError(
                     "alert_fields_unknown",
-                    len(keys - self._ALLOWED_ALERT_FIELDS),
+                    len(unknown_fields),
                 )
 
             alert_id = item["id"]

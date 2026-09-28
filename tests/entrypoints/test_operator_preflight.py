@@ -182,6 +182,36 @@ async def test_probe_reports_unknown_field_count_without_field_or_body_values() 
 
 
 @pytest.mark.asyncio
+async def test_probe_keeps_diagnostic_only_alert_field_fail_closed_and_redacted() -> None:
+    payload = json.loads(full_body())
+    payload["alerts"][0]["calculated"] = "private-value-must-not-leak"
+
+    class DiagnosticCandidateTransport:
+        async def send(self, _request: object) -> HttpResponse:
+            return HttpResponse(
+                200,
+                {"Last-Modified": MARKER},
+                json.dumps(payload).encode(),
+            )
+
+    with pytest.raises(OperatorPreflightError, match="full-snapshot") as captured:
+        await probe_candidate(
+            candidate(),
+            123,
+            bot_factory=FakeBot,
+            transport_factory=DiagnosticCandidateTransport,
+        )
+
+    message = str(captured.value)
+    assert "kind=INVALID_RESPONSE code=alert_schema_probe_a_other count=1" in message
+    assert "calculated" not in message
+    assert "private-value-must-not-leak" not in message
+    assert "123" not in message
+    assert "telegram-secret" not in message
+    assert "alerts-secret" not in message
+
+
+@pytest.mark.asyncio
 async def test_probe_rejects_malformed_official_metadata_without_leaking_value() -> None:
     payload = json.loads(full_body())
     payload["meta"]["last_updated_at"] = "private-invalid-timestamp"

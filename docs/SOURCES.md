@@ -44,6 +44,16 @@ invalid disclaimers invalidate the entire snapshot. These failures use bounded,
 redacted diagnostics and move affected alert state to `UNKNOWN`/`STALE`; they
 never synthesize `CLEAR_CONFIRMED`.
 
+The current official API schema does not document an alert-row field named
+`calculated`. The official Python SDK reads that field, but its public source
+does not establish a documented wire type or safety semantics for it. This is a
+source-contract discrepancy, not permission to broaden the accepted schema.
+RC9 therefore does **not** accept `calculated`: any response containing it remains
+`INVALID_RESPONSE` and follows the existing fail-closed `UNKNOWN`/`STALE` path.
+The RC9 change is diagnostic-only and emits only a fixed opaque category for the
+observed value (`null`, `boolean` or `other`); it does not treat the value as alert
+state, accept the row, or expose the value itself in diagnostics.
+
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful
 observations without an applicable episode before `CLEAR_CONFIRMED`. A valid

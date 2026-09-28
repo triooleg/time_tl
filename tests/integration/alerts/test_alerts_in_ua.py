@@ -356,6 +356,49 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("must-not-leak", summary)
         self.assertNotIn("1903", summary)
 
+    async def test_diagnostic_only_alert_field_categories_never_create_snapshot(self):
+        samples = (
+            (None, "alert_schema_probe_a_null"),
+            (True, "alert_schema_probe_a_boolean"),
+            ("private-value-must-not-leak", "alert_schema_probe_a_other"),
+        )
+
+        for value, code in samples:
+            with self.subTest(code=code):
+                payload = active()
+                payload["alerts"][0]["calculated"] = value
+                result = await adapter(
+                    Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
+                ).fetch(fetch_revision=1, last_modified=None)
+
+                self.assertIsNone(result.snapshot)
+                self.assertIsNotNone(result.failure)
+                self.assertEqual(code, result.diagnostic_code)
+                self.assertEqual(1, result.diagnostic_count)
+                summary = result.sanitized_failure()
+                assert summary is not None
+                self.assertNotIn("calculated", summary)
+                self.assertNotIn("private-value-must-not-leak", summary)
+                self.assertNotIn("1903", summary)
+                self.assertNotIn("secret-not-logged", summary)
+
+    async def test_diagnostic_only_field_with_another_unknown_stays_generic(self):
+        payload = active()
+        payload["alerts"][0]["calculated"] = None
+        payload["alerts"][0]["private_provider_field"] = "must-not-leak"
+        result = await adapter(
+            Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
+        ).fetch(fetch_revision=1, last_modified=None)
+
+        self.assertIsNone(result.snapshot)
+        self.assertEqual("alert_fields_unknown", result.diagnostic_code)
+        self.assertEqual(2, result.diagnostic_count)
+        summary = result.sanitized_failure()
+        assert summary is not None
+        self.assertNotIn("calculated", summary)
+        self.assertNotIn("private_provider_field", summary)
+        self.assertNotIn("must-not-leak", summary)
+
     async def test_unknown_uid_diagnostic_never_exposes_uid(self):
         private_uid = "999999"
         result = await adapter(
@@ -646,6 +689,29 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         changed = await changed_provider.fetch(fetch_revision=2, last_modified=MARKER_1)
         self.assertIsNotNone(changed.failure)
 
+    async def test_diagnostic_only_field_failure_does_not_replace_validated_baseline(self):
+        candidate = active()
+        candidate["alerts"][0]["calculated"] = False
+        transport = Transport(
+            response(200, active(), **{"Last-Modified": MARKER_1}),
+            response(200, candidate, **{"Last-Modified": MARKER_2}),
+            response(304),
+        )
+        provider = adapter(transport)
+
+        baseline = await provider.fetch(fetch_revision=1, last_modified=None)
+        rejected = await provider.fetch(fetch_revision=2, last_modified=MARKER_1)
+        unchanged = await provider.fetch(fetch_revision=3, last_modified=MARKER_1)
+
+        self.assertIsNotNone(baseline.snapshot)
+        self.assertIsNone(rejected.snapshot)
+        self.assertEqual("alert_schema_probe_a_boolean", rejected.diagnostic_code)
+        self.assertIsNotNone(unchanged.snapshot)
+        assert unchanged.snapshot is not None
+        self.assertEqual("NOT_MODIFIED_304", unchanged.snapshot.kind.value)
+        self.assertEqual(MARKER_1, unchanged.last_modified)
+        self.assertEqual(MARKER_1, transport.requests[2].headers["If-Modified-Since"])
+
     async def test_304_marker_must_match_validated_baseline(self):
         provider = adapter(
             Transport(
@@ -832,6 +898,39 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             any(
                 item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
                 for item in await self.repo.outbox()
+            )
+        )
+
+    async def test_diagnostic_only_alert_field_after_active_never_clears_or_delivers(self):
+        candidate_null = active()
+        candidate_null["alerts"][0]["calculated"] = None
+        candidate_boolean = active()
+        candidate_boolean["alerts"][0]["calculated"] = True
+        transport = Transport(
+            response(200, active(), **{"Last-Modified": MARKER_1}),
+            response(200, candidate_null, **{"Last-Modified": MARKER_2}),
+            response(200, candidate_boolean, **{"Last-Modified": MARKER_3}),
+        )
+        worker = self.worker(transport)
+
+        await worker.run_once()
+        initial_outbox = await self.repo.outbox()
+        self.assertEqual(1, len(initial_outbox))
+
+        for _ in range(2):
+            self.clock += 15
+            await worker.run_once()
+            self.assertEqual(
+                AlertState.STALE,
+                (await self.repo.snapshot_for("student-1")).state,
+            )
+
+        outbox = await self.repo.outbox()
+        self.assertEqual(initial_outbox, outbox)
+        self.assertFalse(
+            any(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in outbox
             )
         )
 

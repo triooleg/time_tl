@@ -101,18 +101,47 @@ been performed.
 ## Session Continuity
 
 Last session: 2026-09-28
-Stopped at: The explicitly approved RC8 provider-envelope compatibility patch is
-a documented LOCAL candidate. RC8 permits at most eight bounded additional
-fields inside `meta`; they are digest-only and cannot affect ACTIVE/CLEAR.
-Duplicate JSON object keys, excessive JSON depth and any metadata limit violation
-fail closed to `UNKNOWN`/`STALE` without an all-clear. Local evidence is 52 focused
-tests passed; the full suite with `D:\Projects\Time_tl_RC8\src` explicitly pinned
-passed 508 tests with five opt-in destructive PostgreSQL E2E cases skipped and one
-Starlette deprecation warning; Ruff, strict mypy for 72 source files and
-compileall passed. Independent safety re-review returned PASS for the patch scope.
-Documentation and the exact local packet
-`time-tl-staging-20260928-rc8-bounded-meta` are complete. No server, provider,
-Telegram, push or deployment action was performed; current STAGING remains RC6.
-G3 is PASS for the LOCAL patch scope only, G4 is PASS for the non-destructive
-local suite with E2E skips, and G6-G9 were not advanced.
+Stopped at: The exact RC8 packet
+`time-tl-staging-20260928-rc8-bounded-meta`, commit
+`eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
+`bb44f8aa79b8d52518f3e369367d8adc6a9667d95e66d8558ad792d918bf03fe`,
+was authorized for a bot/admin-only install plus one safe preflight, with workers
+and Telegram required to remain disabled. Server archive identity matched. The
+actual pre-change baseline was RC7 (`sha256:ccf9eb` prefix), not the previously
+documented RC6. Fresh backup and rollback were verified, and the unchanged
+Compose hash has prefix `b00192a`.
+
+RC8 image prefix `sha256:b31fc47c` is installed. `admin-web` is healthy; `bot` is
+stopped/exited; `alert-worker`, `schedule-worker` and `sender-worker` are
+Created/stopped. The database remains at `0006_outbox_terminal_retention`; no
+migration ran.
+
+The executed deployment verdict is `REJECTED`. ACTIVE database owner revision 6
+overrode environment settings and selected live Telegram transport. The bot
+polled Telegram from `08:27:11Z` to `08:31:24Z` (approximately 4 minutes 13
+seconds) before containment. Handled updates, Telegram send markers and delivered
+outbox messages were all zero. There is no evidence of messages, but continuous
+disablement cannot be claimed. No provider call or preflight occurred. Pending
+revision 9 is production-scoped and is blocked by the STAGING-only preflight;
+owner audit entries from the operation are zero.
+
+Current server status is `HOLD` only while the bot and all three workers remain
+stopped. G6-G9 were not advanced. Pending owner revision 10 now exists while
+ACTIVE revision remains 6. Its first read-only preflight failed with a generic
+result; no second preflight has been performed and activation remains blocked.
+
+A separate diagnostic-only RC9 local candidate is intended for tag
+`time-tl-staging-20260928-rc9-alert-field-diag`. The official API schema omits
+`calculated`, while the official Python SDK reads it without documenting its
+wire type or safety semantics. RC9 does not accept this field: a containing
+response remains `INVALID_RESPONSE` and fails closed. It adds only fixed opaque
+`null`/`boolean`/`other` diagnostic categories and does not expose or use the
+field value for alert state.
+
+RC9 local evidence: 57 focused tests passed; the full suite passed 513 tests with
+five opt-in destructive PostgreSQL E2E skips and one Starlette warning; Ruff,
+strict mypy for 72 source files, compileall and diff checks passed. Independent
+safety review passed for the diagnostic-only scope. RC9 has not been deployed or
+used for a second preflight. Its local evidence does not authorize package
+transfer, activation, canary, bot or worker startup, or messages.
 Resume file: none.
