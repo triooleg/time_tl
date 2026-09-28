@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
+import json
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import SecretStr
 
+from time_tl.admin.settings import OwnerSettingsConflictError
 from time_tl.config import (
+    AdminBackend,
     AlertProvider,
     Environment,
+    OwnerConfigSource,
     Settings,
     TelegramTransport,
 )
@@ -24,15 +31,23 @@ from time_tl.infrastructure.alerts import (
     HttpResponse,
     OblastAlertsInUaAdapter,
 )
-from time_tl.runtime import region_registry_full
+from time_tl.runtime import production_release, region_registry_full
 from time_tl.runtime.contracts import (
     PRODUCTION_PUBLIC_RELEASE_APPROVED,
     PRODUCTION_RELEASE_MANIFEST,
+    ProductionReleaseManifest,
     RuntimeCapabilities,
     RuntimeContractError,
+    validate_production_release_manifest,
     validate_runtime_contract,
 )
 from time_tl.runtime.local_alerts import JsonAlertRepository
+from time_tl.runtime.production_release import (
+    ProductionRuntimeGate,
+    load_verified_release_attestation,
+    production_preflight_correlation,
+    validate_production_runtime_release,
+)
 from time_tl.runtime.region_registry_full import load_catalog
 from time_tl.runtime.regions import (
     OBLAST_REGION_IDS,
@@ -49,8 +64,12 @@ from time_tl.runtime.services import (
     _run_postgres_alert_worker,
     _serve_sender_singleton,
     _serve_worker,
+    activate_owner_settings,
+    activate_production_owner_settings,
     build_alert_worker,
     postgres_bot_dependencies,
+    resolve_owner_runtime_settings,
+    run_admin_web_service,
     run_alert_worker,
     run_bot,
     run_inert_worker,
@@ -88,6 +107,22 @@ def settings_for(
         ),
         ADMIN_COOKIE_SECURE=True,
         _env_file=None,
+    )
+
+
+def production_release_manifest() -> ProductionReleaseManifest:
+    return ProductionReleaseManifest(
+        tag="time-tl-production-20260928",
+        commit_sha="a" * 40,
+        tree_sha="b" * 40,
+        archive_sha256="c" * 64,
+        image_digest="sha256:" + "d" * 64,
+        config_revision=5,
+        provider="alerts.in.ua/full-territory",
+        catalog_sha256=region_registry_full.EXPECTED_SHA256,
+        migration_head="0006_outbox_terminal_retention",
+        replicas=1,
+        territory_selection="manual-oblast-raion-hromada",
     )
 
 
@@ -256,7 +291,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             environment=Environment.PRODUCTION,
             telegram=TelegramTransport.LIVE,
         )
-        with self.assertRaisesRegex(RuntimeContractError, "production manual-territory bot"):
+        with self.assertRaisesRegex(RuntimeContractError, "database-managed owner config"):
             await run_bot(settings)
 
     def test_staging_manual_region_bot_contract_is_released(self) -> None:
@@ -553,6 +588,376 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             "manual-oblast-raion-hromada",
             PRODUCTION_RELEASE_MANIFEST["territory_selection"],
         )
+        self.assertEqual(
+            region_registry_full.EXPECTED_SHA256,
+            PRODUCTION_RELEASE_MANIFEST["catalog_sha256"],
+        )
+        self.assertEqual(
+            "0006_outbox_terminal_retention",
+            PRODUCTION_RELEASE_MANIFEST["migration_head"],
+        )
+        with self.assertRaisesRegex(RuntimeContractError, "verification key is not compiled"):
+            load_verified_release_attestation(
+                expected_config_revision=5,
+                read_manifest_bytes=lambda: b"{}",
+                read_signature_bytes=lambda: base64.b64encode(b"x" * 64),
+            )
+
+    def test_detached_ed25519_attestation_authenticates_release_after_build(self) -> None:
+        manifest = production_release_manifest()
+        payload = json.dumps(asdict(manifest), sort_keys=True, separators=(",", ":")).encode()
+        private_key = Ed25519PrivateKey.generate()
+        public_key_hex = private_key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        ).hex()
+        signature = base64.b64encode(private_key.sign(payload))
+        with patch(
+            "time_tl.runtime.production_release.PRODUCTION_RELEASE_PUBLIC_KEY_HEX",
+            public_key_hex,
+        ):
+            verified, fingerprint = load_verified_release_attestation(
+                expected_config_revision=5,
+                read_manifest_bytes=lambda: payload,
+                read_signature_bytes=lambda: signature,
+            )
+            self.assertEqual(manifest, verified)
+            self.assertEqual(manifest.fingerprint(), fingerprint)
+            with self.assertRaisesRegex(RuntimeContractError, "signature verification failed"):
+                load_verified_release_attestation(
+                    expected_config_revision=5,
+                    read_manifest_bytes=lambda: payload.replace(b'"replicas":1', b'"replicas":2'),
+                    read_signature_bytes=lambda: signature,
+                )
+            malformed_payload = payload[:-1] + b',"unexpected":true}'
+            malformed_signature = base64.b64encode(private_key.sign(malformed_payload))
+            with self.assertRaisesRegex(RuntimeContractError, "unexpected fields"):
+                load_verified_release_attestation(
+                    expected_config_revision=5,
+                    read_manifest_bytes=lambda: malformed_payload,
+                    read_signature_bytes=lambda: malformed_signature,
+                )
+        source = inspect.getsource(production_release)
+        self.assertNotIn("Ed25519PrivateKey", source)
+        self.assertIn("external deployment/canary gate", source)
+        correlation = production_preflight_correlation(5, "a" * 64)
+        self.assertEqual(f"production-preflight-v1-r5-{'a' * 64}", correlation)
+
+    async def test_production_runtime_gate_uses_one_atomic_active_payload(
+        self,
+    ) -> None:
+        settings = settings_for("bot", environment=Environment.PRODUCTION).model_copy(
+            update={
+                "owner_config_source": OwnerConfigSource.DATABASE,
+                "owner_config_revision": None,
+            }
+        )
+        manifest = production_release_manifest()
+        active = {
+            "revision": 5,
+            "environment": "production",
+            "alert_provider": "alerts_in_ua",
+            "telegram_transport": "live",
+            "staging_allowlist": [],
+        }
+        with (
+            patch(
+                "time_tl.runtime.production_release.load_verified_release_attestation",
+                return_value=(manifest, manifest.fingerprint()),
+            ),
+            patch(
+                "time_tl.runtime.production_release._read_atomic_runtime_facts",
+                AsyncMock(
+                    return_value=(
+                        ["0006_outbox_terminal_retention"],
+                        {"active_revision": 5},
+                        active,
+                    )
+                ),
+            ) as facts,
+        ):
+            gate = await validate_production_runtime_release(settings)
+
+        assert gate is not None
+        self.assertEqual(manifest.fingerprint(), gate.manifest_fingerprint)
+        self.assertIs(active, gate.active_payload)
+        facts.assert_awaited_once_with(settings)
+
+    def test_atomic_runtime_fact_reader_uses_one_statement_for_all_release_facts(self) -> None:
+        source = inspect.getsource(production_release._read_atomic_runtime_facts)
+
+        self.assertEqual(1, source.count("connection.execute("))
+        self.assertIn("alembic_version", source)
+        self.assertIn("owner_configuration_state", source)
+        self.assertIn("owner_configuration_active", source)
+
+    async def test_production_resolves_returned_active_payload_without_second_db_read(
+        self,
+    ) -> None:
+        settings = settings_for("schedule-worker", environment=Environment.PRODUCTION).model_copy(
+            update={
+                "owner_config_source": OwnerConfigSource.DATABASE,
+                "owner_config_revision": None,
+            }
+        )
+        manifest = production_release_manifest()
+        payload = {
+            "revision": 5,
+            "environment": "production",
+            "alert_provider": "alerts_in_ua",
+            "telegram_transport": "live",
+            "poll_interval_seconds": 30,
+            "stale_after_seconds": 120,
+            "staging_allowlist": [],
+            "telegram_token_ciphertext": "opaque-present",
+            "alerts_in_ua_token_ciphertext": "opaque-present",
+            "onboarding_text": "Safe onboarding",
+        }
+        gate = ProductionRuntimeGate(manifest, manifest.fingerprint(), payload)
+        create_engine = Mock(side_effect=AssertionError("second ACTIVE read is forbidden"))
+        with patch("time_tl.infrastructure.db.engine.create_engine", create_engine):
+            resolved = await resolve_owner_runtime_settings(
+                settings,
+                production_gate=gate,
+            )
+
+        create_engine.assert_not_called()
+        self.assertEqual(5, resolved.owner_config_revision)
+        self.assertEqual(30, resolved.alert_poll_interval_seconds)
+        self.assertEqual(120, resolved.alert_stale_after_seconds)
+
+    async def test_production_runtime_rejects_environment_owner_config_before_db_io(self) -> None:
+        settings = settings_for("bot", environment=Environment.PRODUCTION)
+        facts = AsyncMock()
+        with (
+            patch("time_tl.runtime.production_release._read_atomic_runtime_facts", facts),
+            self.assertRaisesRegex(RuntimeContractError, "database-managed owner config"),
+        ):
+            await validate_production_runtime_release(settings)
+        facts.assert_not_awaited()
+
+    async def test_each_production_async_role_hits_release_gate_before_composition(self) -> None:
+        gate = AsyncMock(side_effect=RuntimeContractError("release gate closed"))
+        owner_settings = AsyncMock()
+        for role, runner in (
+            ("alert-worker", run_alert_worker),
+            ("bot", run_bot),
+            ("schedule-worker", run_schedule_worker),
+            ("sender-worker", run_sender_worker),
+        ):
+            gate.reset_mock()
+            owner_settings.reset_mock()
+            settings = settings_for(role, environment=Environment.PRODUCTION)
+            with (
+                self.subTest(role=role),
+                patch(
+                    "time_tl.runtime.production_release.validate_production_runtime_release",
+                    gate,
+                ),
+                patch(
+                    "time_tl.runtime.services.resolve_owner_runtime_settings",
+                    owner_settings,
+                ),
+                self.assertRaisesRegex(RuntimeContractError, "release gate closed"),
+            ):
+                await runner(settings)
+            gate.assert_awaited_once_with(settings)
+            owner_settings.assert_not_awaited()
+
+    def test_production_admin_hits_release_gate_before_web_or_database_composition(self) -> None:
+        settings = Settings(
+            TIME_TL_ENV=Environment.PRODUCTION,
+            SERVICE_ROLE="admin-web",
+            DATABASE_URL=SecretStr("postgresql+asyncpg://user:pass@postgres/time_tl"),
+            ADMIN_BACKEND="postgres",
+            ADMIN_IP_HASH_KEY=SecretStr("x" * 32),
+            HOST_METRICS_URL="http://node-exporter:9100/metrics",
+            ADMIN_BOOTSTRAP_ARTIFACT_PATH="/run/secrets/admin-bootstrap",
+            _env_file=None,
+        )
+        gate = AsyncMock(side_effect=RuntimeContractError("release gate closed"))
+        repository = Mock()
+        with (
+            patch(
+                "time_tl.runtime.production_release.validate_production_runtime_release",
+                gate,
+            ),
+            patch("time_tl.runtime.services._postgres_admin_repository", repository),
+            self.assertRaisesRegex(RuntimeContractError, "release gate closed"),
+        ):
+            run_admin_web_service(settings)
+        gate.assert_awaited_once_with(settings)
+        repository.assert_not_called()
+
+    async def test_generic_activation_refuses_production_before_database_io(self) -> None:
+        settings = settings_for("bot", environment=Environment.PRODUCTION)
+        repository = Mock()
+        with (
+            patch("time_tl.runtime.services._postgres_admin_repository", repository),
+            self.assertRaisesRegex(RuntimeContractError, "exact production activation path"),
+        ):
+            await activate_owner_settings(settings, 5, "any-nonempty-evidence")
+        repository.assert_not_called()
+
+    async def test_production_activation_preflight_failure_never_opens_activation_db(self) -> None:
+        key = SecretStr("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+        settings = settings_for("bot", environment=Environment.PRODUCTION).model_copy(
+            update={
+                "admin_backend": AdminBackend.POSTGRES,
+                "owner_config_source": OwnerConfigSource.DATABASE,
+                "owner_telegram_fernet_key": key,
+                "owner_alerts_fernet_key": key,
+            }
+        )
+        repository = Mock()
+        preflight = AsyncMock(side_effect=RuntimeContractError("preflight failed"))
+        with (
+            patch(
+                "time_tl.entrypoints.operator_preflight.preflight_production_owner_settings",
+                preflight,
+            ),
+            patch("time_tl.runtime.services._postgres_admin_repository", repository),
+            self.assertRaisesRegex(RuntimeContractError, "preflight failed"),
+        ):
+            await activate_production_owner_settings(settings, 5)
+        preflight.assert_awaited_once_with(settings, 5)
+        repository.assert_not_called()
+
+    async def test_production_activation_runs_preflight_then_atomically_marks_exact_candidate(
+        self,
+    ) -> None:
+        key = SecretStr("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+        settings = settings_for("bot", environment=Environment.PRODUCTION).model_copy(
+            update={
+                "admin_backend": AdminBackend.POSTGRES,
+                "owner_config_source": OwnerConfigSource.DATABASE,
+                "owner_telegram_fernet_key": key,
+                "owner_alerts_fernet_key": key,
+            }
+        )
+        manifest = production_release_manifest()
+        correlation = production_preflight_correlation(5, manifest.fingerprint())
+        engine = AsyncMock()
+        candidate = SimpleNamespace(
+            environment="production",
+            revision=5,
+            alert_provider="alerts_in_ua",
+            telegram_transport="live",
+            staging_allowlist=(),
+        )
+        service = AsyncMock()
+        service.activation_candidate.return_value = candidate
+        service_type = Mock(return_value=service)
+        evidence = SimpleNamespace(
+            release_manifest_sha256=manifest.fingerprint(),
+            host_metrics_ok=True,
+            covered_region_count=1622,
+            allowlist_count=0,
+        )
+        order: list[str] = []
+
+        async def run_preflight(*_args: object) -> object:
+            order.append("preflight")
+            return evidence
+
+        async def mark_active(*_args: object, **_kwargs: object) -> None:
+            order.append("mark_active")
+
+        preflight = AsyncMock(side_effect=run_preflight)
+        service.mark_active.side_effect = mark_active
+
+        def repository_factory(_settings: Settings) -> tuple[AsyncMock, object]:
+            order.append("activation_repository")
+            return engine, object()
+
+        with (
+            patch(
+                "time_tl.entrypoints.operator_preflight.preflight_production_owner_settings",
+                preflight,
+            ),
+            patch(
+                "time_tl.runtime.services._postgres_admin_repository",
+                side_effect=repository_factory,
+            ),
+            patch("time_tl.admin.settings.OwnerSettingsService", service_type),
+        ):
+            await activate_production_owner_settings(settings, 5)
+
+        preflight.assert_awaited_once_with(settings, 5)
+        self.assertEqual(["preflight", "activation_repository", "mark_active"], order)
+        service.mark_active.assert_awaited_once_with(
+            5,
+            "operator",
+            correlation,
+            {
+                "check_profile": "production-exact-release-v1",
+                "covered_region_count": 1622,
+                "allowlist_count": 0,
+            },
+        )
+        engine.dispose.assert_awaited_once()
+
+    async def test_production_activation_race_fails_closed_after_successful_preflight(self) -> None:
+        key = SecretStr("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+        settings = settings_for("bot", environment=Environment.PRODUCTION).model_copy(
+            update={
+                "admin_backend": AdminBackend.POSTGRES,
+                "owner_config_source": OwnerConfigSource.DATABASE,
+                "owner_telegram_fernet_key": key,
+                "owner_alerts_fernet_key": key,
+            }
+        )
+        manifest = production_release_manifest()
+        evidence = SimpleNamespace(
+            release_manifest_sha256=manifest.fingerprint(),
+            host_metrics_ok=True,
+            covered_region_count=1622,
+            allowlist_count=0,
+        )
+        preflight = AsyncMock(return_value=evidence)
+        engine = AsyncMock()
+        service = AsyncMock()
+        service.mark_active.side_effect = OwnerSettingsConflictError("revision changed")
+        with (
+            patch(
+                "time_tl.entrypoints.operator_preflight.preflight_production_owner_settings",
+                preflight,
+            ),
+            patch(
+                "time_tl.runtime.services._postgres_admin_repository",
+                return_value=(engine, object()),
+            ),
+            patch("time_tl.admin.settings.OwnerSettingsService", return_value=service),
+            self.assertRaisesRegex(OwnerSettingsConflictError, "revision changed"),
+        ):
+            await activate_production_owner_settings(settings, 5)
+
+        preflight.assert_awaited_once_with(settings, 5)
+        service.mark_active.assert_awaited_once()
+        engine.dispose.assert_awaited_once()
+
+    def test_production_manifest_rejects_policy_mismatches(self) -> None:
+        manifest = production_release_manifest()
+        samples = (
+            (replace(manifest, config_revision=6), 5, "config revision mismatch"),
+            (replace(manifest, provider="fake"), 5, "provider mismatch"),
+            (replace(manifest, catalog_sha256="e" * 64), 5, "catalogue mismatch"),
+            (replace(manifest, migration_head="0005"), 5, "migration head mismatch"),
+            (replace(manifest, replicas=2), 5, "exactly one replica"),
+            (
+                replace(manifest, territory_selection="oblast-only"),
+                5,
+                "territory selection mismatch",
+            ),
+        )
+        for candidate_manifest, revision, message in samples:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                RuntimeContractError, message
+            ):
+                validate_production_release_manifest(
+                    candidate_manifest,
+                    expected_config_revision=revision,
+                )
 
     def test_inbound_allowlist_is_staging_only(self) -> None:
         staging = settings_for(

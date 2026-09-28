@@ -30,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
             "bootstrap-admin",
             "preflight-owner-settings",
             "activate-owner-settings",
+            "preflight-production-owner-settings",
+            "activate-production-owner-settings",
             "import-territories",
             "activate-territories",
         ],
@@ -67,6 +69,17 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         asyncio.run(activate_owner_settings(settings, args.revision, args.evidence))
         return
+    if args.service == "activate-production-owner-settings":
+        if args.revision is None:
+            raise SystemExit("production activation requires --revision")
+        if args.evidence is not None or args.approved_chat_id is not None:
+            raise SystemExit(
+                "production activation does not accept --evidence or --approved-chat-id"
+            )
+        from time_tl.runtime.services import activate_production_owner_settings
+
+        asyncio.run(activate_production_owner_settings(settings, args.revision))
+        return
     if args.service == "preflight-owner-settings":
         if args.revision is None or args.approved_chat_id is None:
             raise SystemExit("preflight requires --revision and --approved-chat-id")
@@ -74,6 +87,19 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         evidence = asyncio.run(
             preflight_owner_settings(settings, args.revision, args.approved_chat_id)
+        )
+        print(evidence.sanitized_summary())
+        return
+    if args.service == "preflight-production-owner-settings":
+        if args.revision is None:
+            raise SystemExit("production preflight requires --revision")
+        if args.approved_chat_id is not None:
+            raise SystemExit("production preflight does not accept --approved-chat-id")
+        from time_tl.entrypoints.operator_preflight import (
+            preflight_production_owner_settings,
+        )
+        evidence = asyncio.run(
+            preflight_production_owner_settings(settings, args.revision)
         )
         print(evidence.sanitized_summary())
         return

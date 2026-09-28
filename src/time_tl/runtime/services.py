@@ -204,7 +204,9 @@ def build_alert_worker(settings: Settings) -> AlertWorker:
     )
 
 
-async def resolve_owner_runtime_settings(settings: Settings) -> Settings:
+async def resolve_owner_runtime_settings(
+    settings: Settings, *, production_gate: Any | None = None
+) -> Settings:
     """Load only an operator-activated DB version, otherwise preserve env settings.
 
     Any missing row, wrong key, target-environment mismatch or invalid active
@@ -212,7 +214,12 @@ async def resolve_owner_runtime_settings(settings: Settings) -> Settings:
     token when database management was explicitly selected.
     """
 
-    if settings.owner_config_source is OwnerConfigSource.ENVIRONMENT:
+    if settings.environment is Environment.PRODUCTION and production_gate is None:
+        raise RuntimeContractError("production runtime requires trusted ACTIVE configuration")
+    if (
+        settings.owner_config_source is OwnerConfigSource.ENVIRONMENT
+        and settings.environment is not Environment.PRODUCTION
+    ):
         return settings
     if settings.service_role not in {
         "bot",
@@ -233,31 +240,50 @@ async def resolve_owner_runtime_settings(settings: Settings) -> Settings:
     )
 
     from time_tl.admin.settings import OwnerSettingsService
-    from time_tl.infrastructure.db.admin import AsyncPostgresAdminRepository
-    from time_tl.infrastructure.db.engine import create_engine, create_session_factory
-
-    engine = create_engine(settings.database_url.get_secret_value())
-    repository = AsyncPostgresAdminRepository(
-        create_session_factory(engine),
-        ip_hash_key=(
-            settings.admin_ip_hash_key.get_secret_value().encode("utf-8")
-            if settings.admin_ip_hash_key is not None
-            else b"runtime-reader-does-not-hash-client-addresses"
-        ),
-    )
-    service = OwnerSettingsService(
-        repository,
-        telegram_key,
-        alerts_key,
-        default_poll=settings.alert_poll_interval_seconds,
-        default_stale=settings.alert_stale_after_seconds,
-    )
-    try:
-        candidate = await service.active_runtime_config(
-            settings.environment.value, settings.service_role
+    if production_gate is not None:
+        service = OwnerSettingsService(
+            cast(Any, None),
+            telegram_key,
+            alerts_key,
+            default_poll=settings.alert_poll_interval_seconds,
+            default_stale=settings.alert_stale_after_seconds,
         )
-    finally:
-        await engine.dispose()
+        payload = production_gate.active_payload
+        if str(payload.get("environment")) != Environment.PRODUCTION.value:
+            raise RuntimeContractError("production ACTIVE configuration targets wrong environment")
+        if service._issues(payload):
+            raise RuntimeContractError("production ACTIVE configuration is invalid")
+        candidate = service._candidate(
+            payload,
+            production_gate.manifest.config_revision,
+            settings.service_role,
+        )
+    else:
+        from time_tl.infrastructure.db.admin import AsyncPostgresAdminRepository
+        from time_tl.infrastructure.db.engine import create_engine, create_session_factory
+
+        engine = create_engine(settings.database_url.get_secret_value())
+        repository = AsyncPostgresAdminRepository(
+            create_session_factory(engine),
+            ip_hash_key=(
+                settings.admin_ip_hash_key.get_secret_value().encode("utf-8")
+                if settings.admin_ip_hash_key is not None
+                else b"runtime-reader-does-not-hash-client-addresses"
+            ),
+        )
+        service = OwnerSettingsService(
+            repository,
+            telegram_key,
+            alerts_key,
+            default_poll=settings.alert_poll_interval_seconds,
+            default_stale=settings.alert_stale_after_seconds,
+        )
+        try:
+            candidate = await service.active_runtime_config(
+                settings.environment.value, settings.service_role
+            )
+        finally:
+            await engine.dispose()
 
     values = settings.model_dump(by_alias=True)
     values.update(
@@ -275,7 +301,12 @@ async def resolve_owner_runtime_settings(settings: Settings) -> Settings:
             "OWNER_CONFIG_REVISION": candidate.revision,
         }
     )
-    return Settings.model_validate(values)
+    resolved = Settings.model_validate(values)
+    if production_gate is not None and (
+        resolved.owner_config_revision != production_gate.manifest.config_revision
+    ):
+        raise RuntimeContractError("production resolved config revision mismatch")
+    return resolved
 
 
 async def _heartbeat_loop(
@@ -373,6 +404,9 @@ async def _worker_must_not_exit(worker: AlertWorker) -> None:
 
 
 async def run_alert_worker(settings: Settings) -> None:
+    from .production_release import validate_production_runtime_release
+
+    production_gate = await validate_production_runtime_release(settings)
     if (
         settings.environment not in {Environment.LOCAL, Environment.SIMULATION}
         and not region_registry_full.ACTIVE_JSON_WIRE_RUNTIME
@@ -380,7 +414,7 @@ async def run_alert_worker(settings: Settings) -> None:
         raise RuntimeContractError(
             "active.json full-territory alert runtime wiring is disabled"
         )
-    settings = await resolve_owner_runtime_settings(settings)
+    settings = await resolve_owner_runtime_settings(settings, production_gate=production_gate)
     validate_runtime_contract(settings, "alert-worker")
     if settings.environment in {Environment.LOCAL, Environment.SIMULATION}:
         await _serve_worker(build_alert_worker(settings), settings)
@@ -585,7 +619,10 @@ async def postgres_bot_dependencies(
 
 
 async def run_bot(settings: Settings) -> None:
-    settings = await resolve_owner_runtime_settings(settings)
+    from .production_release import validate_production_runtime_release
+
+    production_gate = await validate_production_runtime_release(settings)
+    settings = await resolve_owner_runtime_settings(settings, production_gate=production_gate)
     validate_runtime_contract(settings, "bot")
     if settings.telegram_transport is TelegramTransport.DISABLED:
         if settings.environment not in {Environment.LOCAL, Environment.SIMULATION}:
@@ -671,6 +708,10 @@ def _postgres_admin_repository(settings: Settings) -> tuple[Any, Any]:
 
 
 def run_admin_web_service(settings: Settings) -> None:
+    if settings.environment is Environment.PRODUCTION:
+        from .production_release import validate_production_runtime_release
+
+        asyncio.run(validate_production_runtime_release(settings))
     validate_runtime_contract(settings, "admin-web")
     if settings.admin_backend is AdminBackend.LOCAL_SQLITE:
         from time_tl.admin.app import run_admin_web
@@ -751,6 +792,10 @@ def run_admin_bootstrap(settings: Settings, output: str) -> None:
 async def activate_owner_settings(settings: Settings, revision: int, evidence_id: str) -> None:
     """Operator-only activation gate used after review and exact-version approval."""
 
+    if settings.environment is Environment.PRODUCTION:
+        raise RuntimeContractError(
+            "production activation requires the exact production activation path"
+        )
     if settings.admin_backend is not AdminBackend.POSTGRES:
         raise RuntimeContractError("owner settings activation requires PostgreSQL admin backend")
     if settings.owner_telegram_fernet_key is None or settings.owner_alerts_fernet_key is None:
@@ -776,6 +821,57 @@ async def activate_owner_settings(settings: Settings, revision: int, evidence_id
         await engine.dispose()
 
 
+async def activate_production_owner_settings(
+    settings: Settings, revision: int
+) -> None:
+    """Run full production preflight, then atomically activate that exact revision."""
+
+    if settings.environment is not Environment.PRODUCTION:
+        raise RuntimeContractError("production activation requires production environment")
+    if settings.admin_backend is not AdminBackend.POSTGRES:
+        raise RuntimeContractError("production activation requires PostgreSQL admin backend")
+    if settings.owner_config_source is not OwnerConfigSource.DATABASE:
+        raise RuntimeContractError("production activation requires database-managed owner config")
+    if settings.test_chat_allowlist:
+        raise RuntimeContractError("production activation requires empty STAGING allowlist")
+    if settings.owner_telegram_fernet_key is None or settings.owner_alerts_fernet_key is None:
+        raise RuntimeContractError("production activation requires both encryption keys")
+
+    from time_tl.admin.settings import OwnerSettingsService
+    from time_tl.entrypoints.operator_preflight import preflight_production_owner_settings
+
+    from .production_release import production_preflight_correlation
+
+    evidence = await preflight_production_owner_settings(settings, revision)
+    if evidence.release_manifest_sha256 is None or not evidence.host_metrics_ok:
+        raise RuntimeContractError("production preflight evidence is incomplete")
+    correlation_id = production_preflight_correlation(
+        revision, evidence.release_manifest_sha256
+    )
+
+    engine, repository = _postgres_admin_repository(settings)
+    service = OwnerSettingsService(
+        repository,
+        settings.owner_telegram_fernet_key.get_secret_value(),
+        settings.owner_alerts_fernet_key.get_secret_value(),
+        default_poll=settings.alert_poll_interval_seconds,
+        default_stale=settings.alert_stale_after_seconds,
+    )
+    try:
+        await service.mark_active(
+            revision,
+            "operator",
+            correlation_id,
+            {
+                "check_profile": "production-exact-release-v1",
+                "covered_region_count": evidence.covered_region_count,
+                "allowlist_count": evidence.allowlist_count,
+            },
+        )
+    finally:
+        await engine.dispose()
+
+
 async def _assert_territory_runtime_ready(factory: Any) -> str:
     """Shared production startup gate; no health/polling loop starts before it passes."""
 
@@ -794,7 +890,10 @@ async def _assert_territory_runtime_ready(factory: Any) -> str:
 
 async def run_schedule_worker(settings: Settings) -> None:
     """Prepared production loop; capability gate remains closed pending release approval."""
-    settings = await resolve_owner_runtime_settings(settings)
+    from .production_release import validate_production_runtime_release
+
+    production_gate = await validate_production_runtime_release(settings)
+    settings = await resolve_owner_runtime_settings(settings, production_gate=production_gate)
     validate_runtime_contract(settings, "schedule-worker")
     if settings.environment in {Environment.LOCAL, Environment.SIMULATION}:
         await run_inert_worker(settings, "schedule-worker")
@@ -863,7 +962,10 @@ async def _serve_sender_singleton(lease: Any, serve: Any) -> None:
 
 async def run_sender_worker(settings: Settings) -> None:
     """Prepared production delivery loop; gate prevents unapproved live sends."""
-    settings = await resolve_owner_runtime_settings(settings)
+    from .production_release import validate_production_runtime_release
+
+    production_gate = await validate_production_runtime_release(settings)
+    settings = await resolve_owner_runtime_settings(settings, production_gate=production_gate)
     validate_runtime_contract(settings, "sender-worker")
     if settings.environment in {Environment.LOCAL, Environment.SIMULATION}:
         await run_inert_worker(settings, "sender-worker")

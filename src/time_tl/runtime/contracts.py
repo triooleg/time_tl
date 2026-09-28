@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import re
+from dataclasses import asdict, dataclass
+from hashlib import sha256
 
 from time_tl.config import (
     AdminBackend,
@@ -11,6 +14,7 @@ from time_tl.config import (
     Settings,
     TelegramTransport,
 )
+from time_tl.runtime.region_registry_full import EXPECTED_SHA256
 
 
 class RuntimeContractError(RuntimeError):
@@ -23,8 +27,71 @@ PRODUCTION_PUBLIC_RELEASE_APPROVED = False
 PRODUCTION_RELEASE_MANIFEST = {
     "provider": "alerts.in.ua/full-territory",
     "territory_selection": "manual-oblast-raion-hromada",
+    "catalog_sha256": EXPECTED_SHA256,
+    "migration_head": "0006_outbox_terminal_retention",
     "replicas": 1,
 }
+
+_GIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+_TAG_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,127}\Z")
+
+
+@dataclass(frozen=True)
+class ProductionReleaseManifest:
+    tag: str
+    commit_sha: str
+    tree_sha: str
+    archive_sha256: str
+    image_digest: str
+    config_revision: int
+    provider: str
+    catalog_sha256: str
+    migration_head: str
+    replicas: int
+    territory_selection: str
+
+    def fingerprint(self) -> str:
+        payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":")).encode()
+        return sha256(payload).hexdigest()
+
+
+def validate_production_release_manifest(
+    manifest: ProductionReleaseManifest,
+    *,
+    expected_config_revision: int,
+) -> str:
+    """Validate signed release metadata and immutable production policy."""
+
+    if not _TAG_PATTERN.fullmatch(manifest.tag):
+        raise RuntimeContractError("production release manifest tag is invalid")
+    if not _GIT_SHA_PATTERN.fullmatch(manifest.commit_sha):
+        raise RuntimeContractError("production release manifest commit is invalid")
+    if not _GIT_SHA_PATTERN.fullmatch(manifest.tree_sha):
+        raise RuntimeContractError("production release manifest tree is invalid")
+    if not _SHA256_PATTERN.fullmatch(manifest.archive_sha256):
+        raise RuntimeContractError("production release manifest archive digest is invalid")
+    if not manifest.image_digest.startswith("sha256:") or not _SHA256_PATTERN.fullmatch(
+        manifest.image_digest.removeprefix("sha256:")
+    ):
+        raise RuntimeContractError("production release manifest image digest is invalid")
+    if (
+        isinstance(manifest.config_revision, bool)
+        or manifest.config_revision <= 0
+        or manifest.config_revision != expected_config_revision
+    ):
+        raise RuntimeContractError("production release config revision mismatch")
+    if manifest.provider != PRODUCTION_RELEASE_MANIFEST["provider"]:
+        raise RuntimeContractError("production release provider mismatch")
+    if manifest.catalog_sha256 != PRODUCTION_RELEASE_MANIFEST["catalog_sha256"]:
+        raise RuntimeContractError("production release catalogue mismatch")
+    if manifest.migration_head != PRODUCTION_RELEASE_MANIFEST["migration_head"]:
+        raise RuntimeContractError("production release migration head mismatch")
+    if isinstance(manifest.replicas, bool) or manifest.replicas != 1:
+        raise RuntimeContractError("production release requires exactly one replica")
+    if manifest.territory_selection != PRODUCTION_RELEASE_MANIFEST["territory_selection"]:
+        raise RuntimeContractError("production release territory selection mismatch")
+    return manifest.fingerprint()
 
 
 @dataclass(frozen=True)
