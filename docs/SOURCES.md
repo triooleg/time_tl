@@ -213,9 +213,17 @@ equal the pinned official UID and name. The official pinned identity, type and
 root hierarchy are used downstream. Ordinary `Область` validation is unchanged.
 An unknown UID is never matched by title, mapped or inferred. Any other type,
 UID, title or catalogue drift invalidates the complete snapshot and yields
-UNKNOWN or STALE, never CLEAR. RC17 currently has LOCAL evidence only; exact
-package, deployment, one preflight and independent live-result review remain
-release gates.
+UNKNOWN or STALE, never CLEAR. RC17 was subsequently packaged, installed and
+validated by exactly one read-only STAGING preflight: one `getMe` and one official
+provider request produced a complete accepted HTTP 200 snapshot without
+persistence. After revision-10 activation and ordered startup, the provider
+naturally produced one ACTIVE-to-`CLEAR_CONFIRMED` cycle. The official identity
+remained authoritative; no title mapping of an unknown UID was introduced.
+
+This is bounded one-chat allowlisted STAGING source evidence only. Independent
+post-launch review passed the outbound alert/all-clear flow, restart/false-clear
+safety and outbox arithmetic. It is not public, production, G9 or exactly-once
+evidence, and provider/catalogue drift remains a HOLD trigger.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful

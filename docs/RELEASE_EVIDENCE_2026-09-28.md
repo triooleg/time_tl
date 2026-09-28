@@ -1,14 +1,15 @@
-# Time TL RC8 incident through RC17 local type compatibility — 2026-09-28
+# Time TL RC8 incident through RC17 bounded STAGING launch — 2026-09-28
 
 ## Scope
 
 This record covers the RC8 provider-envelope compatibility release, its bounded
-server operation, the later exact RC9 diagnostic-only deployment, the exact RC10
-through RC16 deployments and preflights, and the RC17 LOCAL candidate. It records
+server operation, the later exact RC9 diagnostic-only deployment, and the exact
+RC10 through RC17 deployments and preflights. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
-boundary and the contained RC9 read-only diagnostic. It is not evidence of
-Telegram staging, canary or production readiness.
+boundary and the contained RC9 read-only diagnostic. The final RC17 section is
+bounded one-chat allowlisted G6 STAGING evidence only; this record is not public,
+production or G9 canary evidence.
 
 The authorized packet was:
 
@@ -828,7 +829,103 @@ The warning is the existing Starlette deprecation warning. The five skipped
 tests remain the destructive PostgreSQL E2E cases. Provider response-shape drift
 remains a HOLD/review trigger.
 
-These LOCAL checks are not immutable-image, deployment, preflight, activation or
-launch evidence. Exact packaging, an authorized deploy, one preflight and
-independent live-result review remain required. Current server state remains
-RC16 `HOLD`; phase 2 remains prohibited.
+These LOCAL checks preceded packaging and did not themselves prove an immutable
+image, deployment, preflight, activation or launch.
+
+## Exact RC17 package and phase 1
+
+The exact approved RC17 identity was:
+
+- tag: `time-tl-staging-20260928-rc17-special-city-type`;
+- tag object: `0923633763cf721bd13514a035424342370c6818`;
+- commit: `1bc6730a00361e412e56b9451e96837e23c95619`;
+- tree: `276cde8e4e5d0338a2ba4986196b426947a77784`;
+- archive SHA-256:
+  `95bbef9453454e1907c27d97748dd61553d8c3191bef8ec313495f68f2021a48`;
+- archive size and entry count: 387,260 bytes and 224 entries;
+- immutable image:
+  `sha256:ca1318020b3d64dc40cb093ae09df24e9c2393b6757bed8c38ee48b3e6b96c07`.
+
+The exact image was installed for all five application roles. A fresh rollback
+backup is retained at
+`/home/trio/time-tl-bot/backups/pre-rc17-special-city-type-20260928T142821Z`;
+its database dump is 692,590 bytes.
+
+Before activation, PostgreSQL remained at `0006_outbox_terminal_retention`.
+Owner state was latest revision 10, pending revision 10 and ACTIVE revision 6;
+activation audit count was zero. The outbox was 29 total, 24 delivered and 5
+undelivered rows. The STAGING allowlist contained one recipient and workers were
+`Created`.
+
+Phase 1 executed exactly one RC17 preflight. Telegram `getMe` ran once and the
+official provider was called once. The full HTTP 200 snapshot passed, the
+1,622-record official catalogue was validated, `Last-Modified` was accepted and
+`persisted=no`. Owner state was unchanged. Exact correlation ID:
+`operator-preflight-v1-r10-rc17-95bbef9453454e19`.
+
+## Revision-10 activation
+
+Revision 10 was activated once with the exact preflight correlation. Its
+activation status recorded result `passed`. Exactly one
+`owner_configuration_activated` audit row targeted revision 10. Activation
+evidence ID SHA-256:
+`18768e932b01b0bb4a24c347acd2afc0f4bfad9e26eebf3c189c623c7019b083`.
+
+Owner state became latest revision 10, pending null and ACTIVE revision 10, with
+allowlist size one. Outbox arithmetic was unchanged during activation. No second
+preflight was run.
+
+## Ordered phase 2 controlled launch
+
+Startup followed the approved order:
+
+1. `alert-worker` started alone. The durable restart fence and first successful
+   poll advanced fetch revision 9937 to 9939. Provider success time refreshed,
+   circuit open was false and consecutive failures were zero. Initial state
+   distribution was one ACTIVE scope. The restart and first poll did not create
+   an all-clear; the historical all-clear count remained 10. The natural ACTIVE
+   observation added one `ALERT_STARTED` outbox row.
+2. `schedule-worker` started and reported healthy at owner revision 10 with
+   restart count and errors zero, while sender remained stopped.
+3. `bot` started healthy at revision 10 in STAGING live mode with allowlist size
+   one. No manual or synthetic input was introduced.
+4. Before sender startup, six undelivered rows were inspected. Five historical
+   `LESSON_REMINDER` rows were already terminally dead, expired or blocked by
+   combined policy and were not deliverable. One open `ALERT_STARTED` passed
+   state, freshness, mode, scope, revision, recipient and allowlist checks.
+5. `sender-worker` started last and reported healthy at revision 10 with restart
+   count and errors zero.
+
+During stabilization the official provider naturally transitioned ACTIVE to
+`CLEAR_CONFIRMED`, generating and delivering one allowlisted
+`ALL_CLEAR_CONFIRMED`. Final provider fetch revision was 9948, circuit open was
+false, consecutive failures were zero, freshness age was six seconds and state
+distribution was one `CLEAR_CONFIRMED`.
+
+Final outbox arithmetic was 31 total, 26 delivered, 5 dead and 0 open. Since
+sender startup, one `ALERT_STARTED` and one `ALL_CLEAR_CONFIRMED` were delivered
+to the sole allowlisted recipient. Recipient checks passed; outside-allowlist
+deliveries, failure rows, retries and attempt increments were zero. Sanitized
+transport evidence inferred two attempts, two successes and zero failures. This
+does not prove exactly-once delivery.
+
+All five exact-image services finished running healthy at owner revision 10 with
+restart count zero. Worker heartbeats were healthy with ages 4–13 seconds.
+One-off count was zero, and direct and public `/login` returned HTTP 200. There
+was no second preflight, manual/synthetic input, proxy, DNS, firewall, code or
+image change. No raw user ID, token, lesson link or provider body is included in
+this record.
+
+## Independent bounded-STAGING verdict
+
+Independent post-launch review returned `PASS` with no findings for this bounded
+one-chat allowlisted STAGING scope. It independently verified restart and
+false-clear safety, the natural ACTIVE-to-`CLEAR_CONFIRMED` sequence and outbox
+arithmetic. G6 passes for the outbound alert/all-clear flow.
+
+This is not public, PRODUCTION or G9 evidence. Inbound onboarding UX was not
+exercised. Residual risks remain: Telegram send-before-commit duplicate ambiguity
+means exactly-once delivery is not claimed, and five destructive PostgreSQL E2E
+tests remained skipped. Monitoring must move the release to HOLD on freshness,
+heartbeat, restart, open-outbox or retry drift. G9, public launch and PRODUCTION
+remain blocked and unauthorized.

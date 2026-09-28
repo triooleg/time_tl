@@ -1,6 +1,6 @@
 # ADR-001: alerts.in.ua territory hierarchy and live alert source
 
-Status: **ACCEPTED / STAGING ACTIVATION REVIEW**
+Status: **ACCEPTED / BOUNDED ALLOWLISTED STAGING ACTIVE**
 Reviewed: 2026-09-28
 
 ## Context
@@ -212,11 +212,14 @@ substitute for `active.json`.
   collision; no activation or worker startup occurred.
 - RC16 exact-version STAGING preflight: **HOLD** after fail-closed catalogue-type
   mismatch; no activation or worker startup occurred.
-- RC17 exact package, deployment, single preflight and live review: **PENDING**.
+- RC17 exact package and single preflight: **PASS** for the approved artifact.
+- RC17 bounded one-chat allowlisted outbound alert/all-clear flow: **G6 PASS**;
+  independent post-launch review found no issues. Inbound onboarding UX was not
+  exercised, and this does not establish public or production readiness.
 - STAGING canary with approved accounts, monitoring and rollback evidence:
-  **PENDING**.
+  **PENDING** beyond the bounded one-chat evidence.
 - PRODUCTION/public launch: **NOT APPROVED**. Local tests and code review do not
-  constitute staging or production evidence.
+  constitute production evidence. G9 remains blocked.
 
 ## Official references
 
