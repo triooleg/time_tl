@@ -19,7 +19,13 @@ MARKER_1 = "Sun, 20 Sep 2026 10:00:00 GMT"
 MARKER_2 = "Sun, 20 Sep 2026 11:00:00 GMT"
 MARKER_3 = "Sun, 20 Sep 2026 12:00:00 GMT"
 SIGNED_INT64_MAX = (1 << 63) - 1
-REGION_TYPES = {"1903": "Громада", "1803": "Район", "16": "Область"}
+REGION_TYPES = {
+    "1903": "Громада",
+    "1803": "Район",
+    "16": "Область",
+    "31": "Місто з спеціальним статусом",
+}
+EXPECTED_OBLAST_UIDS = {"1903": "16", "1803": "16", "16": "16", "31": "31"}
 META_TIMESTAMP = "2026/09/20 15:00:00 +0300"
 
 
@@ -108,6 +114,7 @@ def adapter(transport):
         token="secret-not-logged",
         transport=transport,
         region_types=REGION_TYPES,
+        expected_oblast_uids=EXPECTED_OBLAST_UIDS,
         now=lambda: NOW,
     )
 
@@ -433,10 +440,15 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_oblast_uid_diagnostics_are_opaque_and_fail_closed(self):
         samples = (
-            (987654321, "location_oblast_uid_integer"),
-            ("private-noncanonical-value", "location_oblast_uid_noncanonical_string"),
+            (-16, "location_oblast_uid_integer"),
+            (0, "location_oblast_uid_integer"),
+            (10**100, "location_oblast_uid_unknown"),
+            ("016", "location_oblast_uid_noncanonical_string"),
+            ("999", "location_oblast_uid_unknown"),
+            ("31", "location_oblast_uid_hierarchy_mismatch"),
             (True, "location_oblast_uid_boolean"),
-            (["private-list-value"], "location_oblast_uid_other"),
+            (16.0, "location_oblast_uid_other"),
+            ({"private": "value"}, "location_oblast_uid_other"),
         )
 
         for value, code in samples:
@@ -457,6 +469,58 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(str(value), summary)
                 self.assertNotIn("provider_private_field", summary)
                 self.assertNotIn("must-not-leak", summary)
+
+    async def test_integer_oblast_uid_matches_each_catalogue_level(self):
+        samples = (
+            ("16", "oblast", 16),
+            ("1803", "raion", 16),
+            ("1903", "hromada", 16),
+            ("31", "city", 31),
+        )
+
+        for uid, location_type, oblast_uid in samples:
+            with self.subTest(uid=uid):
+                payload = active(uid=uid, location_type=location_type)
+                payload["alerts"][0]["location_oblast_uid"] = oblast_uid
+
+                result = await adapter(
+                    Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
+                ).fetch(fetch_revision=1, last_modified=None)
+
+                self.assertIsNotNone(result.snapshot)
+
+    def test_integer_and_string_oblast_uid_have_identical_digest(self):
+        string_payload = active()
+        integer_payload = active()
+        integer_payload["alerts"][0]["location_oblast_uid"] = 16
+        provider = adapter(Transport())
+
+        string_episodes, string_digest = provider._parse_active_payload(
+            json.dumps(string_payload).encode()
+        )
+        integer_episodes, integer_digest = provider._parse_active_payload(
+            json.dumps(integer_payload).encode()
+        )
+
+        self.assertEqual(string_episodes, integer_episodes)
+        self.assertEqual(string_digest, integer_digest)
+
+    async def test_integer_normalization_preserves_same_marker_replay(self):
+        integer_payload = active()
+        integer_payload["alerts"][0]["location_oblast_uid"] = 16
+        provider = adapter(
+            Transport(
+                response(200, active(), **{"Last-Modified": MARKER_1}),
+                response(200, integer_payload, **{"Last-Modified": MARKER_1}),
+            )
+        )
+
+        baseline = await provider.fetch(fetch_revision=1, last_modified=None)
+        replay = await provider.fetch(fetch_revision=2, last_modified=MARKER_1)
+
+        self.assertIsNotNone(baseline.snapshot)
+        self.assertIsNotNone(replay.snapshot)
+        self.assertIsNone(replay.failure)
 
     async def test_invalid_oblast_uid_does_not_advance_validated_baseline(self):
         invalid = active()
@@ -480,18 +544,23 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("NOT_MODIFIED_304", unchanged.snapshot.kind.value)
         self.assertEqual(MARKER_1, unchanged.last_modified)
 
-    async def test_canonical_oblast_uid_keeps_catalogue_validation(self):
-        for oblast_uid in ("999", "1903"):
-            with self.subTest(oblast_uid=oblast_uid):
-                payload = active()
-                payload["alerts"][0]["location_oblast_uid"] = oblast_uid
+    def test_constructor_requires_complete_valid_expected_oblast_mapping(self):
+        samples = (
+            ({key: value for key, value in EXPECTED_OBLAST_UIDS.items() if key != "1903"},),
+            ({**EXPECTED_OBLAST_UIDS, "1903": "016"},),
+            ({**EXPECTED_OBLAST_UIDS, "1903": "1903"},),
+            ({**EXPECTED_OBLAST_UIDS, "31": "16"},),
+        )
 
-                result = await adapter(
-                    Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
-                ).fetch(fetch_revision=1, last_modified=None)
-
-                self.assertIsNone(result.snapshot)
-                self.assertEqual("location_oblast_uid_unknown", result.diagnostic_code)
+        for (expected_oblast_uids,) in samples:
+            with self.subTest(expected_oblast_uids=expected_oblast_uids):
+                with self.assertRaises(ValueError):
+                    AlertsInUaAdapter(
+                        token="secret-not-logged",
+                        transport=Transport(),
+                        region_types=REGION_TYPES,
+                        expected_oblast_uids=expected_oblast_uids,
+                    )
 
     async def test_diagnostic_taxonomy_identifies_rejected_predicate(self):
         missing = active()
@@ -869,8 +938,10 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_restart_rejects_unverifiable_304_without_false_clear(self):
+        integer_oblast_active = active()
+        integer_oblast_active["alerts"][0]["location_oblast_uid"] = 16
         await self.worker(
-            Transport(response(200, active(), **{"Last-Modified": MARKER_1}))
+            Transport(response(200, integer_oblast_active, **{"Last-Modified": MARKER_1}))
         ).run_once()
         self.clock += 15
         await self.worker(Transport(response(304))).run_once()
@@ -1001,12 +1072,16 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_ignored_field_on_non_air_row_cannot_bypass_two_observation_clear(self):
+        applicable_alert = active()
+        applicable_alert["alerts"][0]["location_oblast_uid"] = 16
         no_applicable_alert = active(alert_type="chemical")
+        no_applicable_alert["alerts"][0]["location_oblast_uid"] = 16
         no_applicable_alert["alerts"][0]["undocumented_provider_data"] = {"private": True}
         second_no_applicable_alert = active(alert_type="chemical")
+        second_no_applicable_alert["alerts"][0]["location_oblast_uid"] = 16
         second_no_applicable_alert["alerts"][0]["undocumented_provider_data"] = {"private": False}
         transport = Transport(
-            response(200, active(), **{"Last-Modified": MARKER_1}),
+            response(200, applicable_alert, **{"Last-Modified": MARKER_1}),
             response(200, no_applicable_alert, **{"Last-Modified": MARKER_2}),
             response(200, second_no_applicable_alert, **{"Last-Modified": MARKER_3}),
         )
@@ -1047,6 +1122,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         for uid, location_type in (("16", "oblast"), ("1903", "hromada")):
             with self.subTest(uid=uid):
                 payload = active(uid=uid, location_type=location_type)
+                payload["alerts"][0]["location_oblast_uid"] = 16
                 payload["alerts"][0]["undocumented_provider_data"] = {"must_not_affect_state": True}
                 repository = InMemoryAlertRepository([("student", scope)])
                 worker = AlertWorker(

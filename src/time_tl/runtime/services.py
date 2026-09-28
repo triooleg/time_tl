@@ -35,7 +35,7 @@ from . import region_registry_full
 from .contracts import RuntimeContractError, validate_runtime_contract
 from .httpx_transport import HttpxTransport
 from .local_alerts import JsonAlertRepository
-from .region_registry_full import load_catalog
+from .region_registry_full import expected_oblast_uid_by_region, load_catalog
 from .regions import OBLAST_REGION_IDS, OBLAST_REGIONS
 
 LOGGER = logging.getLogger(__name__)
@@ -169,7 +169,8 @@ def _provider(settings: Settings, covered_region_ids: frozenset[str]) -> Any:
                 token=settings.alerts_in_ua_token.get_secret_value(),
                 transport=HttpxTransport(),
             )
-        catalog_records = load_catalog().records
+        catalog = load_catalog()
+        catalog_records = catalog.records
         full_region_ids = frozenset(item.uid for item in catalog_records)
         if covered_region_ids != full_region_ids:
             raise RuntimeContractError(
@@ -181,6 +182,7 @@ def _provider(settings: Settings, covered_region_ids: frozenset[str]) -> Any:
                 max_response_bytes=AlertsInUaAdapter.MAX_RESPONSE_BYTES,
             ),
             region_types={item.uid: item.location_type for item in catalog_records},
+            expected_oblast_uids=expected_oblast_uid_by_region(catalog),
         )
     return OfflineSimulationProvider()
 

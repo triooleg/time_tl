@@ -85,13 +85,29 @@ preflight. Telegram `getMe` passed and one `active.json` request returned HTTP
 accepted provider snapshot and did not advance alert or all-clear state. RC10
 was not activated; the bot and workers remain stopped.
 
-The RC11 LOCAL diagnostic candidate keeps this predicate fail closed and reports
+The RC11 diagnostic candidate kept this predicate fail closed and reports
 only a fixed invalid-value shape category: `boolean`, `integer`,
 `noncanonical_string` or `other`. It does not emit the rejected value, does not
 emit the ignored undocumented key or value, and does not change catalogue
 validation for a canonical UID. A rejected response still cannot establish or
-advance a validated baseline. RC11 is code-only evidence: it has not been
-committed, tagged, packaged, deployed or preflighted.
+advance a validated baseline. Its one authorized server preflight received one
+HTTP 200 response from `active.json` and classified the rejected optional field
+as `location_oblast_uid_integer / count=1`. That response was not accepted as a
+snapshot; revision 10 was not activated and delivery-capable services remained
+stopped.
+
+The RC12 LOCAL compatibility candidate accepts this optional value as an integer
+only when it is positive, can be normalized to a canonical decimal UID present
+in the pinned catalogue, and exactly equals the expected top-level ancestor of
+the row's `location_uid`. The expected mapping is deterministically derived from
+the byte-pinned provider hierarchy and must cover every pinned UID. A top-level
+region maps to itself; each district and community maps through its pinned
+parents to its oblast or special-status city. An unknown UID, boolean,
+non-positive integer, noncanonical string, unsupported type or ancestor mismatch
+rejects the complete response. Equivalent integer and canonical string values
+are normalized before digest generation and therefore have identical content
+identity. This is LOCAL code-only evidence; RC12 has not been committed, tagged,
+packaged, deployed or preflighted.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful

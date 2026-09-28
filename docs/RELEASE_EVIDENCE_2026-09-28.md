@@ -1,10 +1,10 @@
-# Time TL RC8 incident through RC11 local diagnostics — 2026-09-28
+# Time TL RC8 incident through RC12 local compatibility — 2026-09-28
 
 ## Scope
 
 This record covers the RC8 provider-envelope compatibility release, its bounded
 server operation, the later exact RC9 diagnostic-only deployment, the exact RC10
-deployment and preflight, and the RC11 local diagnostic candidate. It records
+and RC11 deployments and preflights, and the RC12 local compatibility candidate. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
 boundary and the contained RC9 read-only diagnostic. It is not evidence of
@@ -332,9 +332,80 @@ official catalogue and location-type validation.
 | LOCAL REVIEW | Independent safety review of the code-only RC11 scope | `PASS` |
 
 The warning is the existing Starlette deprecation warning. The five skipped
-tests are the opt-in destructive PostgreSQL E2E cases. RC11 has no release
-identity: it is not committed, tagged, packaged, deployed or preflighted. These
-results are LOCAL evidence only and do not authorize another provider call,
-activation, bot/worker startup or messages. The current server state remains
-RC10 `HOLD`, with ACTIVE revision 6, pending revision 10, and all delivery-capable
-services stopped.
+tests are the opt-in destructive PostgreSQL E2E cases. These results were LOCAL
+evidence only and did not themselves authorize another provider call,
+activation, bot/worker startup or messages. RC11 was subsequently approved for
+the exact diagnostic-only server operation recorded below.
+
+## Exact RC11 diagnostic server operation and HOLD
+
+The exact approved RC11 identity was:
+
+- tag: `time-tl-staging-20260928-rc11-oblast-uid-shape-diag`;
+- commit: `2e9a29ea1feaa3730eee7f022ae7316ad1ee28cf`;
+- archive SHA-256:
+  `b8c869990a323be1627c1ac986e1f93841a973361654a2cf928852630aca0550`.
+
+The approved operation allowed archive transfer, server-side digest
+verification, immutable image construction, `admin-web` replacement, stopped
+`bot`/worker creation and exactly one diagnostic preflight for pending revision
+10. Activation, bot/worker startup and messages were explicitly excluded.
+
+The server archive matched the approved SHA-256. Immutable RC11 image
+`sha256:10355985d0e6343382e95ef60db57eccc43fad3e665c757f226bcfebe87c2095`
+was built. `admin-web` runs RC11, is healthy, and returned HTTP 200 through both
+the public and direct checks. RC11 `bot`, `alert-worker`, `schedule-worker` and
+`sender-worker` are `Created`, have no startup evidence and were never started.
+PostgreSQL remains at `0006_outbox_terminal_retention`; no migration ran. Owner
+configuration remains ACTIVE revision 6 and pending revision 10.
+
+Exactly one RC11 preflight ran at `10:44:57Z`. Telegram `getMe` passed. The
+official provider made exactly one `active.json` request and returned HTTP 200,
+after which the response failed closed as
+`INVALID_RESPONSE / location_oblast_uid_integer / count=1`. There was no retry,
+activation, message or delivered outbox item. The delivered-outbox baseline
+remained 24. No raw UID, provider identity value or secret is included in this
+record.
+
+A fresh rollback backup is retained at
+`/home/trio/time-tl-bot/backups/pre-rc11-oblast-uid-shape-diag-20260928T104023Z`.
+The current server verdict remains RC11 `HOLD`; this diagnostic outcome is not a
+staging pass and does not advance G6, G7 or G9.
+
+## RC12 local integer compatibility candidate
+
+RC12 is a code-only compatibility change for the single shape established by
+the RC11 diagnostic. A positive integer `location_oblast_uid` is normalized to
+its canonical decimal string, but is accepted only when it is present as a
+top-level UID in the byte-pinned official catalogue and exactly equals the
+expected top-level ancestor of that alert row's `location_uid`.
+
+The expected-ancestor mapping is derived from the already pinned and validated
+provider hierarchy, covers every pinned region UID exactly, maps each top-level
+region to itself, and maps every district/community through its pinned parents.
+Boolean and non-positive values, unknown UIDs, noncanonical strings, unsupported
+types and hierarchy mismatches continue to reject the complete snapshot. An
+accepted integer and its equivalent canonical string are normalized before the
+content digest, so they cannot create different content identities. The RC10
+rule for discarding and never using the single bounded undocumented alert-row
+field remains unchanged.
+
+### RC12 local verification
+
+| Environment | Check | Result |
+|---|---|---|
+| LOCAL | Focused provider, registry and preflight regressions | `82 passed` |
+| LOCAL | Expanded alert/runtime regressions | `238 passed` |
+| LOCAL | Full suite | `530 passed, 5 skipped, 1 warning` |
+| LOCAL | Ruff | `PASS` |
+| LOCAL | strict mypy | `PASS`; 72 source files checked |
+| LOCAL | `compileall` | `PASS` |
+| LOCAL | `git diff --check` | `PASS` |
+| LOCAL REVIEW | Independent safety review of the code-only RC12 scope | `PASS` |
+
+The warning is the existing Starlette deprecation warning and the five skipped
+tests are the opt-in destructive PostgreSQL E2E cases. RC12 is not committed,
+tagged, packaged, deployed or preflighted. These results do not authorize a
+provider call, activation, bot/worker startup or messages. The current server
+truth remains RC11 `HOLD`, with ACTIVE revision 6, pending revision 10 and all
+delivery-capable services stopped.

@@ -210,13 +210,44 @@ async def test_probe_does_not_use_previously_diagnostic_only_alert_field() -> No
 
 
 @pytest.mark.asyncio
+async def test_probe_accepts_matching_integer_oblast_uid_without_exposing_it() -> None:
+    payload = json.loads(full_body())
+    payload["alerts"][0]["location_oblast_uid"] = 31
+    payload["alerts"][0]["private_provider_field"] = "must-not-leak"
+
+    class IntegerOblastUidTransport:
+        async def send(self, _request: object) -> HttpResponse:
+            return HttpResponse(
+                200,
+                {"Last-Modified": MARKER},
+                json.dumps(payload).encode(),
+            )
+
+    evidence = await probe_candidate(
+        candidate(),
+        123,
+        bot_factory=FakeBot,
+        transport_factory=IntegerOblastUidTransport,
+    )
+
+    summary = evidence.sanitized_summary()
+    assert "alerts=active_json_full_200" in summary
+    assert "location_oblast_uid" not in summary
+    assert "private_provider_field" not in summary
+    assert "must-not-leak" not in summary
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("value", "code"),
     [
-        (987654321, "location_oblast_uid_integer"),
-        ("private-noncanonical-value", "location_oblast_uid_noncanonical_string"),
+        (-31, "location_oblast_uid_integer"),
+        (0, "location_oblast_uid_integer"),
+        (10**100, "location_oblast_uid_unknown"),
+        ("031", "location_oblast_uid_noncanonical_string"),
+        (16, "location_oblast_uid_hierarchy_mismatch"),
         (True, "location_oblast_uid_boolean"),
-        (["private-list-value"], "location_oblast_uid_other"),
+        (31.0, "location_oblast_uid_other"),
     ],
 )
 async def test_probe_rejects_invalid_oblast_uid_with_sanitized_category(

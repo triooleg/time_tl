@@ -13,7 +13,11 @@ from time_tl.domain.alerts import ProviderSnapshotKind
 from time_tl.infrastructure.alerts import AlertsInUaAdapter
 from time_tl.runtime.contracts import RuntimeContractError
 from time_tl.runtime.httpx_transport import HttpxTransport
-from time_tl.runtime.region_registry_full import EXPECTED_RECORD_COUNT, load_catalog
+from time_tl.runtime.region_registry_full import (
+    EXPECTED_RECORD_COUNT,
+    expected_oblast_uid_by_region,
+    load_catalog,
+)
 
 
 class OperatorPreflightError(RuntimeError):
@@ -82,12 +86,14 @@ async def probe_candidate(
     if not telegram_ok:
         raise OperatorPreflightError("Telegram identity is not a named bot")
 
-    catalog_records = load_catalog().records
+    catalog = load_catalog()
+    catalog_records = catalog.records
     expected_coverage = frozenset(item.uid for item in catalog_records)
     adapter = AlertsInUaAdapter(
         token=candidate.alerts_in_ua_token.get_secret_value(),
         transport=transport_factory(),
         region_types={item.uid: item.location_type for item in catalog_records},
+        expected_oblast_uids=expected_oblast_uid_by_region(catalog),
     )
     result = await adapter.fetch(fetch_revision=1, last_modified=None)
     snapshot = result.snapshot

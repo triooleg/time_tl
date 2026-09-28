@@ -101,10 +101,10 @@ been performed.
 ## Session Continuity
 
 Last session: 2026-09-28
-Stopped at: RC10 is installed but its single preflight failed closed; activation
-was rejected and the server remains in `HOLD`. RC11 is a LOCAL code-only
-diagnostic candidate and has not been committed, tagged, packaged, deployed or
-preflighted.
+Stopped at: RC11 is installed, but its single diagnostic preflight identified an
+integer `location_oblast_uid`; activation was excluded and the server remains in
+`HOLD`. RC12 is a LOCAL code-only compatibility candidate and has not been
+committed, tagged, packaged, deployed or preflighted.
 The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
@@ -235,7 +235,43 @@ outbox message or all-clear from the rejected response.
 RC11 LOCAL evidence: 66 focused tests passed; the full suite passed 522 tests
 with five opt-in destructive PostgreSQL E2E skips and one Starlette warning.
 Ruff, strict mypy for 72 source files, compileall and `git diff --check` passed.
-Independent safety review passed this code-only diagnostic scope. RC11 has no
-release identity: it is not committed, tagged, packaged, deployed or preflighted.
-No further server operation is implied or authorized by the local evidence.
+Independent safety review passed this code-only diagnostic scope.
+
+The exact RC11 release was subsequently approved and installed from tag
+`time-tl-staging-20260928-rc11-oblast-uid-shape-diag`, commit
+`2e9a29ea1feaa3730eee7f022ae7316ad1ee28cf`, archive SHA-256
+`b8c869990a323be1627c1ac986e1f93841a973361654a2cf928852630aca0550`.
+The server archive matched the approved digest and immutable RC11 image
+`sha256:10355985d0e6343382e95ef60db57eccc43fad3e665c757f226bcfebe87c2095`
+was built. `admin-web` runs RC11, is healthy, and both public and direct checks
+returned HTTP 200. RC11 `bot` and all three workers are `Created` with zero
+startup evidence and were never started. Database revision remains
+`0006_outbox_terminal_retention`; no migration ran. Owner state remains ACTIVE
+revision 6 and pending revision 10.
+
+Exactly one RC11 preflight ran at `10:44:57Z` for pending revision 10. Telegram
+`getMe` passed and the official provider made one `active.json` request that
+returned HTTP 200. The response then failed closed as
+`INVALID_RESPONSE / location_oblast_uid_integer / count=1`. There was no retry,
+activation, message or delivered outbox item; the delivered-outbox baseline
+remained 24. No raw UID was recorded. Fresh rollback backup:
+`/home/trio/time-tl-bot/backups/pre-rc11-oblast-uid-shape-diag-20260928T104023Z`.
+The current server truth is RC11 `HOLD`, not a staging pass.
+
+RC12 is a narrow LOCAL compatibility candidate. It accepts a positive integer
+`location_oblast_uid` only by normalizing it to the same canonical decimal form
+as the documented string representation, then requires an exact match to the
+top-level ancestor derived from the byte-pinned official region hierarchy for
+that alert's `location_uid`. Boolean, non-positive, noncanonical, unknown and
+hierarchy-mismatched values still reject the complete snapshot. Integer and
+equivalent string representations produce the same canonical digest. The
+undocumented alert-row key/value remains discarded and unused under the RC10
+boundary.
+
+RC12 LOCAL evidence: 82 focused tests, 238 expanded tests and 530 full-suite
+tests passed; the full suite retained five opt-in destructive PostgreSQL E2E
+skips and one Starlette warning. Ruff, strict mypy for 72 source files,
+compileall and `git diff --check` passed. Independent safety review passed the
+code-only scope. RC12 is not committed, tagged, packaged, deployed or
+preflighted, and does not change the RC11 server `HOLD` status.
 Resume file: none.

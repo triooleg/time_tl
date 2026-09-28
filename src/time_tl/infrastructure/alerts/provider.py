@@ -221,6 +221,7 @@ class AlertsInUaAdapter:
         token: str,
         transport: AsyncHttpTransport,
         region_types: Mapping[str, str],
+        expected_oblast_uids: Mapping[str, str],
         timeout_seconds: float = 10.0,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -233,8 +234,22 @@ class AlertsInUaAdapter:
         unknown_types = set(region_types.values()) - set(self._PINNED_TO_PROVIDER_TYPES)
         if unknown_types:
             raise ValueError("region registry contains an unsupported pinned type")
+        if set(expected_oblast_uids) != set(region_types):
+            raise ValueError("expected oblast registry must cover every region UID exactly")
+        if any(
+            not self._is_canonical_uid(oblast_uid)
+            for oblast_uid in expected_oblast_uids.values()
+        ):
+            raise ValueError("expected oblast UIDs must be canonical positive decimals")
+        top_level_types = {"Область", "Місто з спеціальним статусом"}
+        for region_uid, oblast_uid in expected_oblast_uids.items():
+            if region_types.get(oblast_uid) not in top_level_types:
+                raise ValueError("expected oblast UID must reference a top-level region")
+            if region_types[region_uid] in top_level_types and region_uid != oblast_uid:
+                raise ValueError("top-level region must map to itself as expected oblast")
         self._token, self._transport = token, transport
         self._region_types = dict(region_types)
+        self._expected_oblast_uids = dict(expected_oblast_uids)
         self._covered_region_ids = frozenset(region_types)
         self._timeout_seconds = timeout_seconds
         self._now = now or (lambda: datetime.now(UTC))
@@ -487,24 +502,41 @@ class AlertsInUaAdapter:
             ):
                 if optional_text in item and item[optional_text] is not None:
                     self._validate_text(item[optional_text], optional_text)
+            normalized_oblast_uid: str | None = None
             if "location_oblast_uid" in item and item["location_oblast_uid"] is not None:
-                oblast_uid = item["location_oblast_uid"]
-                if not isinstance(oblast_uid, str) or not self._is_canonical_uid(oblast_uid):
-                    raise SnapshotValidationError(
-                        self._invalid_location_oblast_uid_code(oblast_uid)
-                    )
+                oblast_value = item["location_oblast_uid"]
+                if isinstance(oblast_value, bool):
+                    raise SnapshotValidationError("location_oblast_uid_boolean")
+                if isinstance(oblast_value, int):
+                    if oblast_value <= 0:
+                        raise SnapshotValidationError("location_oblast_uid_integer")
+                    oblast_uid = str(oblast_value)
+                elif isinstance(oblast_value, str):
+                    if not self._is_canonical_uid(oblast_value):
+                        raise SnapshotValidationError(
+                            "location_oblast_uid_noncanonical_string"
+                        )
+                    oblast_uid = oblast_value
+                else:
+                    raise SnapshotValidationError("location_oblast_uid_other")
                 oblast_type = self._region_types.get(oblast_uid)
                 if oblast_type not in {"Область", "Місто з спеціальним статусом"}:
                     raise SnapshotValidationError("location_oblast_uid_unknown")
+                if oblast_uid != self._expected_oblast_uids[location_uid]:
+                    raise SnapshotValidationError("location_oblast_uid_hierarchy_mismatch")
+                normalized_oblast_uid = oblast_uid
             if "threats" in item:
                 self._validate_threats(item["threats"])
 
             if alert_type == "air_raid":
                 # Both documented red and yellow levels represent an active air raid.
                 parsed.append(AlertEpisode(location_uid, alert_type, str(alert_id)))
-            canonical_alerts.append(
-                {key: item[key] for key in self._ALLOWED_ALERT_FIELDS if key in item}
-            )
+            canonical_alert = {
+                key: item[key] for key in self._ALLOWED_ALERT_FIELDS if key in item
+            }
+            if normalized_oblast_uid is not None:
+                canonical_alert["location_oblast_uid"] = normalized_oblast_uid
+            canonical_alerts.append(canonical_alert)
         if len(parsed) != len(set(parsed)):
             raise SnapshotValidationError("alert_episode_duplicate")
         canonical_root = dict(root)
@@ -516,18 +548,6 @@ class AlertsInUaAdapter:
             separators=(",", ":"),
         ).encode("utf-8")
         return tuple(sorted(parsed)), sha256(canonical).hexdigest()
-
-    @staticmethod
-    def _invalid_location_oblast_uid_code(value: object) -> str:
-        """Categorize a rejected optional oblast UID without exposing its value."""
-
-        if isinstance(value, bool):
-            return "location_oblast_uid_boolean"
-        if isinstance(value, int):
-            return "location_oblast_uid_integer"
-        if isinstance(value, str):
-            return "location_oblast_uid_noncanonical_string"
-        return "location_oblast_uid_other"
 
     @classmethod
     def _validate_ignored_alert_extras(
