@@ -72,6 +72,12 @@ not an automatic fallback.
     semantically deduplicated without authoritative equivalence evidence. One
     remaining episode keeps the scope ACTIVE; both must be absent before the
     normal two-observation all-clear sequence can begin.
+12. RC17 permits one bounded direct-row type compatibility for an official
+    `Місто з спеціальним статусом`. Provider type may be `city` or the observed
+    `oblast` only when canonical UID and normalized Ukrainian title exactly equal
+    the pinned official UID and name. Downstream identity, type and root hierarchy
+    always come from the pinned record. Ordinary oblast behavior is unchanged;
+    unknown UIDs are never resolved by title.
 
 ## Canonical catalogue contract
 
@@ -163,6 +169,12 @@ alias/direct source identity fields do not enter the digest, state, persistence,
 messages or logs. Disappearance of only one episode cannot clear the base
 location; absence of all episodes still requires two successful observations.
 
+Decision 12 does not reclassify an ordinary `Область` or broaden title matching.
+For a pinned special-status-city root, only exact canonical UID plus exact
+normalized official Ukrainian name can admit the `city`/observed-`oblast` wire
+type pair. Any other mismatch invalidates the complete snapshot through the
+existing `UNKNOWN`/`STALE`, never-clear path.
+
 Both documented `red` and `yellow` `air_raid` records are active. An alert
 episode applies when its UID is in the selected scope's canonical
 ancestor-plus-subtree closure. Multiple applicable rows produce one effective
@@ -198,7 +210,9 @@ substitute for `active.json`.
   no activation or worker startup occurred.
 - RC15 exact-version STAGING preflight: **HOLD** after fail-closed alias/direct
   collision; no activation or worker startup occurred.
-- RC16 exact package, deployment, single preflight and live review: **PENDING**.
+- RC16 exact-version STAGING preflight: **HOLD** after fail-closed catalogue-type
+  mismatch; no activation or worker startup occurred.
+- RC17 exact package, deployment, single preflight and live review: **PENDING**.
 - STAGING canary with approved accounts, monitoring and rollback evidence:
   **PENDING**.
 - PRODUCTION/public launch: **NOT APPROVED**. Local tests and code review do not

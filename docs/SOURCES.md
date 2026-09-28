@@ -196,8 +196,26 @@ The canonical digest contains all accepted canonicalized rows sorted by unique
 numeric alert ID, while raw alias/direct source identity fields remain excluded.
 A duplicate provider alert ID, invalid alias, invalid direct row or any other
 invalid row rejects the complete snapshot and yields UNKNOWN or STALE, never
-CLEAR. RC16 currently has LOCAL evidence only; exact package, deployment, one
-preflight and independent live-result review remain release gates.
+CLEAR. RC16 was subsequently packaged and installed. Its one authorized STAGING
+preflight made one `active.json` request and failed closed as
+`location_type_catalogue_mismatch / count=1`; revision 10 remained unactivated
+and bot/workers remained stopped.
+
+A one-request read-only type diagnostic received HTTP 200 with 59 rows. Its sole
+relevant direct row carried canonical UID `31`, title `м. Київ` and provider type
+`oblast`; there was no alias row. The exact pinned UID/name record is a root
+`Місто з спеціальним статусом` with no parent. The diagnostic changed no state.
+
+RC17 permits only this bounded direct-row type compatibility: a pinned
+`Місто з спеціальним статусом` accepts provider type `city` or the observed
+`oblast` only when the canonical UID and normalized Ukrainian title exactly
+equal the pinned official UID and name. The official pinned identity, type and
+root hierarchy are used downstream. Ordinary `Область` validation is unchanged.
+An unknown UID is never matched by title, mapped or inferred. Any other type,
+UID, title or catalogue drift invalidates the complete snapshot and yields
+UNKNOWN or STALE, never CLEAR. RC17 currently has LOCAL evidence only; exact
+package, deployment, one preflight and independent live-result review remain
+release gates.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful

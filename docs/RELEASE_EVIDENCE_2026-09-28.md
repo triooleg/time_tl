@@ -1,10 +1,10 @@
-# Time TL RC8 incident through RC16 local collision policy — 2026-09-28
+# Time TL RC8 incident through RC17 local type compatibility — 2026-09-28
 
 ## Scope
 
 This record covers the RC8 provider-envelope compatibility release, its bounded
 server operation, the later exact RC9 diagnostic-only deployment, the exact RC10
-through RC15 deployments and preflights, and the RC16 LOCAL candidate. It records
+through RC16 deployments and preflights, and the RC17 LOCAL candidate. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
 boundary and the contained RC9 read-only diagnostic. It is not evidence of
@@ -757,7 +757,78 @@ The warning is the existing Starlette deprecation warning. The five skipped
 tests remain the destructive PostgreSQL E2E cases. Provider response-shape drift
 remains a review trigger.
 
+These RC16 LOCAL checks preceded packaging and did not themselves prove an
+immutable image, deployment, preflight, activation or launch.
+
+## Exact RC16 server operation and HOLD
+
+The exact approved RC16 identity was:
+
+- tag: `time-tl-staging-20260928-rc16-city-collision-episodes`;
+- tag object: `281f7ae5e5816704be250b3d78e0120b48c83b03`;
+- commit: `c09201c8ad4ad000fdfe3d50f8b2e27478c0bc71`;
+- tree: `28e7ad6887c67e2e2663b9d22bd79a26c83b8a19`;
+- archive SHA-256:
+  `6fecf77d25d5b55293f0f790ecdd05e0a5ba6d09d730fab71edb74372c8c57dd`;
+- archive size and entry count: 383,778 bytes and 224 entries;
+- immutable image:
+  `sha256:1bff5e55c00d4d526e4d0d8062f17d999ce2f0fb318c7b55410612c3b5011ecc`;
+- Compose SHA-256:
+  `b00192a54e676a0646a89cf33d5e24ea6de167a1db84409749fadc4b9f0b472d`.
+
+The server archive matched the approved digest. `admin-web` runs RC16, is
+healthy with restart count zero, and returned HTTP 200 through direct and public
+`/login` checks. RC16 `bot`, `alert-worker`, `schedule-worker` and
+`sender-worker` remain `Created` and were never started. PostgreSQL remains at
+`0006_outbox_terminal_retention`; no migration ran.
+
+Exactly one RC16 STAGING preflight ran for pending revision 10. Telegram `getMe`
+passed. Exactly one official `active.json` request then failed closed as
+`INVALID_RESPONSE / location_type_catalogue_mismatch / count=1`; the preflight
+exited with status 2 and did not retry. Owner state before and after was latest
+revision 10, pending revision 10 and ACTIVE revision 6, with zero activation
+audit rows. The outbox remained 29 total, 24 delivered and 5 undelivered rows;
+the one-off count remained 0.
+
+There was no activation, bot/worker start, message, persistence mutation or proxy
+change. No raw response body or secret is included here.
+
+A fresh rollback backup is retained at
+`/home/trio/time-tl-bot/backups/pre-rc16-city-collision-episodes-20260928T140756Z`.
+The database dump is 692,590 bytes. Recorded source and database hashes were
+rechecked. The current server verdict is RC16 `HOLD`; phase 2 remains prohibited.
+
+## RC17 type diagnosis and local compatibility
+
+A one-request read-only RC16 diagnostic received HTTP 200 with 59 rows. The sole
+relevant direct row used canonical UID `31`, Ukrainian title `м. Київ`, provider
+type `oblast`, and had no alias row. The exact pinned UID/name record is a root
+`Місто з спеціальним статусом` with no parent. The diagnostic changed no state.
+
+RC17 accepts provider type `city` or the observed `oblast` for a direct pinned
+`Місто з спеціальним статусом` only when canonical UID and normalized Ukrainian
+title exactly equal the pinned official UID and name. Downstream processing uses
+only the official pinned identity, type and root hierarchy. Ordinary `Область`
+rows are unchanged. An unknown UID is never title-mapped, mapped or inferred;
+any other drift rejects the complete snapshot and keeps the release in HOLD.
+
+### RC17 local verification
+
+| Environment | Check | Result |
+|---|---|---|
+| LOCAL | Focused provider and type-compatibility regressions | `106 passed` |
+| LOCAL | Full suite | `558 passed, 5 skipped, 1 warning` |
+| LOCAL | Ruff | `PASS` |
+| LOCAL | strict mypy | `PASS`; 72 source files checked |
+| LOCAL | `compileall` | `PASS` |
+| LOCAL | `git diff --check` | `PASS` |
+| LOCAL REVIEW | Independent safety review | `PASS`; no findings |
+
+The warning is the existing Starlette deprecation warning. The five skipped
+tests remain the destructive PostgreSQL E2E cases. Provider response-shape drift
+remains a HOLD/review trigger.
+
 These LOCAL checks are not immutable-image, deployment, preflight, activation or
 launch evidence. Exact packaging, an authorized deploy, one preflight and
 independent live-result review remain required. Current server state remains
-RC15 `HOLD`; phase 2 remains prohibited.
+RC16 `HOLD`; phase 2 remains prohibited.

@@ -102,10 +102,11 @@ services or sent a message. No production or canary deployment has occurred.
 ## Session Continuity
 
 Last session: 2026-09-28
-Stopped at: RC15 is installed, but its single preflight rejected the provider
-response as `location_uid_alias_collision / count=1`; activation and phase 2
-startup are prohibited, and the server remains in `HOLD`. RC16 is a LOCAL
-collision-policy candidate with no package, deployment or preflight evidence.
+Stopped at: RC16 is installed, but its single preflight rejected the provider
+response as `location_type_catalogue_mismatch / count=1`; activation and phase 2
+startup are prohibited, and the server remains in `HOLD`. RC17 is a LOCAL
+special-status-city compatibility candidate with no package, deployment or
+preflight evidence.
 The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
@@ -482,7 +483,54 @@ with five destructive PostgreSQL E2E skips and one Starlette warning. Ruff,
 strict mypy for 72 source files, compileall and `git diff --check` passed.
 Independent safety review returned `PASS` with no findings. Residual provider
 shape drift still requires review, and the destructive PostgreSQL cases were not
-run. This LOCAL evidence is not deployment, preflight, activation or launch
-evidence; exact packaging, deploy, one preflight and live-result review remain
-required.
+run. This LOCAL evidence preceded packaging and did not itself prove deployment,
+preflight, activation or launch.
+
+The exact RC16 release was subsequently approved and installed from tag
+`time-tl-staging-20260928-rc16-city-collision-episodes`, commit
+`c09201c8ad4ad000fdfe3d50f8b2e27478c0bc71`, archive SHA-256
+`6fecf77d25d5b55293f0f790ecdd05e0a5ba6d09d730fab71edb74372c8c57dd`.
+The verified archive contained 224 entries and was 383,778 bytes. Immutable
+image `sha256:1bff5e55c00d4d526e4d0d8062f17d999ce2f0fb318c7b55410612c3b5011ecc`
+was built with unchanged Compose SHA-256
+`b00192a54e676a0646a89cf33d5e24ea6de167a1db84409749fadc4b9f0b472d`.
+`admin-web` runs RC16, is healthy with restart count zero, and direct and public
+`/login` checks returned HTTP 200. RC16 `bot` and all three workers remain
+`Created` and were never started. PostgreSQL remains at
+`0006_outbox_terminal_retention`; no migration ran.
+
+Exactly one RC16 STAGING preflight ran for pending revision 10. Telegram `getMe`
+passed, then exactly one official `active.json` request failed closed as
+`INVALID_RESPONSE / location_type_catalogue_mismatch / count=1`; the preflight
+exited with status 2 and did not retry. Owner state remained latest revision 10,
+pending revision 10 and ACTIVE revision 6, with zero activation audit rows. The
+outbox remained 29 total, 24 delivered and 5 undelivered rows, and the one-off
+count remained 0. There was no activation, service start, message, persistence
+change or proxy change.
+
+Fresh verified rollback backup:
+`/home/trio/time-tl-bot/backups/pre-rc16-city-collision-episodes-20260928T140756Z`.
+Its database dump is 692,590 bytes; recorded source and database hashes were
+rechecked. Current server verdict is RC16 `HOLD`; phase 2 remains prohibited.
+
+A one-request read-only RC16 type diagnostic received HTTP 200 with 59 rows. Its
+sole relevant direct row used canonical UID `31`, Ukrainian title `м. Київ` and
+provider type `oblast`. The pinned exact UID/name record is a root
+`Місто з спеціальним статусом` with no parent. There was one direct row and no
+alias row; the diagnostic made no state change.
+
+RC17 permits this narrow provider-type compatibility only for a direct pinned
+`Місто з спеціальним статусом`: provider type may be `city` or the observed
+`oblast` only when the canonical UID and normalized Ukrainian title exactly equal
+the pinned official UID and name. Downstream code uses only the official pinned
+identity, type and root hierarchy. Ordinary `Область` rows remain unchanged; an
+unknown UID is never title-mapped or inferred. Any other drift rejects the whole
+snapshot and leaves the release in HOLD.
+
+RC17 LOCAL evidence: 106 focused tests passed; the full suite passed 558 tests
+with five destructive PostgreSQL E2E skips and one Starlette warning. Ruff,
+strict mypy for 72 source files, compileall and `git diff --check` passed.
+Independent safety review returned `PASS` with no findings. This LOCAL evidence
+is not deployment, preflight, activation or launch evidence; exact packaging,
+deploy, one preflight and independent live-result review remain required.
 Resume file: none.

@@ -36,6 +36,7 @@ OBSERVED_CITY_ALIASES = (
 ALIAS_REGION_TYPES = REGION_TYPES | {
     base_uid: "Громада" for _, base_uid, _, _ in OBSERVED_CITY_ALIASES
 }
+SPECIAL_REGION_TYPES = REGION_TYPES | {"30": "Місто з спеціальним статусом"}
 META_TIMESTAMP = "2026/09/20 15:00:00 +0300"
 
 
@@ -119,6 +120,24 @@ def city_alias_active(
         alert_id,
         uid=live_uid,
         location_type=location_type,
+        alert_type=alert_type,
+    )
+    payload["alerts"][0]["location_title"] = title
+    return payload
+
+
+def special_city_active(
+    uid: str,
+    title: str,
+    *,
+    provider_type: str,
+    alert_id: int = 10,
+    alert_type: str = "air_raid",
+):
+    payload = active(
+        alert_id,
+        uid=uid,
+        location_type=provider_type,
         alert_type=alert_type,
     )
     payload["alerts"][0]["location_title"] = title
@@ -319,6 +338,78 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             )
         ).fetch(fetch_revision=1, last_modified=None)
         self.assertIsNotNone(result.failure)
+
+    def test_special_city_city_and_oblast_presentations_share_official_identity(self):
+        provider = adapter(Transport(), region_types=SPECIAL_REGION_TYPES)
+        for uid, official_name in (("31", "м. Київ"), ("30", "м. Севастополь")):
+            with self.subTest(uid=uid):
+                city = special_city_active(uid, official_name, provider_type="city")
+                oblast = special_city_active(uid, official_name, provider_type="oblast")
+
+                city_episodes, city_digest = provider._parse_active_payload(
+                    json.dumps(city).encode()
+                )
+                oblast_episodes, oblast_digest = provider._parse_active_payload(
+                    json.dumps(oblast).encode()
+                )
+
+                self.assertEqual(city_episodes, oblast_episodes)
+                self.assertEqual(city_digest, oblast_digest)
+                self.assertEqual(uid, oblast_episodes[0].location_uid)
+
+    async def test_special_city_requires_direct_uid_exact_title_and_allowed_type(self):
+        samples = (
+            (
+                special_city_active("31", "must-not-leak-title", provider_type="oblast"),
+                "special_city_title_mismatch",
+            ),
+            (
+                special_city_active("31", "must-not-leak-title", provider_type="city"),
+                "special_city_title_mismatch",
+            ),
+            (
+                special_city_active("31", "м. Київ", provider_type="raion"),
+                "location_type_catalogue_mismatch",
+            ),
+            (
+                special_city_active("30", "м. Київ", provider_type="oblast"),
+                "special_city_title_mismatch",
+            ),
+            (
+                special_city_active("999999", "м. Київ", provider_type="oblast"),
+                "location_uid_unknown",
+            ),
+        )
+        for payload, expected_code in samples:
+            with self.subTest(code=expected_code):
+                raw_uid = str(payload["alerts"][0]["location_uid"])
+                raw_title = str(payload["alerts"][0]["location_title"])
+                result = await adapter(
+                    Transport(response(200, payload, **{"Last-Modified": MARKER_1})),
+                    region_types=SPECIAL_REGION_TYPES,
+                ).fetch(fetch_revision=1, last_modified=None)
+
+                self.assertIsNone(result.snapshot)
+                self.assertEqual(expected_code, result.diagnostic_code)
+                summary = result.sanitized_failure()
+                assert summary is not None
+                self.assertNotIn(raw_uid, summary)
+                self.assertNotIn(raw_title, summary)
+
+    async def test_regular_oblast_type_validation_is_unchanged(self):
+        accepted = active(uid="16", location_type="oblast")
+        rejected = active(uid="16", location_type="city")
+
+        accepted_result = await adapter(
+            Transport(response(200, accepted, **{"Last-Modified": MARKER_1}))
+        ).fetch(fetch_revision=1, last_modified=None)
+        rejected_result = await adapter(
+            Transport(response(200, rejected, **{"Last-Modified": MARKER_1}))
+        ).fetch(fetch_revision=1, last_modified=None)
+
+        self.assertIsNotNone(accepted_result.snapshot)
+        self.assertIsNone(rejected_result.snapshot)
+        self.assertEqual("location_type_catalogue_mismatch", rejected_result.diagnostic_code)
 
     async def test_bounded_city_aliases_resolve_only_to_official_catalogue_identity(self):
         official_by_uid = load_catalog().by_uid
@@ -1227,6 +1318,34 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((), snapshot.active_episodes)
         self.assertEqual((), await repository.outbox())
 
+    async def test_invalid_special_city_presentation_globally_fails_closed(self):
+        repository = InMemoryAlertRepository(
+            [
+                ("community", self.scope),
+                ("kyiv", RegionScope.from_hierarchy("31")),
+            ]
+        )
+        payload = active()
+        invalid_special = special_city_active(
+            "31",
+            "must-not-leak-title",
+            provider_type="oblast",
+            alert_id=11,
+        )["alerts"][0]
+        payload["alerts"].append(invalid_special)
+
+        await self.worker_for(
+            repository,
+            Transport(response(200, payload, **{"Last-Modified": MARKER_1})),
+        ).run_once()
+
+        for scope_id in ("community", "kyiv"):
+            snapshot = await repository.snapshot_for(scope_id)
+            assert snapshot is not None
+            self.assertEqual(AlertState.UNKNOWN, snapshot.state)
+            self.assertEqual((), snapshot.active_episodes)
+        self.assertEqual((), await repository.outbox())
+
     async def test_unknown_uid_after_known_active_degrades_every_scope_and_preserves_active(self):
         second_scope = RegionScope.from_hierarchy("31")
         repository = InMemoryAlertRepository(
@@ -1408,6 +1527,75 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             1,
             sum(
                 item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await repository.outbox()
+            ),
+        )
+
+    async def test_special_city_oblast_presentation_is_root_scoped_and_restart_safe(self):
+        repository = InMemoryAlertRepository(
+            [
+                ("kyiv", RegionScope.from_hierarchy("31")),
+                ("oblast", RegionScope.from_hierarchy("16")),
+            ]
+        )
+        transport = Transport(
+            response(
+                200,
+                special_city_active("31", "м. Київ", provider_type="oblast"),
+                **{"Last-Modified": MARKER_1},
+            ),
+            response(
+                200,
+                special_city_active(
+                    "31",
+                    "м. Київ",
+                    provider_type="oblast",
+                    alert_type="chemical",
+                ),
+                **{"Last-Modified": MARKER_2},
+            ),
+            response(304, **{"Last-Modified": MARKER_2}),
+        )
+        worker = AlertWorker(
+            provider=adapter(transport),
+            repository=repository,
+            lease=InMemorySingletonLease(),
+            monotonic=lambda: self.clock,
+            jitter=lambda a, b: 7.0,
+        )
+
+        await worker.run_once()
+        kyiv = await repository.snapshot_for("kyiv")
+        oblast = await repository.snapshot_for("oblast")
+        assert kyiv is not None and oblast is not None
+        self.assertEqual(AlertState.ACTIVE, kyiv.state)
+        self.assertEqual("31", kyiv.active_episodes[0].episode.location_uid)
+        self.assertEqual(AlertState.CLEAR_CONFIRMED, oblast.state)
+        self.assertEqual((), oblast.active_episodes)
+
+        await repository.apply_process_restart_atomically()
+        restarted = await repository.snapshot_for("kyiv")
+        assert restarted is not None
+        self.assertEqual(AlertState.STALE, restarted.state)
+        self.assertEqual(1, len(restarted.active_episodes))
+
+        self.clock += 15
+        await worker.run_once()
+        candidate = await repository.snapshot_for("kyiv")
+        assert candidate is not None
+        self.assertEqual(AlertState.STALE, candidate.state)
+        self.assertTrue(candidate.pending_clear_candidate)
+
+        self.clock += 15
+        await worker.run_once()
+        cleared = await repository.snapshot_for("kyiv")
+        assert cleared is not None
+        self.assertEqual(AlertState.CLEAR_CONFIRMED, cleared.state)
+        self.assertEqual(
+            1,
+            sum(
+                item.scope_id == "kyiv"
+                and item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
                 for item in await repository.outbox()
             ),
         )

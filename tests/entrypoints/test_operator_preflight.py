@@ -105,6 +105,32 @@ async def test_probe_is_read_only_and_summary_contains_no_secrets_or_ids() -> No
 
 
 @pytest.mark.asyncio
+async def test_probe_accepts_exact_catalogue_special_city_oblast_presentation() -> None:
+    payload = json.loads(full_body())
+    payload["alerts"][0]["location_type"] = "oblast"
+
+    class SpecialCityTransport:
+        async def send(self, _request: object) -> HttpResponse:
+            return HttpResponse(
+                200,
+                {"Last-Modified": MARKER},
+                json.dumps(payload).encode(),
+            )
+
+    evidence = await probe_candidate(
+        candidate(),
+        123,
+        bot_factory=FakeBot,
+        transport_factory=SpecialCityTransport,
+    )
+
+    summary = evidence.sanitized_summary()
+    assert "alerts=active_json_full_200" in summary
+    assert "м. Київ" not in summary
+    assert "secret" not in summary
+
+
+@pytest.mark.asyncio
 async def test_probe_accepts_exact_catalogue_backed_city_alias_without_exposing_it() -> None:
     payload = json.loads(full_body())
     payload["alerts"][0].update(

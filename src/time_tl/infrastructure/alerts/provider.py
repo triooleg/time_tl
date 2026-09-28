@@ -566,9 +566,18 @@ class AlertsInUaAdapter:
     ) -> tuple[str, str, str]:
         pinned_type = self._region_types.get(provider_uid)
         if pinned_type is not None:
+            official_name = self._region_names[provider_uid]
+            if pinned_type == "Місто з спеціальним статусом":
+                if provider_type not in {"city", "oblast"}:
+                    raise SnapshotValidationError("location_type_catalogue_mismatch")
+                if self._normalize_city_title(provider_title) != self._normalize_city_title(
+                    official_name
+                ):
+                    raise SnapshotValidationError("special_city_title_mismatch")
+                return provider_uid, official_name, pinned_type
             if provider_type not in self._PINNED_TO_PROVIDER_TYPES[pinned_type]:
                 raise SnapshotValidationError("location_type_catalogue_mismatch")
-            return provider_uid, self._region_names[provider_uid], pinned_type
+            return provider_uid, official_name, pinned_type
 
         if provider_type != "city":
             raise SnapshotValidationError("location_uid_unknown")
