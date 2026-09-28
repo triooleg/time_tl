@@ -1,4 +1,4 @@
-# Time TL RC8 incident through RC17 bounded STAGING launch — 2026-09-28
+# Time TL RC8 incident through RC18 release preparation — 2026-09-28
 
 ## Scope
 
@@ -7,9 +7,10 @@ server operation, the later exact RC9 diagnostic-only deployment, and the exact
 RC10 through RC17 deployments and preflights. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
-boundary and the contained RC9 read-only diagnostic. The final RC17 section is
-bounded one-chat allowlisted G6 STAGING evidence only; this record is not public,
-production or G9 canary evidence.
+boundary and the contained RC9 read-only diagnostic. RC17 is the current server
+evidence and is bounded one-chat allowlisted G6 STAGING only. RC18 and FIX3
+evidence appended below is release preparation only and did not mutate the
+server. This record is not public, production or G9 canary evidence.
 
 The authorized packet was:
 
@@ -929,3 +930,65 @@ means exactly-once delivery is not claimed, and five destructive PostgreSQL E2E
 tests remained skipped. Monitoring must move the release to HOLD on freshness,
 heartbeat, restart, open-outbox or retry drift. G9, public launch and PRODUCTION
 remain blocked and unauthorized.
+
+## RC18 prepared package: Russian admin and safe onboarding
+
+RC18 is a prepared, reproducible **STAGING candidate**, not a deployment. Its
+exact identity is:
+
+- tag: `time-tl-staging-20260928-rc18-russian-admin-onboarding`;
+- annotated tag object: `eaf1aa07ace95853ebb73ee2ef811b5b89945b0b`;
+- commit: `0f68121503fa54fdbeea57af481df8ee0e1e73df`;
+- tree: `b9feaec78682f07e99fe008d78a1c64e235e43a9`;
+- archive SHA-256:
+  `ae75ebb252f64501d4b0dc9a14c6aaae232034890b8ca17f940e029129a363c0`.
+
+The primary archive and the independently generated reproducibility archive
+matched. Packaging and independent review returned `PASS` for the bounded
+STAGING candidate, but no exact deployment approval was granted and no server
+state, service, revision, database, proxy or recipient allowlist was changed.
+RC17 therefore remains the installed bounded-STAGING release.
+
+The candidate translates the owner admin interface into Russian and completes a
+privacy-safe manual onboarding flow in LOCAL/SIMULATION. Simulation covers
+`/start`, manual region selection from the pinned official catalogue, modes,
+schedules, parity, overrides, gaps, reminders, sensitive-link handling,
+alert/all-clear/lesson-return behavior, restart/retry/deduplication and user-data
+deletion. It uses fake Telegram/provider adapters and sends no live message.
+Runtime coordinate resolution remains deliberately disabled through
+`RejectingCoordinateResolver`; raw coordinates are rejected and not persisted.
+
+The ordinary full suite passed `596` tests, with the five explicitly opt-in
+destructive PostgreSQL tests skipped in that run. Separately, all five destructive
+tests passed against disposable PostgreSQL 16.15 on a local-only database. A
+custom-format backup (60,677 bytes, SHA-256
+`9233ee2796c7068eb2ef62dffe520f4ac00878a5e880d7719000366dfa9c87cd`)
+restored into a different disposable database; migration head
+`0006_outbox_terminal_retention`, 24 public tables and recorded row counts
+matched. The disposable server was stopped and its port closed. This is database
+recovery evidence, not a Telegram or production deployment.
+
+Independent review passed the prepared bounded-STAGING scope. Live inbound
+Telegram onboarding has not been exercised from the approved chat, so G9 remains
+blocked. The exact remaining human canary begins with `/start` from an explicitly
+approved allowlisted account and must be separately observed and reviewed before
+any wider release claim.
+
+## FIX3 production preparation: LOCAL evidence only
+
+Commit `4e518949cbe23ca18b81ab1da649541daed02b29` descends from RC18 and adds a
+fail-closed production release-attestation path. Independent R3 review returned
+`PASS` for the implementation at **LOCAL** level. The gate requires the fixed
+detached Ed25519-signed release manifest, an exact manifest fingerprint and
+revision-bound preflight evidence, matching active database configuration and
+the expected Alembic head before production roles may proceed. Host metrics are
+also part of that bounded read-only preflight path. No live production preflight
+has executed.
+
+`PRODUCTION_PUBLIC_RELEASE_APPROVED` remains `False`. No exact production tag,
+archive, immutable image, detached signed attestation or production preflight is
+recorded here. No production service has been installed or started. G7 still
+requires deployment-specific backup/rollback, resource, secret, monitoring and
+health evidence; G8 requires approval for the eventual exact production artifact;
+G9 requires the separately approved live canary. FIX3 therefore does not convert
+RC18 into a production release and does not authorize public delivery.

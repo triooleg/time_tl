@@ -28,6 +28,30 @@ Telegram staging and production evidence.
 
 ## Verified evidence
 
+Current release-preparation evidence recorded on 2026-09-28 is newer than the
+historical 2026-09-23 baseline below:
+
+- exact RC18 tag `time-tl-staging-20260928-rc18-russian-admin-onboarding`
+  resolves to commit `0f68121503fa54fdbeea57af481df8ee0e1e73df` and tree
+  `b9feaec78682f07e99fe008d78a1c64e235e43a9`;
+- its recorded archive SHA-256 is
+  `ae75ebb252f64501d4b0dc9a14c6aaae232034890b8ca17f940e029129a363c0`;
+  the release archive and reproducibility archive matched;
+- the Russian owner-admin localization and safe manual Telegram onboarding flow
+  passed LOCAL/SIMULATION verification and independent bounded-STAGING review;
+- the current ordinary full suite passed `596` tests, with the five opt-in
+  destructive PostgreSQL cases skipped in that run;
+- those five destructive cases separately passed against disposable PostgreSQL
+  16.15, and a custom-format backup restored into a separate database with the
+  migration head and table/count checks intact;
+- production-preparation FIX3 commit
+  `4e518949cbe23ca18b81ab1da649541daed02b29` passed independent R3 review at
+  **LOCAL** level only. It adds a fail-closed detached release-attestation gate;
+  it is not an exact production release or deployment.
+
+RC18 has not been installed on the server. These facts do not replace the active
+RC17 bounded-STAGING evidence and do not approve production or public delivery.
+
 The following LOCAL evidence was recorded on 2026-09-23 for exact commit
 `4ea3b1bedfc31142ae2c53d32e550e4e8a20dcff`:
 
@@ -66,19 +90,21 @@ production evidence.
 | G1 SPEC | PASS | Product modes, schedule semantics, privacy and release boundaries are documented. |
 | G2 SCHEDULE | PASS | Local decision-table and integration tests cover parity, weekends, overrides, gaps and disabled lessons. |
 | G3 ALERT SAFETY | PASS (SIMULATION) | Local fail-closed tests and the real PostgreSQL 16 fault/restart harness pass. No official-provider or production claim is implied. |
-| G4 LOCAL QUALITY | PASS | Evidence list above. |
+| G4 LOCAL QUALITY | PASS | RC18 ordinary full suite: `596 passed, 5 skipped`; the five opt-in destructive PostgreSQL tests separately passed on disposable PostgreSQL 16.15, and backup/restore verification passed. |
 | G5 SIMULATION E2E | PASS | Exact-image server simulation, PostgreSQL fault/restart E2E, migration, backup/restore and persistence checks passed with fake provider and disabled Telegram. |
-| G6 TELEGRAM STAGING | PASS (BOUNDED) | Exact RC17 one-chat allowlisted outbound `ALERT_STARTED` and `ALL_CLEAR_CONFIRMED` flow passed independent post-launch review. Inbound onboarding UX was not exercised. |
+| G6 TELEGRAM STAGING | PASS (BOUNDED) | Exact RC17 one-chat allowlisted outbound `ALERT_STARTED` and `ALL_CLEAR_CONFIRMED` flow passed independent post-launch review. RC18 onboarding is verified only in LOCAL/SIMULATION; live inbound onboarding remains pending. |
 | G7 SERVER READINESS | REVIEW | Exact image, backup, rollback, health, restart fence and monitoring evidence exist for bounded STAGING. Continued readiness depends on freshness, heartbeat, restart, open-outbox and retry monitoring. |
 | G8 DEPLOY APPROVAL | PASS (RC17 SCOPE) | Exact RC17 package, preflight, revision-10 activation and ordered bounded-STAGING launch were approved and evidenced. This is not production approval. |
-| G9 CANARY | BLOCKED | Public/production canary is not authorized; bounded one-chat STAGING evidence does not advance G9. |
+| G9 CANARY | BLOCKED | Live inbound onboarding and a separately approved public/production canary have not run. RC18 preparation and bounded one-chat RC17 STAGING evidence do not advance G9. |
 
 ## Deliberately closed capabilities
 
-Production remains fail closed. `production_oblast_scope_release`,
-`reviewed_region_resolver`, `schedule_worker` and `sender_worker` capability flags
-are still false. The worker implementations exist, but the flags must not be enabled
-until their corresponding staging/release evidence is independently approved.
+Production remains fail closed. The compile-time
+`PRODUCTION_PUBLIC_RELEASE_APPROVED` switch is still `False`. FIX3 requires a
+valid detached release attestation and matching active database revision before a
+production role may start, but no production artifact has been attested, installed
+or preflighted. The public switch must not be enabled until G7-G9 evidence and an
+exact production release approval exist.
 
 Coordinate-to-region resolution is not released. A user may select and confirm one
 of the reviewed oblasts manually; raw Telegram coordinates are rejected and are not
@@ -86,13 +112,16 @@ persisted. This does not yet satisfy the requested geolocation experience.
 
 ## Required next evidence
 
-1. Obtain dedicated Telegram and alerts.in.ua tokens without reusing unrelated
-   project secrets; approve staging chat IDs.
-2. Review and approve a privacy-safe coordinate-to-oblast resolver, or explicitly
-   approve manual oblast selection as the release scope.
-3. Verify staging secrets injection, access/TLS boundary and rollback without
-   exposing credentials, then request an exact staging approval.
-4. Run allowlisted Telegram staging, then a separately approved canary.
+1. If RC18 is to replace RC17 in STAGING, approve and deploy that exact package,
+   then repeat the bounded checks without expanding the allowlist.
+2. Exercise inbound `/start`, manual region selection, preferences, schedule and
+   deletion from an approved allowlisted Telegram account. Geolocation remains
+   deliberately disabled through `RejectingCoordinateResolver`.
+3. Prepare and independently approve an exact production artifact plus its
+   detached attestation; verify deployment-specific G7 backup, rollback, secrets,
+   monitoring, database migration head and production preflight evidence.
+4. Approve and run a controlled G9 canary before considering the compile-time
+   public-release switch or wider delivery.
 
 An isolated permanent SIMULATION deployment was the first server baseline. The
 later STAGING-scoped, read-only provider preflights are recorded below; none
@@ -102,10 +131,13 @@ services or sent a message. No production or canary deployment has occurred.
 ## Session Continuity
 
 Last session: 2026-09-28
-Stopped at: RC17 is active in a bounded one-chat allowlisted STAGING launch.
+Stopped at: RC17 remains active in a bounded one-chat allowlisted STAGING launch.
 The exact preflight, revision-10 activation, ordered startup, natural outbound
 alert/all-clear flow and independent post-launch review passed. This is G6
-evidence only; public, PRODUCTION and G9 remain blocked and unauthorized.
+evidence only. RC18 is a prepared, reproducible package with Russian admin and
+LOCAL/SIMULATION onboarding evidence; it has not been deployed. FIX3 is LOCAL
+production preparation only. Public, PRODUCTION and G9 remain blocked and
+unauthorized.
 The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256

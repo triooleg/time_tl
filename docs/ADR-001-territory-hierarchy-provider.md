@@ -78,6 +78,11 @@ not an automatic fallback.
     the pinned official UID and name. Downstream identity, type and root hierarchy
     always come from the pinned record. Ordinary oblast behavior is unchanged;
     unknown UIDs are never resolved by title.
+13. RC18 changes the owner-admin language and manual onboarding coverage only.
+    It does not change the approved alert provider, pinned UID/name authority,
+    region hierarchy, fail-closed alert semantics or coordinate policy. Runtime
+    coordinate resolution remains disabled; users select an official pinned
+    region manually.
 
 ## Canonical catalogue contract
 
@@ -216,6 +221,13 @@ substitute for `active.json`.
 - RC17 bounded one-chat allowlisted outbound alert/all-clear flow: **G6 PASS**;
   independent post-launch review found no issues. Inbound onboarding UX was not
   exercised, and this does not establish public or production readiness.
+- RC18 exact reproducible package and independent review: **PASS** as a prepared
+  bounded-STAGING candidate only. It has not been deployed. Russian admin and
+  onboarding are LOCAL/SIMULATION evidence; live inbound onboarding remains
+  pending.
+- FIX3 production attestation gate: **R3 PASS (LOCAL)**. The compile-time public
+  release switch remains false, and no exact production artifact, detached
+  attestation, deployment, preflight or canary is claimed.
 - STAGING canary with approved accounts, monitoring and rollback evidence:
   **PENDING** beyond the bounded one-chat evidence.
 - PRODUCTION/public launch: **NOT APPROVED**. Local tests and code review do not
