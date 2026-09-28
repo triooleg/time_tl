@@ -200,6 +200,7 @@ class TelegramApplication:
         import_sessions: ImportSessionRepository | None = None,
         allow_in_memory_import_sessions: bool = True,
         coordinate_suggestions_enabled: bool = False,
+        homework_enabled: bool = False,
         process_state_max_users: int = 256,
         process_state_ttl_seconds: float = 900.0,
         process_state_clock: Callable[[], float] = monotonic,
@@ -208,6 +209,7 @@ class TelegramApplication:
         self._region_by_id = {item.region_id: item for item in regions}
         self.resolver = resolver
         self.coordinate_suggestions_enabled = coordinate_suggestions_enabled
+        self.homework_enabled = homework_enabled
         self.repository = repository or InMemoryAccountRepository()
         if import_sessions is not None:
             selected_import_sessions = import_sessions
@@ -363,22 +365,72 @@ class TelegramApplication:
             f"📚 Розклад: {active.name if active else 'ще немає'}"
         )
         text = f"{prefix}\n\n{summary}" if prefix else summary
-        return View(
-            text,
+        rows = [(Button("📚 Розклад", "menu:schedules"),)]
+        if self.homework_enabled:
+            rows.append((Button("📝 Домашні завдання", "menu:homework"),))
+        rows.extend(
             (
-                (Button("📚 Розклад", "menu:schedules"),),
-                (Button("🔔 Сповіщення", "menu:mode"),),
-                (Button("📍 Територія", "menu:region"),),
-                (Button("⏰ Нагадування", "menu:reminder"),),
-                (Button("ℹ️ Як це працює", "menu:info"),),
+                (Button("🔔 Сповіщення", "menu:notifications"),),
+                (Button("📍 Моя територія", "menu:region"),),
+                (Button("⚙️ Налаштування", "menu:settings"),),
+                (Button("ℹ️ Допомога", "menu:info"),),
+            )
+        )
+        return View(text, tuple(rows))
+
+    @staticmethod
+    def notifications_menu() -> View:
+        return View(
+            "🔔 Сповіщення\n\n"
+            "Оберіть, що потрібно налаштувати. Режим тривог і уроків "
+            "змінюється окремо від часу нагадування до уроку.",
+            (
+                (Button("🔔 Режим сповіщень", "menu:mode"),),
+                (Button("⏰ Час нагадування", "menu:reminder"),),
+                (Button("🏠 Головне меню", "menu:home"),),
+            ),
+        )
+
+    @staticmethod
+    def settings_menu() -> View:
+        return View(
+            "⚙️ Налаштування",
+            (
+                (Button("🔔 Сповіщення", "menu:notifications"),),
+                (Button("⏰ Час нагадування", "menu:reminder"),),
+                (Button("🔐 Конфіденційність", "settings:privacy"),),
+                (Button("🏠 Головне меню", "menu:home"),),
+            ),
+        )
+
+    def privacy(self) -> View:
+        homework_line = (
+            "\n• ваші особисті домашні завдання та стан їх виконання;"
+            if self.homework_enabled
+            else ""
+        )
+        return View(
+            "🔐 Конфіденційність\n\n"
+            "Time TL зберігає лише дані, потрібні для роботи бота:\n"
+            "• ваш Telegram ID;\n"
+            "• підтверджену територію;\n"
+            "• режим сповіщень і час нагадування;\n"
+            "• ваші розклади."
+            f"{homework_line}\n\n"
+            "Координати після пропозиції території не зберігаються. "
+            "Посилання на уроки зберігаються зашифрованими та не показуються "
+            "іншим користувачам.",
+            (
                 (Button("🗑 Видалити мої дані", "account:delete:request"),),
+                (Button("⬅️ До налаштувань", "menu:settings"),),
+                (Button("🏠 Головне меню", "menu:home"),),
             ),
         )
 
     @staticmethod
     def info() -> View:
         return View(
-            "ℹ️ Як працює Time TL\n\n"
+            "ℹ️ Допомога\n\nЯк працює Time TL\n\n"
             "🚨 Під час офіційної повітряної тривоги бот повідомляє про небезпеку "
             "для обраної території та радить прямувати до укриття. Бот не стверджує, "
             "що фактичний урок зупинено, і не пропонує підключатися під час тривоги.\n\n"
@@ -395,13 +447,19 @@ class TelegramApplication:
         self.repository.get_or_create(user_id)
         token = uuid4().hex[:12]
         self._deletions[user_id] = (token, 1)
+        homework_line = (
+            "• усі домашні завдання та позначки виконання;\n"
+            if self.homework_enabled
+            else ""
+        )
         return View(
             "⚠️ Видалення особистих даних\n\n"
             "Буде безповоротно видалено:\n"
             "• ваш Telegram ID;\n"
             "• обрану територію;\n"
             "• налаштування сповіщень і нагадувань;\n"
-            "• усі розклади та збережені посилання на уроки.\n\n"
+            "• усі розклади та збережені посилання на уроки;\n"
+            f"{homework_line}\n"
             "Це не вплине на дані інших користувачів. Продовжити?",
             (
                 (Button("Продовжити", f"account:delete:review:{token}"),),

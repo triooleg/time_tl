@@ -127,6 +127,22 @@ def production_release_manifest() -> ProductionReleaseManifest:
 
 
 class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
+    def test_homework_is_disabled_by_default(self) -> None:
+        settings = Settings(
+            DATABASE_URL=SecretStr("postgresql://user:pass@localhost/time_tl"),
+            _env_file=None,
+        )
+
+        self.assertFalse(settings.homework_enabled)
+
+    def test_unreleased_homework_cannot_start_in_production(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not approved for production"):
+            settings_for(
+                "bot",
+                environment=Environment.PRODUCTION,
+                telegram=TelegramTransport.LIVE,
+            ).model_copy(update={"homework_enabled": True}).validate_safety_boundaries()
+
     def test_sender_transport_timeout_is_capped_at_ten_seconds(self) -> None:
         with self.assertRaises(ValueError):
             Settings(
@@ -474,6 +490,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 region_confirmation,
                 territory_catalog,
                 heartbeat_repository,
+                homework_repository,
             ):
                 self.assertEqual("AsyncPostgresAccountRepository", type(repository).__name__)
                 self.assertIsNone(await resolver.resolve(50.45, 30.52))
@@ -497,6 +514,24 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     "PostgresWorkerHeartbeatRepository",
                     type(heartbeat_repository).__name__,
+                )
+                self.assertIsNone(homework_repository)
+
+    async def test_staging_homework_dependency_is_built_only_when_enabled(self) -> None:
+        settings = settings_for(
+            "bot",
+            environment=Environment.STAGING,
+            telegram=TelegramTransport.LIVE,
+        ).model_copy(update={"homework_enabled": True})
+        with patch(
+            "time_tl.runtime.services._assert_territory_runtime_ready",
+            AsyncMock(return_value="reviewed-v1"),
+        ):
+            async with postgres_bot_dependencies(settings) as dependencies:
+                homework_repository = dependencies[-1]
+                self.assertEqual(
+                    "AsyncPostgresHomeworkRepository",
+                    type(homework_repository).__name__,
                 )
 
     async def test_released_workers_cannot_fall_back_to_inert_production_adapters(self) -> None:

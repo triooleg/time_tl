@@ -20,6 +20,7 @@ from time_tl.domain.schedule import (
     ScheduleProfile,
 )
 
+from .homework_router import AsyncHomeworkPort, HomeworkUx
 from .models import Button, NotificationMode, View
 from .service import (
     InMemoryAccountRepository,
@@ -197,6 +198,8 @@ class AsyncTelegramApplication:
         allow_process_local_imports: bool = True,
         coordinate_suggestions_enabled: bool = False,
         onboarding_text: str = "",
+        homework_enabled: bool = False,
+        homework_port: AsyncHomeworkPort | None = None,
         process_state_max_users: int = 256,
         process_state_ttl_seconds: float = 900.0,
         process_state_clock: Callable[[], float] = monotonic,
@@ -204,6 +207,10 @@ class AsyncTelegramApplication:
         if process_state_max_users < 1 or process_state_ttl_seconds <= 0:
             raise ValueError("invalid process-state limits")
         self.repository = repository
+        self.homework_enabled = homework_enabled and homework_port is not None
+        self.homework_ux = (
+            HomeworkUx(homework_port) if self.homework_enabled and homework_port else None
+        )
         self.region_confirmation = region_confirmation
         self.territory_catalog = territory_catalog
         self._process_state_max_users = process_state_max_users
@@ -221,6 +228,7 @@ class AsyncTelegramApplication:
             import_sessions=import_sessions,
             allow_in_memory_import_sessions=allow_process_local_imports,
             coordinate_suggestions_enabled=coordinate_suggestions_enabled,
+            homework_enabled=self.homework_enabled,
             process_state_max_users=process_state_max_users,
             process_state_ttl_seconds=process_state_ttl_seconds,
             process_state_clock=process_state_clock,
@@ -326,6 +334,15 @@ class AsyncTelegramApplication:
 
     def info(self) -> View:
         return self._app.info()
+
+    def notifications_menu(self) -> View:
+        return self._app.notifications_menu()
+
+    def settings_menu(self) -> View:
+        return self._app.settings_menu()
+
+    def privacy(self) -> View:
+        return self._app.privacy()
 
     async def choose_mode(self, user_id: int, mode: NotificationMode) -> View:
         async with self._user_lock(user_id):
@@ -532,7 +549,28 @@ class AsyncTelegramApplication:
 
     async def menu(self, user_id: int, *, prefix: str = "") -> View:
         await self._hydrate(user_id)
-        return self._app.menu(user_id, prefix=prefix)
+        view = self._app.menu(user_id, prefix=prefix)
+        if self.homework_ux is None:
+            return view
+        try:
+            items = await self.homework_ux.port.list_homework(user_id, include_past=False)
+            pending_count = sum(not item.completed for item in items)
+        except Exception:
+            # Homework is an optional bounded capability. Its read failure must
+            # not make the core bot menu or safety functions unavailable.
+            return view
+        if pending_count < 1:
+            return view
+        rows = tuple(
+            tuple(
+                replace(button, label=f"📝 Домашні завдання · {pending_count}")
+                if button.callback_data == "menu:homework"
+                else button
+                for button in row
+            )
+            for row in view.rows
+        )
+        return replace(view, rows=rows)
 
     async def profile_editor_view(
         self,
@@ -1203,6 +1241,18 @@ def build_async_router(
     async def info(callback: CallbackQuery) -> None:
         await _edit(callback, application.info())
 
+    @router.callback_query(F.data == "menu:notifications")
+    async def notifications(callback: CallbackQuery) -> None:
+        await _edit(callback, application.notifications_menu())
+
+    @router.callback_query(F.data == "menu:settings")
+    async def settings(callback: CallbackQuery) -> None:
+        await _edit(callback, application.settings_menu())
+
+    @router.callback_query(F.data == "settings:privacy")
+    async def privacy(callback: CallbackQuery) -> None:
+        await _edit(callback, application.privacy())
+
     @router.callback_query(F.data == "account:delete:request")
     async def request_data_deletion(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
@@ -1320,4 +1370,8 @@ def build_async_router(
     from .schedule_router import build_schedule_router
 
     router.include_router(build_schedule_router(application))
+    if application.homework_ux is not None:
+        from .homework_router import build_homework_router
+
+        router.include_router(build_homework_router(application.homework_ux))
     return router

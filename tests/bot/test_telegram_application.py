@@ -76,6 +76,24 @@ class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
         callbacks = [button.callback_data for row in view.rows for button in row]
         self.assertEqual(callbacks, ["mode:lessons", "mode:lessons_and_sirens", "mode:sirens"])
 
+    def test_settings_privacy_and_notification_hubs_use_existing_controls(self) -> None:
+        notifications = self.app.notifications_menu()
+        self.assertEqual(
+            ["menu:mode", "menu:reminder", "menu:home"],
+            [button.callback_data for row in notifications.rows for button in row],
+        )
+
+        settings = self.app.settings_menu()
+        self.assertEqual(
+            ["menu:notifications", "menu:reminder", "settings:privacy", "menu:home"],
+            [button.callback_data for row in settings.rows for button in row],
+        )
+
+        privacy = self.app.privacy()
+        self.assertIn("лише дані, потрібні", privacy.text)
+        self.assertIn("Координати", privacy.text)
+        self.assertEqual("account:delete:request", privacy.rows[0][0].callback_data)
+
     def test_region_prompt_offers_location_and_command_free_manual_fallback(self) -> None:
         view = self.app.choose_mode(6, NotificationMode.SIRENS)
         buttons = [button for row in view.rows for button in row]

@@ -22,6 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -180,6 +181,118 @@ class ShareSession(TimestampMixin, Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     include_join_links: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+
+
+class ScheduleSubject(TimestampMixin, Base):
+    """Stable subject identity derived from one personal schedule profile."""
+
+    __tablename__ = "schedule_subjects"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("schedule_profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    normalized_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    __table_args__ = (
+        UniqueConstraint("profile_id", "normalized_name"),
+        UniqueConstraint("id", "profile_id", name="schedule_subject_identity"),
+        CheckConstraint("char_length(btrim(name)) > 0", name="name_nonempty"),
+        CheckConstraint("char_length(normalized_name) > 0", name="normalized_name_nonempty"),
+    )
+
+
+class HomeworkAssignment(TimestampMixin, Base):
+    """One personal homework assignment; shared ownership is a later additive phase."""
+
+    __tablename__ = "homework_assignments"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    owner_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    profile_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default="MANUAL")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["subject_id", "profile_id"],
+            ["schedule_subjects.id", "schedule_subjects.profile_id"],
+            name="fk_homework_subject_profile",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("char_length(btrim(text)) BETWEEN 1 AND 2000", name="text_length"),
+        CheckConstraint("source_type = 'MANUAL'", name="source_type_allowed"),
+        CheckConstraint("version >= 1", name="version_positive"),
+        Index("ix_homework_assignments_owner_due", "owner_user_id", "due_at", "id"),
+    )
+
+
+class HomeworkUserState(Base):
+    """Per-user completion state, separate from shared assignment content."""
+
+    __tablename__ = "homework_user_states"
+    homework_id: Mapped[UUID] = mapped_column(
+        ForeignKey("homework_assignments.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    completed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "(completed AND completed_at IS NOT NULL) OR (NOT completed AND completed_at IS NULL)",
+            name="completion_consistent",
+        ),
+        Index("ix_homework_user_states_user", "user_id", "homework_id"),
+    )
+
+
+class PendingHomeworkDraft(TimestampMixin, Base):
+    """Restart-safe, expiring confirmation draft. Raw tokens are never persisted."""
+
+    __tablename__ = "pending_homework_drafts"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    profile_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default="MANUAL")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_homework_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("homework_assignments.id", ondelete="CASCADE"), unique=True
+    )
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["subject_id", "profile_id"],
+            ["schedule_subjects.id", "schedule_subjects.profile_id"],
+            name="fk_pending_homework_subject_profile",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("char_length(btrim(text)) BETWEEN 1 AND 2000", name="text_length"),
+        CheckConstraint("source_type = 'MANUAL'", name="source_type_allowed"),
+        CheckConstraint(
+            "consumed_at IS NULL OR confirmed_homework_id IS NOT NULL",
+            name="consumed_has_result",
+        ),
+        Index(
+            "ix_pending_homework_active_user_created",
+            "user_id",
+            "created_at",
+            "token_hash",
+            postgresql_where=sa_text("revoked_at IS NULL AND consumed_at IS NULL"),
+        ),
+    )
 
 
 class AlertPollState(Base):

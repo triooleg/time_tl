@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     )
     telegram_bot_token: SecretStr | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
     bot_onboarding_text: str = Field(default="", alias="BOT_ONBOARDING_TEXT")
+    homework_enabled: bool = Field(default=False, alias="HOMEWORK_ENABLED")
     lesson_link_fernet_key: SecretStr | None = Field(default=None, alias="LESSON_LINK_FERNET_KEY")
     test_chat_allowlist_raw: str = Field(default="", alias="TEST_CHAT_ALLOWLIST")
     database_url: SecretStr = Field(alias="DATABASE_URL")
@@ -180,6 +181,10 @@ class Settings(BaseSettings):
     def validate_safety_boundaries(self) -> Settings:
         local = self.environment in {Environment.LOCAL, Environment.SIMULATION}
         database_managed = self.owner_config_source is OwnerConfigSource.DATABASE
+        if self.homework_enabled and self.environment is Environment.PRODUCTION:
+            raise ValueError(
+                "manual homework is not approved for production until its release gate passes"
+            )
         if (
             self.alert_provider is AlertProvider.FAKE
             and not local

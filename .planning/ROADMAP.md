@@ -11,6 +11,8 @@
 | 7. Official integration | Current API contract, token, limits, mapping, live read-only evidence | G0 then G3 |
 | 8. Portainer readiness and deploy | Backup, rollback, hardened Compose, approved stack deployment | G7 then G8 |
 | 9. Canary and public launch | Allowlisted pilot, monitoring, deletion flow, rollback evidence | G9 |
+| 10. Admin dashboard | Owner-only monitoring and configuration with audited activation | G7-G9 |
+| 11. Manual personal homework | Disabled-by-default manual homework CRUD using the active schedule; no OCR or Moiashkola | G2, G4, G5 |
 
 Critical path: contract -> local foundation -> onboarding and schedule -> decision engine -> simulation -> official API -> approved Portainer deployment -> canary.
 

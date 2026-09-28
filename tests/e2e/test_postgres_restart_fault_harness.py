@@ -193,12 +193,21 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         asyncio.run(cls._assert_0007_delivery_guard_absent())
         command.upgrade(config, "0007_outbox_indeterminate")
         asyncio.run(cls._assert_0007_delivery_guard())
+        asyncio.run(cls._drop_0008_tables_for_legacy_shape())
+        command.upgrade(config, "0008_homework_foundation")
+        asyncio.run(cls._assert_0008_homework_schema())
+        command.downgrade(config, "0007_outbox_indeterminate")
+        asyncio.run(cls._assert_0008_homework_schema_absent())
+        command.upgrade(config, "0008_homework_foundation")
+        asyncio.run(cls._assert_0008_homework_schema())
         command.downgrade(config, "0005_public_data_indexes")
         asyncio.run(cls._assert_0006_indexes_absent())
         command.upgrade(config, "0006_outbox_terminal_retention")
         asyncio.run(cls._assert_0006_indexes_and_explain())
         command.upgrade(config, "0007_outbox_indeterminate")
         asyncio.run(cls._assert_0007_delivery_guard())
+        command.upgrade(config, "0008_homework_foundation")
+        asyncio.run(cls._assert_0008_homework_schema())
         cls.upgrade_0003_to_0004_verified = True
         cls.downgrade_0004_to_0003_verified = True
         cls.upgrade_0004_to_0005_verified = True
@@ -207,6 +216,8 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         cls.downgrade_0006_to_0005_verified = True
         cls.upgrade_0006_to_0007_verified = True
         cls.downgrade_0007_to_0006_verified = True
+        cls.upgrade_0007_to_0008_verified = True
+        cls.downgrade_0008_to_0007_verified = True
 
     @staticmethod
     async def _reset_disposable_public_schema() -> None:
@@ -660,6 +671,87 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         if {"dispatch_started_at", "indeterminate_at"} & columns:
             raise AssertionError("0007 delivery columns survived downgrade")
 
+    @staticmethod
+    async def _drop_0008_tables_for_legacy_shape() -> None:
+        """Remove metadata-created homework tables so the 0008 upgrade is real."""
+
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.begin() as connection:
+                for table_name in (
+                    "pending_homework_drafts",
+                    "homework_user_states",
+                    "homework_assignments",
+                    "schedule_subjects",
+                ):
+                    await connection.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
+        finally:
+            await engine.dispose()
+
+    @staticmethod
+    async def _assert_0008_homework_schema() -> None:
+        expected = {
+            "schedule_subjects",
+            "homework_assignments",
+            "homework_user_states",
+            "pending_homework_drafts",
+        }
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.connect() as connection:
+                tables = set(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT table_name FROM information_schema.tables "
+                                "WHERE table_schema = 'public' AND table_name = ANY(:names)"
+                            ),
+                            {"names": sorted(expected)},
+                        )
+                    ).scalars()
+                )
+                revision = (
+                    await connection.execute(text("SELECT version_num FROM alembic_version"))
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+        if tables != expected:
+            raise AssertionError(f"0008 homework tables mismatch: {sorted(tables)}")
+        if revision != "0008_homework_foundation":
+            raise AssertionError(f"unexpected Alembic revision after 0008 upgrade: {revision}")
+
+    @staticmethod
+    async def _assert_0008_homework_schema_absent() -> None:
+        expected = {
+            "schedule_subjects",
+            "homework_assignments",
+            "homework_user_states",
+            "pending_homework_drafts",
+        }
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.connect() as connection:
+                count = int(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT count(*) FROM information_schema.tables "
+                                "WHERE table_schema = 'public' AND table_name = ANY(:names)"
+                            ),
+                            {"names": sorted(expected)},
+                        )
+                    ).scalar_one()
+                )
+                revision = (
+                    await connection.execute(text("SELECT version_num FROM alembic_version"))
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+        if count != 0:
+            raise AssertionError("0008 homework tables survived downgrade")
+        if revision != "0007_outbox_indeterminate":
+            raise AssertionError(f"unexpected Alembic revision after 0008 downgrade: {revision}")
+
     async def asyncSetUp(self) -> None:
         self.engine = create_engine(DATABASE_URL, pool_size=2, max_overflow=0)
         self.factory = create_session_factory(self.engine)
@@ -746,7 +838,7 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         )
         return repository
 
-    def test_upgrade_0003_to_0007_and_downgrades_are_verified(self) -> None:
+    def test_upgrade_0003_to_0008_and_downgrades_are_verified(self) -> None:
         self.assertTrue(self.upgrade_0003_to_0004_verified)
         self.assertTrue(self.downgrade_0004_to_0003_verified)
         self.assertTrue(self.upgrade_0004_to_0005_verified)
@@ -755,6 +847,8 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.downgrade_0006_to_0005_verified)
         self.assertTrue(self.upgrade_0006_to_0007_verified)
         self.assertTrue(self.downgrade_0007_to_0006_verified)
+        self.assertTrue(self.upgrade_0007_to_0008_verified)
+        self.assertTrue(self.downgrade_0008_to_0007_verified)
 
     async def test_terminal_outbox_retention_is_bounded_and_skips_locked_rows(self) -> None:
         now = datetime.now(UTC)

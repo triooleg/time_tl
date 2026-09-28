@@ -287,10 +287,9 @@ class AsyncTelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
             [
                 "📚 Розклад",
                 "🔔 Сповіщення",
-                "📍 Територія",
-                "⏰ Нагадування",
-                "ℹ️ Як це працює",
-                "🗑 Видалити мої дані",
+                "📍 Моя територія",
+                "⚙️ Налаштування",
+                "ℹ️ Допомога",
             ],
             labels,
         )
@@ -299,6 +298,98 @@ class AsyncTelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("підтвердженого офіційного відбою", info.text)
         self.assertIn("лише тоді", info.text)
         self.assertEqual("menu:home", info.rows[0][0].callback_data)
+
+        notifications = self.app.notifications_menu()
+        self.assertEqual("menu:mode", notifications.rows[0][0].callback_data)
+        self.assertEqual("menu:reminder", notifications.rows[1][0].callback_data)
+        settings = self.app.settings_menu()
+        self.assertEqual("settings:privacy", settings.rows[2][0].callback_data)
+        privacy = self.app.privacy()
+        self.assertIn("Telegram ID", privacy.text)
+        self.assertIn("не зберігаються", privacy.text)
+        self.assertEqual("account:delete:request", privacy.rows[0][0].callback_data)
+
+    async def test_homework_menu_is_hidden_by_default(self) -> None:
+        menu = await self.app.menu(1)
+
+        callbacks = [button.callback_data for row in menu.rows for button in row]
+        self.assertNotIn("menu:homework", callbacks)
+
+    async def test_homework_menu_requires_flag_and_injected_port(self) -> None:
+        without_port = AsyncTelegramApplication(
+            regions=(self.kyiv,),
+            resolver=self.resolver,
+            repository=self.repo,
+            homework_enabled=True,
+        )
+        hidden = await without_port.menu(1)
+        self.assertNotIn(
+            "menu:homework",
+            [button.callback_data for row in hidden.rows for button in row],
+        )
+
+        with_port = AsyncTelegramApplication(
+            regions=(self.kyiv,),
+            resolver=self.resolver,
+            repository=self.repo,
+            homework_enabled=True,
+            homework_port=object(),  # type: ignore[arg-type]
+        )
+        visible = await with_port.menu(1)
+        self.assertIn(
+            "menu:homework",
+            [button.callback_data for row in visible.rows for button in row],
+        )
+
+    async def test_homework_count_is_optional_and_failure_is_isolated(self) -> None:
+        class HomeworkPort:
+            def __init__(self, *, fail: bool = False) -> None:
+                self.fail = fail
+
+            async def list_homework(
+                self, user_id: int, *, include_past: bool = False
+            ) -> tuple[SimpleNamespace, ...]:
+                del user_id
+                self.last_include_past = include_past
+                if self.fail:
+                    raise RuntimeError("homework unavailable")
+                return (
+                    SimpleNamespace(completed=False),
+                    SimpleNamespace(completed=True),
+                    SimpleNamespace(completed=False),
+                )
+
+        counted = AsyncTelegramApplication(
+            regions=(self.kyiv,),
+            resolver=self.resolver,
+            repository=self.repo,
+            homework_enabled=True,
+            homework_port=HomeworkPort(),  # type: ignore[arg-type]
+        )
+        counted_menu = await counted.menu(1)
+        counted_label = next(
+            button.label
+            for row in counted_menu.rows
+            for button in row
+            if button.callback_data == "menu:homework"
+        )
+        self.assertEqual("📝 Домашні завдання · 2", counted_label)
+
+        isolated = AsyncTelegramApplication(
+            regions=(self.kyiv,),
+            resolver=self.resolver,
+            repository=self.repo,
+            homework_enabled=True,
+            homework_port=HomeworkPort(fail=True),  # type: ignore[arg-type]
+        )
+        isolated_menu = await isolated.menu(1)
+        isolated_label = next(
+            button.label
+            for row in isolated_menu.rows
+            for button in row
+            if button.callback_data == "menu:homework"
+        )
+        self.assertEqual("📝 Домашні завдання", isolated_label)
 
     async def test_data_deletion_requires_two_steps_and_clears_only_owner(self) -> None:
         await self.onboard(1)

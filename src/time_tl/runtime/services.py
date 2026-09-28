@@ -571,7 +571,7 @@ class PostgresRegionConfirmationService:
 @asynccontextmanager
 async def postgres_bot_dependencies(
     settings: Settings,
-) -> AsyncIterator[tuple[Any, Any, Any, Any, Any, Any, Any]]:
+) -> AsyncIterator[tuple[Any, Any, Any, Any, Any, Any, Any, Any]]:
     """Construct ready persistence plus a fail-safe resolver without connecting to Telegram."""
     from time_tl.infrastructure.db.accounts import AsyncPostgresAccountRepository
     from time_tl.infrastructure.db.codec import FernetLessonLinkCodec
@@ -588,6 +588,11 @@ async def postgres_bot_dependencies(
         factory,
         link_codec,
     )
+    homework_repository: Any | None = None
+    if settings.homework_enabled:
+        from time_tl.infrastructure.db.homework import AsyncPostgresHomeworkRepository
+
+        homework_repository = AsyncPostgresHomeworkRepository(factory)
     from time_tl.infrastructure.db.territories import PostgresTerritoryCatalogRepository
 
     await _assert_territory_runtime_ready(factory)
@@ -613,6 +618,7 @@ async def postgres_bot_dependencies(
             region_confirmation,
             territory_catalog,
             PostgresWorkerHeartbeatRepository(factory),
+            homework_repository,
         )
     finally:
         await engine.dispose()
@@ -641,6 +647,7 @@ async def run_bot(settings: Settings) -> None:
         region_confirmation,
         territory_catalog,
         heartbeat_repository,
+        homework_repository,
     ):
         from time_tl.runtime.imports import (
             DurableAsyncTelegramApplication,
@@ -659,6 +666,8 @@ async def run_bot(settings: Settings) -> None:
                 PostgresTransactionalProfileStore(repository),
             ),
             onboarding_text=settings.bot_onboarding_text,
+            homework_enabled=settings.homework_enabled,
+            homework_port=homework_repository,
         )
         bot = Bot(token=settings.telegram_bot_token.get_secret_value())
         from time_tl.bot.safety import (
