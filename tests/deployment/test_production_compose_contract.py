@@ -23,7 +23,7 @@ APPLICATION_SERVICES = {
     "production-activate",
 }
 PUBLIC_ROLES = {"bot", "alert-worker", "schedule-worker", "sender-worker"}
-STAGING_COMPOSE_SHA256 = "741dc4c310ed6b0d0135a7651511747d81e9273e5c753ea9701dd0da96153e60"
+STAGING_COMPOSE_SHA256 = "f97d646d27dcdcbd5a4e6096edae85d81a684f03bb91ccf99a05e5bb46bc3c93"
 ATTESTATION_SOURCE = (
     "${TIME_TL_RELEASE_ATTESTATION_DIR:?set the operator-controlled attestation directory}"
 )
@@ -46,6 +46,19 @@ def test_base_staging_compose_is_byte_for_byte_unchanged() -> None:
     assert "!.env.production.example" in (ROOT / ".gitignore").read_text(
         encoding="utf-8"
     ).splitlines()
+
+
+def test_staging_homework_flag_is_bot_only_and_disabled_by_default() -> None:
+    compose = yaml.safe_load(STAGING_COMPOSE.read_text(encoding="utf-8"))
+    services = compose["services"]
+    assert services["bot"]["environment"]["HOMEWORK_ENABLED"] == (
+        "${HOMEWORK_ENABLED:-false}"
+    )
+    assert all(
+        "HOMEWORK_ENABLED" not in service.get("environment", {})
+        for name, service in services.items()
+        if name != "bot"
+    )
 
 
 def test_all_images_are_required_inputs_to_the_external_verifier() -> None:
