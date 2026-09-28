@@ -23,12 +23,12 @@ class RuntimeContractError(RuntimeError):
 
 # This is the single compiled release switch. Independent safety review must change
 # it only for an exact approved release; all production role gates stay closed together.
-PRODUCTION_PUBLIC_RELEASE_APPROVED = False
+PRODUCTION_PUBLIC_RELEASE_APPROVED = True
 PRODUCTION_RELEASE_MANIFEST = {
     "provider": "alerts.in.ua/full-territory",
     "territory_selection": "manual-oblast-raion-hromada",
     "catalog_sha256": EXPECTED_SHA256,
-    "migration_head": "0006_outbox_terminal_retention",
+    "migration_head": "0007_outbox_indeterminate",
     "replicas": 1,
 }
 

@@ -32,9 +32,11 @@ from .contracts import (
     validate_production_release_manifest,
 )
 
-# Exact release preparation must set only this public key in a reviewed patch.
-# It stays closed for the unreleased build and cannot be overridden by env/admin.
-PRODUCTION_RELEASE_PUBLIC_KEY_HEX: str | None = None
+# Exact release preparation sets only this reviewed public key. It cannot be
+# overridden by env/admin; the corresponding private key remains external.
+PRODUCTION_RELEASE_PUBLIC_KEY_HEX: str | None = (
+    "65439f2f53e1a08e9dd15b80d07bbdb39c32f83ba482dbebe9c83311991e7772"
+)
 _ATTESTATION_PATH = Path("/run/time-tl-release/release-manifest.json")
 _SIGNATURE_PATH = Path("/run/time-tl-release/release-manifest.ed25519")
 _MAX_ATTESTATION_BYTES = 4_096

@@ -148,6 +148,8 @@ services:
     healthcheck: {disable: true}
 
   production-preflight:
+    # Run once per approved attempt. The job stores the short-lived, one-use
+    # database receipt consumed by production-activate.
     <<: *production-app
     command:
       - preflight-production-owner-settings
@@ -173,6 +175,8 @@ services:
     healthcheck: {disable: true}
 
   production-activate:
+    # This job must consume the stored receipt and must not repeat Telegram,
+    # provider or metrics probes.
     <<: *production-app
     command:
       - activate-production-owner-settings

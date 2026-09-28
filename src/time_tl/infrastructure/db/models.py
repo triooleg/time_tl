@@ -374,12 +374,20 @@ class OutboxMessage(TimestampMixin, Base):
         DateTime(timezone=True), server_default=text("now()")
     )
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dispatch_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     dead_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    indeterminate_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     attempts: Mapped[int] = mapped_column(Integer, server_default="0")
     last_error_code: Mapped[str | None] = mapped_column(String(64))
     __table_args__ = (
         CheckConstraint("attempts >= 0", name="attempts_nonnegative"),
+        CheckConstraint(
+            "indeterminate_at IS NULL OR "
+            "(dispatch_started_at IS NOT NULL AND dead_at IS NOT NULL "
+            "AND delivered_at IS NULL)",
+            name="indeterminate_terminal",
+        ),
         Index(
             "ix_outbox_pending",
             "available_at",
@@ -406,6 +414,14 @@ class OutboxMessage(TimestampMixin, Base):
             "id",
             postgresql_where=text(
                 "dead_at IS NOT NULL AND delivered_at IS NULL AND claimed_at IS NULL"
+            ),
+        ),
+        Index(
+            "ix_outbox_indeterminate",
+            "indeterminate_at",
+            "id",
+            postgresql_where=text(
+                "indeterminate_at IS NOT NULL AND delivered_at IS NULL"
             ),
         ),
     )

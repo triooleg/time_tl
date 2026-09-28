@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from time_tl.admin.security import (
@@ -19,8 +19,10 @@ from time_tl.admin.security import (
     token_hash,
 )
 from time_tl.admin.settings import (
+    PRODUCTION_PREFLIGHT_RECEIPT_TTL,
     OwnerSettingsBundle,
     OwnerSettingsConflictError,
+    owner_settings_payload_sha256,
     reject_sensitive_generic_settings,
 )
 
@@ -54,6 +56,7 @@ class AsyncPostgresAdminRepository:
     _OWNER_ACTIVE_KEY = "owner_configuration_active"
     _OWNER_PREVIOUS_ACTIVE_KEY = "owner_configuration_previous_active"
     _OWNER_ACTIVATION_STATUS_KEY = "owner_configuration_activation_status"
+    _PRODUCTION_PREFLIGHT_RECEIPT_KEY = "owner_configuration_production_preflight_receipt"
 
     def __init__(self, factory: async_sessionmaker[AsyncSession], *, ip_hash_key: bytes) -> None:
         if len(ip_hash_key) < 32:
@@ -489,6 +492,208 @@ class AsyncPostgresAdminRepository:
                         target_type="owner_configuration",
                         target_id=str(revision),
                         redacted_details={"failure_code": safe_code},
+                    )
+                )
+        return await self.owner_settings_bundle()
+
+    async def store_production_preflight_receipt(
+        self,
+        revision: int,
+        manifest_fingerprint: str,
+        pending_payload_sha256: str,
+        migration_head: str,
+        issued_at: datetime,
+        expires_at: datetime,
+        actor: str,
+        evidence_summary: dict[str, int | str],
+    ) -> None:
+        """Persist a secret-free, short-lived proof for the exact pending payload."""
+
+        lowercase_hex = frozenset("0123456789abcdef")
+        if (
+            len(manifest_fingerprint) != 64
+            or not set(manifest_fingerprint) <= lowercase_hex
+            or len(pending_payload_sha256) != 64
+            or not set(pending_payload_sha256) <= lowercase_hex
+            or not migration_head.strip()
+            or issued_at.tzinfo is None
+            or expires_at.tzinfo is None
+            or expires_at <= issued_at
+            or expires_at - issued_at > PRODUCTION_PREFLIGHT_RECEIPT_TTL
+        ):
+            raise OwnerSettingsConflictError("Квитанция проверки недействительна.")
+        async with self._factory() as session:
+            async with session.begin():
+                await self._lock_owner_settings(session)
+                state_row = await session.get(RuntimeSetting, self._OWNER_STATE_KEY)
+                draft_row = await session.get(RuntimeSetting, self._OWNER_DRAFT_KEY)
+                if state_row is None or draft_row is None:
+                    raise OwnerSettingsConflictError("Нет конфигурации для проверки.")
+                state = dict(state_row.value)
+                draft = dict(draft_row.value)
+                if (
+                    state.get("pending_revision") != revision
+                    or int(draft.get("revision", 0)) != revision
+                    or owner_settings_payload_sha256(draft) != pending_payload_sha256
+                ):
+                    raise OwnerSettingsConflictError(
+                        "Конфигурация изменилась во время проверки."
+                    )
+                safe_summary = {
+                    key: value
+                    for key, value in evidence_summary.items()
+                    if key in {"check_profile", "covered_region_count", "allowlist_count"}
+                    and isinstance(value, (str, int))
+                    and not isinstance(value, bool)
+                }
+                receipt: dict[str, Any] = {
+                    "revision": revision,
+                    "manifest_fingerprint": manifest_fingerprint,
+                    "pending_payload_sha256": pending_payload_sha256,
+                    "migration_head": migration_head,
+                    "status": "passed",
+                    "issued_at": issued_at.isoformat(),
+                    "expires_at": expires_at.isoformat(),
+                    "consumed_at": None,
+                    **safe_summary,
+                }
+                await self._upsert_runtime_setting(
+                    session,
+                    self._PRODUCTION_PREFLIGHT_RECEIPT_KEY,
+                    receipt,
+                    actor,
+                )
+                session.add(
+                    AuditLog(
+                        actor=actor,
+                        action="production_preflight_receipt_stored",
+                        result="success",
+                        target_type="owner_configuration",
+                        target_id=str(revision),
+                        redacted_details={
+                            "manifest_fingerprint": manifest_fingerprint,
+                            "pending_payload_sha256": pending_payload_sha256,
+                            "migration_head": migration_head,
+                            "expires_at": expires_at.isoformat(),
+                            **safe_summary,
+                        },
+                    )
+                )
+
+    async def activate_with_production_preflight_receipt(
+        self,
+        revision: int,
+        manifest_fingerprint: str,
+        migration_head: str,
+        actor: str,
+        now: datetime,
+    ) -> OwnerSettingsBundle:
+        """Verify and consume one receipt in the same transaction as activation."""
+
+        async with self._factory() as session:
+            async with session.begin():
+                await self._lock_owner_settings(session)
+                state_row = await session.get(RuntimeSetting, self._OWNER_STATE_KEY)
+                draft_row = await session.get(RuntimeSetting, self._OWNER_DRAFT_KEY)
+                receipt_row = (
+                    await session.execute(
+                        select(RuntimeSetting)
+                        .where(RuntimeSetting.key == self._PRODUCTION_PREFLIGHT_RECEIPT_KEY)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if state_row is None or draft_row is None or receipt_row is None:
+                    raise OwnerSettingsConflictError("Нет действующей квитанции проверки.")
+                state = dict(state_row.value)
+                draft = dict(draft_row.value)
+                receipt = dict(receipt_row.value)
+                heads = (
+                    await session.execute(
+                        text(
+                            "SELECT array_agg(version_num ORDER BY version_num) "
+                            "FROM alembic_version"
+                        )
+                    )
+                ).scalar_one()
+                try:
+                    issued_at = datetime.fromisoformat(str(receipt["issued_at"]))
+                    expires_at = datetime.fromisoformat(str(receipt["expires_at"]))
+                except (KeyError, TypeError, ValueError):
+                    raise OwnerSettingsConflictError("Квитанция проверки повреждена.") from None
+                payload_hash = owner_settings_payload_sha256(draft)
+                if (
+                    state.get("pending_revision") != revision
+                    or int(draft.get("revision", 0)) != revision
+                    or receipt.get("revision") != revision
+                    or receipt.get("manifest_fingerprint") != manifest_fingerprint
+                    or receipt.get("pending_payload_sha256") != payload_hash
+                    or receipt.get("migration_head") != migration_head
+                    or receipt.get("status") != "passed"
+                    or receipt.get("consumed_at") is not None
+                    or issued_at.tzinfo is None
+                    or expires_at.tzinfo is None
+                    or issued_at > now
+                    or now >= expires_at
+                    or heads != [migration_head]
+                ):
+                    raise OwnerSettingsConflictError(
+                        "Квитанция проверки не соответствует текущему релизу."
+                    )
+
+                current_active = await session.get(RuntimeSetting, self._OWNER_ACTIVE_KEY)
+                if current_active is not None:
+                    await self._upsert_runtime_setting(
+                        session,
+                        self._OWNER_PREVIOUS_ACTIVE_KEY,
+                        dict(current_active.value),
+                        actor,
+                    )
+                await self._upsert_runtime_setting(
+                    session, self._OWNER_ACTIVE_KEY, draft, actor
+                )
+                safe_summary = {
+                    key: value
+                    for key, value in receipt.items()
+                    if key in {"check_profile", "covered_region_count", "allowlist_count"}
+                    and isinstance(value, (str, int))
+                    and not isinstance(value, bool)
+                }
+                evidence_id = f"production-preflight-v1-r{revision}-{manifest_fingerprint}"
+                await self._upsert_runtime_setting(
+                    session,
+                    self._OWNER_ACTIVATION_STATUS_KEY,
+                    {
+                        "revision": revision,
+                        "result": "passed",
+                        "evidence_id": evidence_id,
+                        **safe_summary,
+                    },
+                    actor,
+                )
+                state["active_revision"] = revision
+                state["pending_revision"] = None
+                state_row.value = state
+                state_row.updated_by = actor
+                receipt["status"] = "consumed"
+                receipt["consumed_at"] = now.isoformat()
+                receipt_row.value = receipt
+                receipt_row.updated_by = actor
+                session.add(
+                    AuditLog(
+                        actor=actor,
+                        action="owner_configuration_activated",
+                        result="success",
+                        target_type="owner_configuration",
+                        target_id=str(revision),
+                        redacted_details={
+                            "evidence_id_sha256": hashlib.sha256(
+                                evidence_id.encode("utf-8")
+                            ).hexdigest(),
+                            "receipt_consumed": "yes",
+                            "manifest_fingerprint": manifest_fingerprint,
+                            "migration_head": migration_head,
+                            **safe_summary,
+                        },
                     )
                 )
         return await self.owner_settings_bundle()

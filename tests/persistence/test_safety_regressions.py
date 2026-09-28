@@ -11,6 +11,7 @@ from uuid import uuid4
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
+from time_tl.admin.settings import OwnerSettingsConflictError, owner_settings_payload_sha256
 from time_tl.application.sender_worker import DeliveryRecipient
 from time_tl.domain.alerts import (
     ActiveEpisode,
@@ -24,6 +25,7 @@ from time_tl.domain.alerts import AlertSnapshot as DomainSnapshot
 from time_tl.domain.schedule import Lesson, ScheduleProfile
 from time_tl.infrastructure.alerts.repositories import AlertPollState
 from time_tl.infrastructure.db.accounts import AsyncPostgresAccountRepository
+from time_tl.infrastructure.db.admin import AsyncPostgresAdminRepository
 from time_tl.infrastructure.db.alerts import PostgresAlertRepository
 from time_tl.infrastructure.db.import_sessions import PostgresImportSessionRepository, digest_secret
 from time_tl.infrastructure.db.models import (
@@ -250,7 +252,204 @@ class RetentionSession:
         self.deleted.append(row)
 
 
+class OwnerReceiptSession:
+    def __init__(self, rows: dict[str, RuntimeSetting], migration_head: str):
+        self.rows = rows
+        self.migration_head = migration_head
+        self.added: list[object] = []
+
+    def begin(self):
+        return AsyncContext(None)
+
+    async def get(self, model, key):
+        if model is RuntimeSetting:
+            return self.rows.get(key)
+        return None
+
+    async def execute(self, statement):
+        descriptions = getattr(statement, "column_descriptions", ())
+        entity = descriptions[0].get("entity") if descriptions else None
+        if entity is RuntimeSetting:
+            key = statement.compile().params.get("key_1")
+            return Result(scalar=self.rows.get(key))
+        if "alembic_version" in str(statement):
+            return Result(scalar=[self.migration_head])
+        return Result()
+
+    def add(self, value):
+        self.added.append(value)
+        if isinstance(value, RuntimeSetting):
+            self.rows[value.key] = value
+
+
 class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _production_receipt_repository(
+        *,
+        now: datetime,
+        expires_at: datetime,
+        manifest_fingerprint: str = "a" * 64,
+        migration_head: str = "0006_outbox_terminal_retention",
+    ) -> tuple[AsyncPostgresAdminRepository, OwnerReceiptSession, dict[str, object]]:
+        draft: dict[str, object] = {
+            "revision": 12,
+            "environment": "production",
+            "alert_provider": "alerts_in_ua",
+            "telegram_transport": "live",
+            "staging_allowlist": [],
+            "telegram_token_ciphertext": "encrypted-telegram",
+            "alerts_in_ua_token_ciphertext": "encrypted-alerts",
+        }
+        receipt = {
+            "revision": 12,
+            "manifest_fingerprint": manifest_fingerprint,
+            "pending_payload_sha256": owner_settings_payload_sha256(draft),
+            "migration_head": migration_head,
+            "status": "passed",
+            "issued_at": (now - timedelta(minutes=1)).isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "consumed_at": None,
+            "check_profile": "production-exact-release-v1",
+            "covered_region_count": 1622,
+            "allowlist_count": 0,
+        }
+        rows = {
+            "owner_configuration_state": RuntimeSetting(
+                key="owner_configuration_state",
+                value={
+                    "latest_revision": 12,
+                    "pending_revision": 12,
+                    "active_revision": 11,
+                },
+                updated_by="operator",
+            ),
+            "owner_configuration_draft": RuntimeSetting(
+                key="owner_configuration_draft",
+                value=draft,
+                updated_by="operator",
+            ),
+            "owner_configuration_active": RuntimeSetting(
+                key="owner_configuration_active",
+                value={"revision": 11},
+                updated_by="operator",
+            ),
+            "owner_configuration_production_preflight_receipt": RuntimeSetting(
+                key="owner_configuration_production_preflight_receipt",
+                value=receipt,
+                updated_by="operator",
+            ),
+        }
+        session = OwnerReceiptSession(rows, migration_head)
+        repository = AsyncPostgresAdminRepository(  # type: ignore[arg-type]
+            lambda: AsyncContext(session),
+            ip_hash_key=b"x" * 32,
+        )
+        return repository, session, draft
+
+    async def test_production_receipt_is_consumed_with_activation_and_replay_fails_closed(self):
+        now = datetime(2026, 9, 28, 18, tzinfo=UTC)
+        repository, session, _draft = self._production_receipt_repository(
+            now=now,
+            expires_at=now + timedelta(minutes=9),
+        )
+
+        bundle = await repository.activate_with_production_preflight_receipt(
+            12,
+            "a" * 64,
+            "0006_outbox_terminal_retention",
+            "operator",
+            now,
+        )
+
+        self.assertEqual(12, bundle.active_revision)
+        self.assertIsNone(bundle.pending_revision)
+        receipt = session.rows["owner_configuration_production_preflight_receipt"].value
+        self.assertEqual("consumed", receipt["status"])
+        self.assertEqual(now.isoformat(), receipt["consumed_at"])
+        with self.assertRaises(OwnerSettingsConflictError):
+            await repository.activate_with_production_preflight_receipt(
+                12,
+                "a" * 64,
+                "0006_outbox_terminal_retention",
+                "operator",
+                now,
+            )
+
+    async def test_production_receipt_store_rechecks_pending_payload_and_keeps_secrets_out(self):
+        now = datetime(2026, 9, 28, 18, tzinfo=UTC)
+        repository, session, draft = self._production_receipt_repository(
+            now=now,
+            expires_at=now + timedelta(minutes=9),
+        )
+        session.rows.pop("owner_configuration_production_preflight_receipt")
+
+        with self.assertRaises(OwnerSettingsConflictError):
+            await repository.store_production_preflight_receipt(
+                12,
+                "a" * 64,
+                "b" * 64,
+                "0006_outbox_terminal_retention",
+                now,
+                now + timedelta(minutes=10),
+                "operator",
+                {"covered_region_count": 1622, "allowlist_count": 0},
+            )
+        self.assertNotIn(
+            "owner_configuration_production_preflight_receipt",
+            session.rows,
+        )
+
+        await repository.store_production_preflight_receipt(
+            12,
+            "a" * 64,
+            owner_settings_payload_sha256(draft),
+            "0006_outbox_terminal_retention",
+            now,
+            now + timedelta(minutes=10),
+            "operator",
+            {"covered_region_count": 1622, "allowlist_count": 0},
+        )
+        receipt = session.rows["owner_configuration_production_preflight_receipt"].value
+        serialized = repr(receipt)
+        self.assertNotIn("encrypted-telegram", serialized)
+        self.assertNotIn("encrypted-alerts", serialized)
+        self.assertEqual(owner_settings_payload_sha256(draft), receipt["pending_payload_sha256"])
+
+    async def test_production_receipt_expiry_payload_manifest_and_schema_mismatch_fail_closed(self):
+        now = datetime(2026, 9, 28, 18, tzinfo=UTC)
+
+        async def rejected(
+            *,
+            expiry: datetime,
+            manifest: str = "a" * 64,
+            schema: str = "0006_outbox_terminal_retention",
+            mutate_payload: bool = False,
+        ) -> None:
+            repository, session, draft = self._production_receipt_repository(
+                now=now,
+                expires_at=expiry,
+            )
+            if mutate_payload:
+                draft["poll_interval_seconds"] = 30
+            with self.assertRaises(OwnerSettingsConflictError):
+                await repository.activate_with_production_preflight_receipt(
+                    12,
+                    manifest,
+                    schema,
+                    "operator",
+                    now,
+                )
+            state = session.rows["owner_configuration_state"].value
+            receipt = session.rows["owner_configuration_production_preflight_receipt"].value
+            self.assertEqual(11, state["active_revision"])
+            self.assertEqual(12, state["pending_revision"])
+            self.assertEqual("passed", receipt["status"])
+
+        await rejected(expiry=now)
+        await rejected(expiry=now + timedelta(minutes=1), manifest="b" * 64)
+        await rejected(expiry=now + timedelta(minutes=1), mutate_payload=True)
+        await rejected(expiry=now + timedelta(minutes=1), schema="0007_unapproved")
+
     def test_provider_freshness_boundary_is_inclusive_then_fails_closed(self):
         last_success = AUTHORIZATION_AT - STALE_AFTER
         self.assertTrue(_provider_is_fresh(last_success, AUTHORIZATION_AT, STALE_AFTER))
@@ -415,6 +614,31 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.payload["telegram_chat_id"], 999)
         self.assertEqual(row.payload["scope_binding"], bind_scope(scope))
         self.assertEqual(row.claimed_at, AUTHORIZATION_AT)
+
+    async def test_restart_quarantines_started_dispatch_without_resend(self):
+        row = OutboxMessage(
+            id=uuid4(),
+            aggregate_type="schedule",
+            aggregate_id=str(uuid4()),
+            event_key="ambiguous-after-restart",
+            event_type="LESSON_REMINDER",
+            payload={},
+            claimed_at=AUTHORIZATION_AT - timedelta(minutes=6),
+            dispatch_started_at=AUTHORIZATION_AT - timedelta(minutes=6),
+        )
+        session = ClaimSession({}, results=(Result(scalars=(row,)),))
+        repo = PostgresSenderRepository(  # type: ignore[arg-type]
+            lambda: AsyncContext(session), stale_after_seconds=120
+        )
+
+        claimed = await repo.claim_batch_skip_locked(AUTHORIZATION_AT, limit=10)
+
+        self.assertEqual((), claimed)
+        self.assertEqual(row.dead_at, AUTHORIZATION_AT)
+        self.assertEqual(row.indeterminate_at, AUTHORIZATION_AT)
+        self.assertIsNone(row.claimed_at)
+        self.assertEqual(row.attempts, 1)
+        self.assertEqual(row.last_error_code, "delivery_outcome_indeterminate")
 
     async def test_claim_quarantines_region_message_when_confirmation_is_incomplete(self):
         user = User(
@@ -1107,6 +1331,7 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(message.claimed_at)
         self.assertEqual(message.available_at, now + timedelta(seconds=15))
         self.assertEqual(message.last_error_code, "delivery_policy_temporarily_unavailable")
+        self.assertIsNone(message.dispatch_started_at)
 
         snapshot.state = AlertState.ACTIVE.value
         message.claimed_at = now + timedelta(seconds=15)
@@ -1119,6 +1344,7 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(recovered)
         self.assertTrue(sent)
         self.assertIsNotNone(message.delivered_at)
+        self.assertIsNotNone(message.dispatch_started_at)
 
     async def test_final_authorization_uses_delivery_time_freshness_boundary(self):
         async def attempt(
@@ -1704,7 +1930,7 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("final_delivery_expired", at_boundary[2].last_error_code)
         self.assertEqual(valid_until, at_boundary[2].dead_at)
 
-    async def test_transport_failure_after_authorization_keeps_retry_semantics(self):
+    async def test_transport_failure_after_dispatch_is_terminally_indeterminate(self):
         now = datetime(2026, 9, 21, 6, tzinfo=UTC)
         user = User(id=uuid4(), telegram_user_id=42, mode="LESSONS_ONLY")
         profile = ProfileRow(
@@ -1748,9 +1974,12 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
         retry_at = datetime(2026, 9, 21, 6, 0, 2, tzinfo=UTC)
         await repo.mark_retry(str(message.id), available_at=retry_at, error_code="transport_error")
         self.assertEqual(message.attempts, 1)
-        self.assertEqual(message.available_at, retry_at)
+        self.assertNotEqual(message.available_at, retry_at)
         self.assertIsNone(message.claimed_at)
-        self.assertEqual(message.last_error_code, "transport_error")
+        self.assertEqual(message.dead_at, now)
+        self.assertEqual(message.indeterminate_at, now)
+        self.assertEqual(message.dispatch_started_at, now)
+        self.assertEqual(message.last_error_code, "delivery_outcome_indeterminate")
 
     async def test_removed_lesson_reference_is_not_retargeted_to_replacement(self):
         old_id = uuid4()

@@ -43,6 +43,7 @@ from time_tl.infrastructure.db.models import (
     AlertEpisode as AlertEpisodeRow,
 )
 from time_tl.infrastructure.db.models import AlertPollState as PollRow
+from time_tl.infrastructure.db.models import ScheduleProfile as ScheduleProfileRow
 from time_tl.infrastructure.db.territories import (
     PostgresTerritoryCatalogRepository,
     TerritoryDraftRow,
@@ -185,16 +186,27 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         asyncio.run(cls._drop_0006_indexes_for_legacy_shape())
         command.upgrade(config, "0006_outbox_terminal_retention")
         asyncio.run(cls._assert_0006_indexes_and_explain())
+        asyncio.run(cls._drop_0007_guard_for_legacy_shape())
+        command.upgrade(config, "0007_outbox_indeterminate")
+        asyncio.run(cls._assert_0007_delivery_guard())
+        command.downgrade(config, "0006_outbox_terminal_retention")
+        asyncio.run(cls._assert_0007_delivery_guard_absent())
+        command.upgrade(config, "0007_outbox_indeterminate")
+        asyncio.run(cls._assert_0007_delivery_guard())
         command.downgrade(config, "0005_public_data_indexes")
         asyncio.run(cls._assert_0006_indexes_absent())
         command.upgrade(config, "0006_outbox_terminal_retention")
         asyncio.run(cls._assert_0006_indexes_and_explain())
+        command.upgrade(config, "0007_outbox_indeterminate")
+        asyncio.run(cls._assert_0007_delivery_guard())
         cls.upgrade_0003_to_0004_verified = True
         cls.downgrade_0004_to_0003_verified = True
         cls.upgrade_0004_to_0005_verified = True
         cls.downgrade_0005_to_0004_verified = True
         cls.upgrade_0005_to_0006_verified = True
         cls.downgrade_0006_to_0005_verified = True
+        cls.upgrade_0006_to_0007_verified = True
+        cls.downgrade_0007_to_0006_verified = True
 
     @staticmethod
     async def _reset_disposable_public_schema() -> None:
@@ -550,6 +562,104 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
                 "refusing destructive E2E: current_database() must contain 'time_tl_e2e'"
             )
 
+    @staticmethod
+    async def _drop_0007_guard_for_legacy_shape() -> None:
+        """Remove metadata-created 0007 objects so the additive upgrade is real."""
+
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "ALTER TABLE outbox_messages DROP CONSTRAINT IF EXISTS "
+                        "ck_outbox_messages_indeterminate_terminal"
+                    )
+                )
+                await connection.execute(
+                    text("DROP INDEX IF EXISTS ix_outbox_indeterminate")
+                )
+                await connection.execute(
+                    text(
+                        "ALTER TABLE outbox_messages "
+                        "DROP COLUMN IF EXISTS indeterminate_at"
+                    )
+                )
+                await connection.execute(
+                    text(
+                        "ALTER TABLE outbox_messages "
+                        "DROP COLUMN IF EXISTS dispatch_started_at"
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    @staticmethod
+    async def _assert_0007_delivery_guard() -> None:
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.connect() as connection:
+                columns = set(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT column_name FROM information_schema.columns "
+                                "WHERE table_schema = 'public' "
+                                "AND table_name = 'outbox_messages'"
+                            )
+                        )
+                    ).scalars()
+                )
+                indexes = set(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT indexname FROM pg_indexes "
+                                "WHERE schemaname = 'public' "
+                                "AND tablename = 'outbox_messages'"
+                            )
+                        )
+                    ).scalars()
+                )
+                constraints = set(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT conname FROM pg_constraint "
+                                "WHERE conrelid = 'outbox_messages'::regclass"
+                            )
+                        )
+                    ).scalars()
+                )
+        finally:
+            await engine.dispose()
+        if not {"dispatch_started_at", "indeterminate_at"}.issubset(columns):
+            raise AssertionError("0007 delivery columns are missing")
+        if "ix_outbox_indeterminate" not in indexes:
+            raise AssertionError("0007 indeterminate index is missing")
+        if "ck_outbox_messages_indeterminate_terminal" not in constraints:
+            raise AssertionError("0007 terminal constraint is missing")
+
+    @staticmethod
+    async def _assert_0007_delivery_guard_absent() -> None:
+        engine = create_engine(DATABASE_URL, pool_size=1, max_overflow=0)
+        try:
+            async with engine.connect() as connection:
+                columns = set(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT column_name FROM information_schema.columns "
+                                "WHERE table_schema = 'public' "
+                                "AND table_name = 'outbox_messages'"
+                            )
+                        )
+                    ).scalars()
+                )
+        finally:
+            await engine.dispose()
+        if {"dispatch_started_at", "indeterminate_at"} & columns:
+            raise AssertionError("0007 delivery columns survived downgrade")
+
     async def asyncSetUp(self) -> None:
         self.engine = create_engine(DATABASE_URL, pool_size=2, max_overflow=0)
         self.factory = create_session_factory(self.engine)
@@ -636,13 +746,15 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
         )
         return repository
 
-    def test_upgrade_0003_to_0006_and_downgrades_are_verified(self) -> None:
+    def test_upgrade_0003_to_0007_and_downgrades_are_verified(self) -> None:
         self.assertTrue(self.upgrade_0003_to_0004_verified)
         self.assertTrue(self.downgrade_0004_to_0003_verified)
         self.assertTrue(self.upgrade_0004_to_0005_verified)
         self.assertTrue(self.downgrade_0005_to_0004_verified)
         self.assertTrue(self.upgrade_0005_to_0006_verified)
         self.assertTrue(self.downgrade_0006_to_0005_verified)
+        self.assertTrue(self.upgrade_0006_to_0007_verified)
+        self.assertTrue(self.downgrade_0007_to_0006_verified)
 
     async def test_terminal_outbox_retention_is_bounded_and_skips_locked_rows(self) -> None:
         now = datetime.now(UTC)
@@ -933,6 +1045,102 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
             delivered_types,
             {"ALL_CLEAR_CONFIRMED", "RETURN_TO_ACTIVE_LESSON"},
         )
+
+    async def test_post_send_commit_failure_is_indeterminate_and_never_resent(self) -> None:
+        now = datetime.now(UTC)
+        telegram_user_id = 8_000_022
+        async with self.factory() as session:
+            async with session.begin():
+                user = User(
+                    telegram_user_id=telegram_user_id,
+                    mode="LESSONS_ONLY",
+                    reminder_lead_minutes=5,
+                )
+                session.add(user)
+                await session.flush()
+                profile = ScheduleProfileRow(
+                    user_id=user.id,
+                    public_id="indeterminate-e2e",
+                    name="Indeterminate E2E",
+                    is_active=True,
+                    version=1,
+                )
+                session.add(profile)
+                outbox = OutboxMessage(
+                    event_key="post-send-commit-failure",
+                    aggregate_type="schedule",
+                    aggregate_id=str(user.id),
+                    event_type="LESSON_REMINDER",
+                    payload={
+                        "telegram_chat_id": telegram_user_id,
+                        "profile_revision": 1,
+                        "starts_at": (now + timedelta(minutes=10)).isoformat(),
+                    },
+                    available_at=now,
+                    claimed_at=now,
+                )
+                session.add(outbox)
+                await session.flush()
+                message_id = str(outbox.id)
+
+        factory_calls = 0
+
+        def post_send_fault_factory():
+            nonlocal factory_calls
+            factory_calls += 1
+            if factory_calls == 1:
+                return self.factory()
+            return FaultingSessionContext(self.factory, DATABASE_URL)
+
+        repository = PostgresSenderRepository(
+            post_send_fault_factory,  # type: ignore[arg-type]
+            stale_after_seconds=120,
+            clock=lambda: now,
+        )
+        sent = 0
+
+        async def deliver() -> None:
+            nonlocal sent
+            sent += 1
+
+        with self.assertRaises(DBAPIError):
+            await repository.deliver_if_authorized(
+                message_id,
+                now,
+                deliver,
+                expected_recipient=DeliveryRecipient(telegram_user_id),
+            )
+        self.assertEqual(sent, 1)
+
+        await self._restart_database_clients()
+        async with self.factory() as session:
+            persisted = await session.get(OutboxMessage, outbox.id)
+            self.assertIsNotNone(persisted)
+            self.assertEqual(persisted.dispatch_started_at, now)
+            self.assertIsNone(persisted.delivered_at)
+            self.assertIsNone(persisted.dead_at)
+
+        recovery_at = now + timedelta(minutes=6)
+        recovery = PostgresSenderRepository(
+            self.factory,
+            stale_after_seconds=120,
+            clock=lambda: recovery_at,
+        )
+        self.assertEqual(
+            (), await recovery.claim_batch_skip_locked(recovery_at, limit=10)
+        )
+        self.assertEqual(
+            (), await recovery.claim_batch_skip_locked(recovery_at, limit=10)
+        )
+        self.assertEqual(sent, 1)
+        async with self.factory() as session:
+            quarantined = await session.get(OutboxMessage, outbox.id)
+            self.assertIsNotNone(quarantined)
+            self.assertEqual(quarantined.dead_at, recovery_at)
+            self.assertEqual(quarantined.indeterminate_at, recovery_at)
+            self.assertEqual(
+                quarantined.last_error_code, "delivery_outcome_indeterminate"
+            )
 
     async def test_catalog_activation_serializes_and_preserves_user_data(self) -> None:
         catalog = await self._load_and_activate_catalog("e2e-preserve-v1")

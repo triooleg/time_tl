@@ -9,7 +9,7 @@ import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -120,7 +120,7 @@ def production_release_manifest() -> ProductionReleaseManifest:
         config_revision=5,
         provider="alerts.in.ua/full-territory",
         catalog_sha256=region_registry_full.EXPECTED_SHA256,
-        migration_head="0006_outbox_terminal_retention",
+        migration_head="0007_outbox_indeterminate",
         replicas=1,
         territory_selection="manual-oblast-raion-hromada",
     )
@@ -135,13 +135,16 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 _env_file=None,
             )
 
-    def test_production_alert_worker_fails_before_provider_or_database_io(self) -> None:
+    def test_production_alert_worker_capability_is_released_but_direct_factory_stays_closed(
+        self,
+    ) -> None:
         settings = settings_for(
             "alert-worker",
             environment=Environment.PRODUCTION,
             alert_provider=AlertProvider.ALERTS_IN_UA,
         )
-        with self.assertRaisesRegex(RuntimeContractError, "production full-territory alert worker"):
+        validate_runtime_contract(settings, "alert-worker")
+        with self.assertRaisesRegex(RuntimeError, "production PostgreSQL alert composition"):
             build_alert_worker(settings)
 
     def test_staging_contract_accepts_reviewed_aggregate_oblast_provider(self) -> None:
@@ -496,13 +499,15 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                     type(heartbeat_repository).__name__,
                 )
 
-    async def test_unimplemented_workers_cannot_be_scaffolds_in_production(self) -> None:
+    async def test_released_workers_cannot_fall_back_to_inert_production_adapters(self) -> None:
         for role in ("schedule-worker", "sender-worker"):
             telegram = (
                 TelegramTransport.LIVE if role == "sender-worker" else TelegramTransport.DISABLED
             )
             settings = settings_for(role, environment=Environment.PRODUCTION, telegram=telegram)
-            with self.subTest(role=role), self.assertRaises(RuntimeContractError):
+            with self.subTest(role=role), self.assertRaisesRegex(
+                RuntimeError, "has no production adapter"
+            ):
                 await run_inert_worker(settings, role)
 
     def test_oblast_registry_is_verified_but_explicitly_partial(self) -> None:
@@ -512,14 +517,13 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(REGISTRY_SUPPORTS_AGGREGATE_OBLAST_SCOPES)
         self.assertEqual(OBLAST_REGION_IDS, OblastAlertsInUaAdapter.COVERED_REGION_IDS)
 
-    def test_production_contract_keeps_public_scope_release_closed(self) -> None:
-        settings = settings_for(
-            "alert-worker",
-            environment=Environment.PRODUCTION,
-            alert_provider=AlertProvider.ALERTS_IN_UA,
-        )
-        with self.assertRaisesRegex(RuntimeContractError, "production full-territory alert worker"):
-            validate_runtime_contract(settings, "alert-worker")
+    def test_production_contract_releases_each_public_runtime_role(self) -> None:
+        for role in ("alert-worker", "bot", "schedule-worker", "sender-worker"):
+            with self.subTest(role=role):
+                validate_runtime_contract(
+                    settings_for(role, environment=Environment.PRODUCTION),
+                    role,
+                )
 
     async def test_official_provider_composition_has_no_network_and_restarts_unconditionally(
         self,
@@ -581,8 +585,8 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         assert result.failure is not None
         self.assertEqual(SourceFailureKind.INVALID_RESPONSE, result.failure.kind)
 
-    def test_default_production_release_manifest_is_closed(self) -> None:
-        self.assertFalse(PRODUCTION_PUBLIC_RELEASE_APPROVED)
+    def test_exact_production_release_manifest_and_public_key_are_compiled(self) -> None:
+        self.assertTrue(PRODUCTION_PUBLIC_RELEASE_APPROVED)
         self.assertEqual(1, PRODUCTION_RELEASE_MANIFEST["replicas"])
         self.assertEqual(
             "manual-oblast-raion-hromada",
@@ -593,15 +597,17 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             PRODUCTION_RELEASE_MANIFEST["catalog_sha256"],
         )
         self.assertEqual(
-            "0006_outbox_terminal_retention",
+            "0007_outbox_indeterminate",
             PRODUCTION_RELEASE_MANIFEST["migration_head"],
         )
-        with self.assertRaisesRegex(RuntimeContractError, "verification key is not compiled"):
-            load_verified_release_attestation(
-                expected_config_revision=5,
-                read_manifest_bytes=lambda: b"{}",
-                read_signature_bytes=lambda: base64.b64encode(b"x" * 64),
-            )
+        self.assertEqual(
+            "65439f2f53e1a08e9dd15b80d07bbdb39c32f83ba482dbebe9c83311991e7772",
+            production_release.PRODUCTION_RELEASE_PUBLIC_KEY_HEX,
+        )
+        self.assertEqual(
+            32,
+            len(bytes.fromhex(production_release.PRODUCTION_RELEASE_PUBLIC_KEY_HEX)),
+        )
 
     def test_detached_ed25519_attestation_authenticates_release_after_build(self) -> None:
         manifest = production_release_manifest()
@@ -669,7 +675,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 "time_tl.runtime.production_release._read_atomic_runtime_facts",
                 AsyncMock(
                     return_value=(
-                        ["0006_outbox_terminal_retention"],
+                        ["0007_outbox_indeterminate"],
                         {"active_revision": 5},
                         active,
                     )
@@ -799,7 +805,9 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             await activate_owner_settings(settings, 5, "any-nonempty-evidence")
         repository.assert_not_called()
 
-    async def test_production_activation_preflight_failure_never_opens_activation_db(self) -> None:
+    async def test_production_activation_attestation_failure_never_opens_activation_db(
+        self,
+    ) -> None:
         key = SecretStr("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
         settings = settings_for("bot", environment=Environment.PRODUCTION).model_copy(
             update={
@@ -810,20 +818,20 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         repository = Mock()
-        preflight = AsyncMock(side_effect=RuntimeContractError("preflight failed"))
+        attestation = Mock(side_effect=RuntimeContractError("attestation failed"))
         with (
             patch(
-                "time_tl.entrypoints.operator_preflight.preflight_production_owner_settings",
-                preflight,
+                "time_tl.runtime.production_release.load_verified_release_attestation",
+                attestation,
             ),
             patch("time_tl.runtime.services._postgres_admin_repository", repository),
-            self.assertRaisesRegex(RuntimeContractError, "preflight failed"),
+            self.assertRaisesRegex(RuntimeContractError, "attestation failed"),
         ):
             await activate_production_owner_settings(settings, 5)
-        preflight.assert_awaited_once_with(settings, 5)
+        attestation.assert_called_once_with(expected_config_revision=5)
         repository.assert_not_called()
 
-    async def test_production_activation_runs_preflight_then_atomically_marks_exact_candidate(
+    async def test_production_activation_consumes_receipt_without_external_preflight(
         self,
     ) -> None:
         key = SecretStr("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
@@ -836,35 +844,15 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         manifest = production_release_manifest()
-        correlation = production_preflight_correlation(5, manifest.fingerprint())
         engine = AsyncMock()
-        candidate = SimpleNamespace(
-            environment="production",
-            revision=5,
-            alert_provider="alerts_in_ua",
-            telegram_transport="live",
-            staging_allowlist=(),
-        )
         service = AsyncMock()
-        service.activation_candidate.return_value = candidate
         service_type = Mock(return_value=service)
-        evidence = SimpleNamespace(
-            release_manifest_sha256=manifest.fingerprint(),
-            host_metrics_ok=True,
-            covered_region_count=1622,
-            allowlist_count=0,
-        )
         order: list[str] = []
 
-        async def run_preflight(*_args: object) -> object:
-            order.append("preflight")
-            return evidence
+        async def mark_production_active(*_args: object, **_kwargs: object) -> None:
+            order.append("consume_receipt")
 
-        async def mark_active(*_args: object, **_kwargs: object) -> None:
-            order.append("mark_active")
-
-        preflight = AsyncMock(side_effect=run_preflight)
-        service.mark_active.side_effect = mark_active
+        service.mark_production_active.side_effect = mark_production_active
 
         def repository_factory(_settings: Settings) -> tuple[AsyncMock, object]:
             order.append("activation_repository")
@@ -872,8 +860,8 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "time_tl.entrypoints.operator_preflight.preflight_production_owner_settings",
-                preflight,
+                "time_tl.runtime.production_release.load_verified_release_attestation",
+                return_value=(manifest, manifest.fingerprint()),
             ),
             patch(
                 "time_tl.runtime.services._postgres_admin_repository",
@@ -883,21 +871,16 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         ):
             await activate_production_owner_settings(settings, 5)
 
-        preflight.assert_awaited_once_with(settings, 5)
-        self.assertEqual(["preflight", "activation_repository", "mark_active"], order)
-        service.mark_active.assert_awaited_once_with(
+        self.assertEqual(["activation_repository", "consume_receipt"], order)
+        service.mark_production_active.assert_awaited_once_with(
             5,
-            "operator",
-            correlation,
-            {
-                "check_profile": "production-exact-release-v1",
-                "covered_region_count": 1622,
-                "allowlist_count": 0,
-            },
+            manifest.fingerprint(),
+            manifest.migration_head,
+            ANY,
         )
         engine.dispose.assert_awaited_once()
 
-    async def test_production_activation_race_fails_closed_after_successful_preflight(self) -> None:
+    async def test_production_activation_receipt_mismatch_fails_closed(self) -> None:
         key = SecretStr("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
         settings = settings_for("bot", environment=Environment.PRODUCTION).model_copy(
             update={
@@ -908,32 +891,26 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         manifest = production_release_manifest()
-        evidence = SimpleNamespace(
-            release_manifest_sha256=manifest.fingerprint(),
-            host_metrics_ok=True,
-            covered_region_count=1622,
-            allowlist_count=0,
-        )
-        preflight = AsyncMock(return_value=evidence)
         engine = AsyncMock()
         service = AsyncMock()
-        service.mark_active.side_effect = OwnerSettingsConflictError("revision changed")
+        service.mark_production_active.side_effect = OwnerSettingsConflictError(
+            "receipt mismatch"
+        )
         with (
             patch(
-                "time_tl.entrypoints.operator_preflight.preflight_production_owner_settings",
-                preflight,
+                "time_tl.runtime.production_release.load_verified_release_attestation",
+                return_value=(manifest, manifest.fingerprint()),
             ),
             patch(
                 "time_tl.runtime.services._postgres_admin_repository",
                 return_value=(engine, object()),
             ),
             patch("time_tl.admin.settings.OwnerSettingsService", return_value=service),
-            self.assertRaisesRegex(OwnerSettingsConflictError, "revision changed"),
+            self.assertRaisesRegex(OwnerSettingsConflictError, "receipt mismatch"),
         ):
             await activate_production_owner_settings(settings, 5)
 
-        preflight.assert_awaited_once_with(settings, 5)
-        service.mark_active.assert_awaited_once()
+        service.mark_production_active.assert_awaited_once()
         engine.dispose.assert_awaited_once()
 
     def test_production_manifest_rejects_policy_mismatches(self) -> None:

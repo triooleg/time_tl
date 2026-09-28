@@ -648,6 +648,12 @@ class PostgresSenderRepository:
                 )
                 deliverable: list[ClaimedOutboxMessage] = []
                 for row in rows:
+                    if row.dispatch_started_at is not None:
+                        # A prior process crossed the durable dispatch boundary
+                        # but did not commit a definitive result. Telegram has no
+                        # idempotency key, so retrying could duplicate a message.
+                        self._mark_indeterminate(row, now)
+                        continue
                     if await self._is_currently_deliverable(
                         session,
                         row,
@@ -1077,22 +1083,26 @@ class PostgresSenderRepository:
         *,
         expected_recipient: DeliveryRecipient,
     ) -> bool:
-        """Revalidate and deliver while policy rows remain locked.
+        """Durably start, then revalidate and deliver under policy locks.
 
-        Holding the bounded transaction across the external Telegram call is
-        intentional: a concurrent mode, alert-state, region, or active-profile
-        change cannot commit between final authorization and transport I/O.
-        Telegram has no idempotency key, so a successful send followed by a
-        database commit failure can still cause a duplicate on retry; the
-        outbox event key prevents duplicate planning, but cannot remove that
-        provider-level ambiguity.
+        The dispatch-start marker commits before external I/O. Holding the
+        second bounded transaction across Telegram preserves the exact final
+        authorization boundary. If that transaction or process then fails,
+        restart recovery sees the marker and terminally quarantines the row as
+        indeterminate instead of risking a duplicate send.
         """
         if delivered_at.tzinfo is None:
             raise ValueError("delivery time must be timezone-aware")
         async with self._factory() as session:
             async with session.begin():
                 row = await self._locked(session, message_id)
-                if row.claimed_at is None:
+                if row.claimed_at is None or row.dispatch_started_at is not None:
+                    raise LookupError(message_id)
+                row.dispatch_started_at = delivered_at
+        async with self._factory() as session:
+            async with session.begin():
+                row = await self._locked(session, message_id)
+                if row.claimed_at is None or row.dispatch_started_at is None:
                     raise LookupError(message_id)
                 authorization_at = self._current_time()
                 if not await self._active_owner_config_authorizes(
@@ -1100,6 +1110,7 @@ class PostgresSenderRepository:
                     expected_recipient=expected_recipient,
                     lock=True,
                 ):
+                    row.dispatch_started_at = None
                     self._defer_transient(row, authorization_at)
                     return False
                 if not await self._is_currently_deliverable(
@@ -1118,8 +1129,10 @@ class PostgresSenderRepository:
                         lock_policy_rows=True,
                         expected_recipient=expected_recipient,
                     ):
+                        row.dispatch_started_at = None
                         self._defer_transient(row, authorization_at)
                     else:
+                        row.dispatch_started_at = None
                         row.dead_at = authorization_at
                         row.claimed_at = None
                         row.last_error_code = "final_delivery_policy_changed"
@@ -1152,11 +1165,13 @@ class PostgresSenderRepository:
                     "LESSON_REMINDER",
                     "RETURN_TO_ACTIVE_LESSON",
                 }:
+                    row.dispatch_started_at = None
                     row.dead_at = send_at
                     row.claimed_at = None
                     row.last_error_code = "final_delivery_invalid_expiry"
                     return False
                 if valid_until is not None and send_at >= valid_until:
+                    row.dispatch_started_at = None
                     row.dead_at = send_at
                     row.claimed_at = None
                     row.last_error_code = "final_delivery_expired"
@@ -1171,8 +1186,10 @@ class PostgresSenderRepository:
                         "ALL_CLEAR_CONFIRMED",
                         "RETURN_TO_ACTIVE_LESSON",
                     }:
+                        row.dispatch_started_at = None
                         self._defer_transient(row, send_at)
                     else:
+                        row.dispatch_started_at = None
                         row.dead_at = send_at
                         row.claimed_at = None
                         row.last_error_code = "final_delivery_policy_changed"
@@ -1204,6 +1221,9 @@ class PostgresSenderRepository:
                     cooldown_row.details = {
                         "cooldown_until": cooldown_until.isoformat(),
                     }
+                if row.dispatch_started_at is not None:
+                    self._mark_indeterminate(row, self._current_time())
+                    return
                 row.attempts += 1
                 row.available_at = available_at
                 row.claimed_at = None
@@ -1239,6 +1259,7 @@ class PostgresSenderRepository:
                                 OutboxMessage.delivered_at.is_(None),
                                 OutboxMessage.dead_at.is_(None),
                                 OutboxMessage.claimed_at == claimed_at,
+                                OutboxMessage.dispatch_started_at.is_(None),
                             )
                             .with_for_update()
                         )
@@ -1255,10 +1276,23 @@ class PostgresSenderRepository:
         async with self._factory() as session:
             async with session.begin():
                 row = await self._locked(session, message_id)
+                if row.dispatch_started_at is not None:
+                    self._mark_indeterminate(row, self._current_time())
+                    return
                 row.attempts += 1
                 row.dead_at = datetime.now(UTC)
                 row.claimed_at = None
                 row.last_error_code = error_code[:64]
+
+    @staticmethod
+    def _mark_indeterminate(row: OutboxMessage, at: datetime) -> None:
+        """Terminally quarantine a dispatch whose provider outcome is unknown."""
+
+        row.attempts = (row.attempts or 0) + 1
+        row.indeterminate_at = at
+        row.dead_at = at
+        row.claimed_at = None
+        row.last_error_code = "delivery_outcome_indeterminate"
 
     @staticmethod
     async def _locked(session: AsyncSession, message_id: str) -> OutboxMessage:

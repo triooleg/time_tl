@@ -161,3 +161,14 @@ def test_operator_commands_are_distinct_and_take_no_external_evidence() -> None:
         revision,
     ]
     assert "--evidence" not in PRODUCTION_COMPOSE.read_text(encoding="utf-8")
+
+
+def test_runbook_requires_one_receipted_preflight_before_probe_free_activation() -> None:
+    runbook = (ROOT / "docs" / "deployment" / "PORTAINER.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Run exactly one detached production preflight" in runbook
+    assert "with a ten-minute expiry" in runbook
+    assert "Activation makes no Telegram or provider request" in runbook
+    assert "marks the receipt consumed" in runbook
+    assert "handwritten evidence string" in runbook

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable
@@ -87,6 +87,7 @@ class PersistenceSchemaTests(unittest.TestCase):
                 "ix_outbox_confirmed_clear_cursor",
                 "ix_outbox_delivered_retention",
                 "ix_outbox_dead_retention",
+                "ix_outbox_indeterminate",
             }.issubset(indexes)
         )
         aggregate_sql = str(
@@ -112,6 +113,20 @@ class PersistenceSchemaTests(unittest.TestCase):
         self.assertIn("claimed_at IS NULL", delivered_sql)
         self.assertIn("(dead_at, id)", dead_sql)
         self.assertIn("claimed_at IS NULL", dead_sql)
+        indeterminate_sql = str(
+            CreateIndex(indexes["ix_outbox_indeterminate"]).compile(
+                dialect=postgresql.dialect()
+            )
+        )
+        self.assertIn("(indeterminate_at, id)", indeterminate_sql)
+        self.assertIn("indeterminate_at IS NOT NULL", indeterminate_sql)
+
+        columns = set(models.OutboxMessage.__table__.c.keys())
+        self.assertTrue({"dispatch_started_at", "indeterminate_at"}.issubset(columns))
+        ddl = str(
+            CreateTable(models.OutboxMessage.__table__).compile(dialect=postgresql.dialect())
+        )
+        self.assertIn("CONSTRAINT ck_outbox_messages_indeterminate_terminal CHECK", ddl)
 
     def test_pending_import_capacity_index_is_partial_and_user_ordered(self):
         indexes = {item.name: item for item in models.PendingImportSession.__table__.indexes}
@@ -128,6 +143,7 @@ class PersistenceSchemaTests(unittest.TestCase):
             "migrations.versions.0004_territory_catalog",
             "migrations.versions.0005_public_data_indexes",
             "migrations.versions.0006_outbox_terminal_retention",
+            "migrations.versions.0007_outbox_indeterminate",
         ):
             migration = importlib.import_module(module_name)
             with (
@@ -139,6 +155,32 @@ class PersistenceSchemaTests(unittest.TestCase):
                 migration.downgrade()
             self.assertEqual([], operations.mock_calls)
             inspect.assert_not_called()
+
+    def test_0007_downgrade_marks_inspected_constraint_name_as_final(self):
+        migration = importlib.import_module(
+            "migrations.versions.0007_outbox_indeterminate"
+        )
+        inspector = MagicMock()
+        inspector.get_indexes.return_value = []
+        inspector.get_check_constraints.return_value = [
+            {"name": "ck_outbox_messages_indeterminate_terminal"}
+        ]
+        inspector.get_columns.return_value = []
+        with (
+            patch.object(migration.context, "is_offline_mode", return_value=False),
+            patch.object(migration, "op") as operations,
+            patch.object(migration.sa, "inspect", return_value=inspector),
+        ):
+            migration.downgrade()
+
+        operations.f.assert_called_once_with(
+            "ck_outbox_messages_indeterminate_terminal"
+        )
+        operations.drop_constraint.assert_called_once_with(
+            operations.f.return_value,
+            "outbox_messages",
+            type_="check",
+        )
 
 
 if __name__ == "__main__":

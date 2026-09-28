@@ -71,7 +71,9 @@ The mandatory order for an approved production candidate is:
    digest is present in `RepoDigests`. Runtime attestation does not replace this
    external comparison.
 7. Take an encrypted logical backup, checksum it, and restore it into an isolated
-   PostgreSQL instance. Verify integrity, row counts and the rollback artifact.
+   PostgreSQL instance. The encrypted copy must also exist on storage independent
+   from the server filesystem. Verify integrity, row counts and the rollback
+   artifact; a checksum of an unencrypted same-disk dump is not restore evidence.
    Start only PostgreSQL and internal node-exporter, then run the one migration job:
 
    ```bash
@@ -79,33 +81,114 @@ The mandatory order for an approved production candidate is:
      -f docker-compose.production.yml --profile ops run --rm migrate
    ```
 
-8. Run exactly one detached production preflight. It verifies the fixed signature,
-   manifest/revision, actual database migration head, pending configuration,
-   official provider, Telegram `getMe`, and the internal metrics endpoint without
-   sending messages or activating the revision:
+8. Install the external monitoring rules and exercise their notification route.
+   The external off-host collector owns the protected Ed25519 private key; the
+   server, repository, image and Portainer must never contain it. Export a
+   secret-free evidence JSON no more than 15 minutes before the release gate and
+   sign its exact raw bytes. Transfer the JSON and detached base64 signature, then
+   verify them together with the protected thresholds and one-use receipt ledger:
+
+   ```bash
+   python scripts/deployment/verify_production_monitoring.py \
+     --env-file /protected/time-tl-production.env \
+     --evidence-json /protected/time-tl-monitoring-evidence.json \
+     --signature-file /protected/time-tl-monitoring-evidence.ed25519 \
+     --receipt-state-dir /protected/time-tl-monitoring-receipts
+   ```
+
+   `PASS` is mandatory. This verifier validates the operator contract and fresh
+   signed evidence; it does not replace the external collector or notification
+   system. The verifier uses only the compiled public key
+   `1a52a9d96acb88d89be3de992efb75d968620f642c1240dd1121b96ca74f320c`.
+   It atomically claims the opaque notification receipt, so the same evidence
+   cannot pass twice. Never put webhook URLs, recipients, credentials, chat IDs or
+   raw metric payloads in the evidence JSON.
+9. Run exactly one detached production preflight. It verifies the fixed signature,
+   manifest/revision, actual database migration head, exact pending-payload hash,
+   official provider, Telegram `getMe`, and the internal metrics endpoint. It sends
+   no message and does not activate the revision. On success it stores one
+   secret-free receipt in PostgreSQL, bound to the revision, manifest fingerprint,
+   pending-payload SHA-256 and migration head, with a ten-minute expiry:
 
    ```bash
    docker compose --env-file /protected/time-tl-production.env \
      -f docker-compose.production.yml --profile ops run --rm production-preflight
    ```
 
-9. Only after independent safety-review `PASS`, exact-version G8 approval and a
-   verified G9 plan, run the separate activation job once:
+   Record the sanitized PASS summary and receipt audit row. Do not run this command
+   again. Any failed, missing or expired receipt requires a newly authorized
+   preflight; it must never be replaced with a handwritten evidence string.
+10. Within the receipt's ten-minute lifetime, and only after independent
+   safety-review `PASS`, exact-version G8 approval and a verified G9 plan, run the
+   separate activation job once:
 
    ```bash
    docker compose --env-file /protected/time-tl-production.env \
      -f docker-compose.production.yml --profile ops run --rm production-activate
    ```
 
-10. Start `admin-web`, then the singleton `alert-worker`. Require a fresh complete
+   Activation makes no Telegram or provider request. In one database transaction it
+   locks the owner state and receipt, recomputes the pending-payload hash, rechecks
+   the migration head, manifest fingerprint, revision, PASS status, expiry and
+   unused status, activates that exact revision, and marks the receipt consumed.
+   Any mismatch fails closed without partial activation. This separation is what
+   makes the external production preflight exact-once while retaining an independent
+   review boundary.
+
+11. Start `admin-web`, then the singleton `alert-worker`. Require a fresh complete
     official snapshot, closed circuit and current heartbeat before starting `bot`
     and `schedule-worker`. Start `sender-worker` last. Observe outbox depth/age,
     Telegram errors, leases, restart counters and resource metrics throughout the
     bounded canary. Container health alone is not release evidence.
 
-The repository's production capability switch remains deliberately false until an
-exact independently reviewed public release changes it. Therefore this Compose
-contract and a passing render do not themselves enable or approve production.
+### Production monitoring and HOLD contract
+
+The public stack requires an external off-host collector and a tested notification
+route; `node-exporter` alone is not monitoring. The protected environment must
+contain the thresholds from `.env.production.example`. The signed evidence has an
+exact schema: `schema_version=1`, timezone-aware `generated_at` and
+`notification_route_exercised_at`, an opaque lowercase SHA-256
+`notification_route_receipt_sha256`, an `observations` object, and non-secret
+`stop_authority` and `rollback_authority` labels. Unexpected or duplicate fields,
+invalid signatures, evidence or route exercises older than 15 minutes, future
+timestamps, non-finite values and previously consumed receipts are rejected.
+
+The observations contain the actual numeric values, not self-asserted PASS flags:
+provider freshness and maximum heartbeat ages, restart-count increase, oldest/open/
+dead/retrying outbox values, database health, disk-free and memory-available
+percentages, verified encrypted-backup age and TLS days remaining. The verifier
+checks every value against the protected thresholds before atomically recording the
+notification receipt in the root/operator-controlled receipt-state directory.
+
+Move the release to `HOLD` and stop `sender-worker` first when any threshold trips:
+
+| Signal | Default production HOLD threshold |
+|---|---:|
+| Provider last successful complete snapshot age | 120 seconds |
+| Any required worker heartbeat age | 90 seconds |
+| Container restart-count increase | 1 |
+| Oldest open outbox item age | 60 seconds |
+| Open outbox depth | 100 |
+| New dead outbox rows | 1 |
+| New retrying outbox rows | 1 |
+| PostgreSQL health | any failure |
+| Host disk free | below 15 percent |
+| Host memory available | below 10 percent |
+| Last verified encrypted off-host backup age | over 24 hours |
+| TLS certificate remaining validity | below 14 days |
+
+Provider freshness/circuit and heartbeat failures also prohibit interpreting the
+stored state as all-clear. After stopping delivery, preserve logs and the failed
+database volume, identify whether rollback is schema-compatible, and use only the
+recorded stop/rollback authorities. A dashboard without a tested notification route,
+or evidence older than 15 minutes at the gate, is `REJECTED`.
+
+The candidate production capability switch is `True`, but it is only one input to
+the layered gate. The exact independently reviewed image still fails closed without
+its compiled release-verification key, valid signed release manifest, matching
+database revision, one-use production preflight receipt and all G7-G9 evidence.
+Therefore this Compose contract, the switch and a passing render do not themselves
+enable or approve production.
 
 ### Production rollback
 

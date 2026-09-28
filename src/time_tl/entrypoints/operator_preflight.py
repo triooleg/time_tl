@@ -5,9 +5,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 
-from time_tl.admin.settings import ActivationCandidate, OwnerSettingsService
+from time_tl.admin.settings import (
+    PRODUCTION_PREFLIGHT_RECEIPT_TTL,
+    ActivationCandidate,
+    OwnerSettingsService,
+)
 from time_tl.config import AdminBackend, Environment, OwnerConfigSource, Settings
 from time_tl.domain.alerts import ProviderSnapshotKind
 from time_tl.infrastructure.alerts import AlertsInUaAdapter
@@ -37,13 +42,14 @@ class OperatorPreflightEvidence:
     environment: str = Environment.STAGING.value
     release_manifest_sha256: str | None = None
     host_metrics_ok: bool = False
+    receipt_stored: bool = False
 
     def sanitized_summary(self) -> str:
         summary = (
             f"preflight passed: revision={self.revision} "
             f"allowlist_count={self.allowlist_count} telegram=get_me_ok "
             f"alerts=active_json_full_200 covered_regions={self.covered_region_count} "
-            "last_modified=present persisted=no"
+            "last_modified=present"
         )
         if self.release_manifest_sha256 is not None:
             correlation_id = production_preflight_correlation(
@@ -53,8 +59,13 @@ class OperatorPreflightEvidence:
                 f" environment={self.environment} "
                 f"release_manifest_sha256={self.release_manifest_sha256} "
                 f"node_exporter={'ok' if self.host_metrics_ok else 'unverified'} "
+                f"receipt={'stored' if self.receipt_stored else 'missing'} "
                 f"correlation_id={correlation_id}"
             )
+            if not self.receipt_stored:
+                summary += " persisted=no"
+        else:
+            summary += " persisted=no"
         return summary
 
 
@@ -230,7 +241,7 @@ async def preflight_production_owner_settings(
     transport_factory: Callable[[], Any] = _active_json_transport,
     metrics_fetcher: Callable[[str, float, int], bytes] | None = None,
 ) -> OperatorPreflightEvidence:
-    """Load one pending production revision and probe it without activation or writes."""
+    """Probe one production candidate once and store a short-lived one-use receipt."""
 
     if settings.environment is not Environment.PRODUCTION:
         raise RuntimeContractError("production preflight requires TIME_TL_ENV=production")
@@ -258,7 +269,7 @@ async def preflight_production_owner_settings(
         validate_production_database_migration_head,
     )
 
-    manifest, _fingerprint = load_verified_release_attestation(
+    manifest, fingerprint = load_verified_release_attestation(
         expected_config_revision=revision
     )
 
@@ -277,7 +288,6 @@ async def preflight_production_owner_settings(
     if metrics.get("source_status") != "available":
         raise RuntimeContractError("production preflight node_exporter probe failed")
     await validate_production_database_migration_head(settings, manifest)
-
     from aiogram import Bot
 
     from time_tl.runtime.services import _postgres_admin_repository
@@ -291,13 +301,29 @@ async def preflight_production_owner_settings(
         default_stale=settings.alert_stale_after_seconds,
     )
     try:
-        candidate = await service.activation_candidate(revision)
+        candidate, pending_payload_sha256 = await service.production_activation_candidate(
+            revision
+        )
         evidence = await probe_production_candidate(
             candidate,
             manifest,
             bot_factory=bot_factory or Bot,
             transport_factory=transport_factory,
         )
-        return replace(evidence, host_metrics_ok=True)
+        issued_at = datetime.now(UTC)
+        await service.store_production_preflight_receipt(
+            revision,
+            fingerprint,
+            pending_payload_sha256,
+            manifest.migration_head,
+            issued_at,
+            issued_at + PRODUCTION_PREFLIGHT_RECEIPT_TTL,
+            {
+                "check_profile": "production-exact-release-v1",
+                "covered_region_count": evidence.covered_region_count,
+                "allowlist_count": evidence.allowlist_count,
+            },
+        )
+        return replace(evidence, host_metrics_ok=True, receipt_stored=True)
     finally:
         await engine.dispose()

@@ -102,7 +102,7 @@ def production_manifest() -> ProductionReleaseManifest:
         config_revision=5,
         provider="alerts.in.ua/full-territory",
         catalog_sha256=EXPECTED_SHA256,
-        migration_head="0006_outbox_terminal_retention",
+        migration_head="0007_outbox_indeterminate",
         replicas=1,
         territory_selection="manual-oblast-raion-hromada",
     )
@@ -335,7 +335,7 @@ async def test_production_owner_preflight_requires_stable_keys_metrics_and_db_co
 
 
 @pytest.mark.asyncio
-async def test_production_owner_preflight_reads_exact_pending_revision_without_persisting(
+async def test_production_owner_preflight_stores_receipt_for_exact_pending_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requested: list[int] = []
@@ -348,12 +348,19 @@ async def test_production_owner_preflight_reads_exact_pending_revision_without_p
             self.disposed = True
 
     class FakeOwnerSettingsService:
+        receipt: tuple[object, ...] | None = None
+
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
-        async def activation_candidate(self, revision: int) -> ActivationCandidate:
+        async def production_activation_candidate(
+            self, revision: int
+        ) -> tuple[ActivationCandidate, str]:
             requested.append(revision)
-            return candidate(environment="production", allowlist=())
+            return candidate(environment="production", allowlist=()), "d" * 64
+
+        async def store_production_preflight_receipt(self, *args: object) -> None:
+            FakeOwnerSettingsService.receipt = args
 
     engine = FakeEngine()
     monkeypatch.setattr(
@@ -382,9 +389,19 @@ async def test_production_owner_preflight_reads_exact_pending_revision_without_p
     assert engine.disposed
     assert evidence.revision == 5
     assert evidence.host_metrics_ok
+    assert evidence.receipt_stored
     migration_gate.assert_awaited_once()
-    assert "persisted=no" in evidence.sanitized_summary()
+    assert "receipt=stored" in evidence.sanitized_summary()
+    assert "persisted=no" not in evidence.sanitized_summary()
     assert "node_exporter=ok" in evidence.sanitized_summary()
+    assert FakeOwnerSettingsService.receipt is not None
+    manifest = production_manifest()
+    assert FakeOwnerSettingsService.receipt[:4] == (
+        5,
+        manifest.fingerprint(),
+        "d" * 64,
+        manifest.migration_head,
+    )
 
 
 @pytest.mark.asyncio

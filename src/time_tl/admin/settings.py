@@ -6,8 +6,10 @@ an accidental form submission cannot enable live Telegram delivery.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -15,6 +17,7 @@ from pydantic import SecretStr
 
 _SENSITIVE_SETTING_PARTS = ("token", "secret", "password", "fernet", "key", "ciphertext")
 MAX_ONBOARDING_TEXT_LENGTH = 1500
+PRODUCTION_PREFLIGHT_RECEIPT_TTL = timedelta(minutes=10)
 DEFAULT_ONBOARDING_TEXT = (
     "👋 Вітаємо у Time TL!\n\n"
     "Бот допомагає онлайн-учням не пропустити початок повітряної тривоги, "
@@ -51,6 +54,18 @@ class OwnerSettingsConflictError(OwnerSettingsError):
 
 class OwnerSettingsCryptoError(OwnerSettingsError):
     pass
+
+
+def owner_settings_payload_sha256(payload: dict[str, Any]) -> str:
+    """Bind an operator check to the exact encrypted JSON payload in PostgreSQL."""
+
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -163,6 +178,27 @@ class OwnerSettingsStore(Protocol):
         self, revision: int, actor: str, failure_code: str
     ) -> OwnerSettingsBundle: ...
 
+    async def store_production_preflight_receipt(
+        self,
+        revision: int,
+        manifest_fingerprint: str,
+        pending_payload_sha256: str,
+        migration_head: str,
+        issued_at: datetime,
+        expires_at: datetime,
+        actor: str,
+        evidence_summary: dict[str, int | str],
+    ) -> None: ...
+
+    async def activate_with_production_preflight_receipt(
+        self,
+        revision: int,
+        manifest_fingerprint: str,
+        migration_head: str,
+        actor: str,
+        now: datetime,
+    ) -> OwnerSettingsBundle: ...
+
     async def rollback_owner_settings_active(
         self, expected_active_revision: int, actor: str
     ) -> OwnerSettingsBundle: ...
@@ -258,12 +294,74 @@ class OwnerSettingsService:
 
     async def activation_candidate(self, revision: int) -> ActivationCandidate:
         bundle = await self._store.owner_settings_bundle()
+        return self._activation_candidate(bundle, revision)
+
+    async def production_activation_candidate(
+        self, revision: int
+    ) -> tuple[ActivationCandidate, str]:
+        """Return one candidate and the hash of the same raw encrypted payload."""
+
+        bundle = await self._store.owner_settings_bundle()
+        candidate = self._activation_candidate(bundle, revision)
+        assert bundle.draft is not None
+        return candidate, owner_settings_payload_sha256(bundle.draft)
+
+    def _activation_candidate(
+        self, bundle: OwnerSettingsBundle, revision: int
+    ) -> ActivationCandidate:
         if bundle.pending_revision != revision or not bundle.draft:
             raise OwnerSettingsConflictError("Запрошенная версия не ожидает активации.")
         view = self._view(bundle)
         if not view.ready_for_activation:
             raise OwnerSettingsValidationError("Конфигурация не готова к активации.")
         return self._candidate(bundle.draft, revision, "operator")
+
+    async def store_production_preflight_receipt(
+        self,
+        revision: int,
+        manifest_fingerprint: str,
+        pending_payload_sha256: str,
+        migration_head: str,
+        issued_at: datetime,
+        expires_at: datetime,
+        evidence_summary: dict[str, int | str],
+    ) -> None:
+        if (
+            issued_at.tzinfo is None
+            or expires_at.tzinfo is None
+            or expires_at <= issued_at
+            or expires_at - issued_at > PRODUCTION_PREFLIGHT_RECEIPT_TTL
+        ):
+            raise OwnerSettingsValidationError("Срок действия проверки недействителен.")
+        await self._store.store_production_preflight_receipt(
+            revision,
+            manifest_fingerprint,
+            pending_payload_sha256,
+            migration_head,
+            issued_at,
+            expires_at,
+            "operator",
+            evidence_summary,
+        )
+
+    async def mark_production_active(
+        self,
+        revision: int,
+        manifest_fingerprint: str,
+        migration_head: str,
+        now: datetime,
+    ) -> OwnerConfigurationView:
+        """Atomically consume a valid receipt while activating its exact payload."""
+
+        return self._view(
+            await self._store.activate_with_production_preflight_receipt(
+                revision,
+                manifest_fingerprint,
+                migration_head,
+                "operator",
+                now,
+            )
+        )
 
     async def active_runtime_config(
         self, expected_environment: str, service_role: str

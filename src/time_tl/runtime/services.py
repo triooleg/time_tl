@@ -824,7 +824,7 @@ async def activate_owner_settings(settings: Settings, revision: int, evidence_id
 async def activate_production_owner_settings(
     settings: Settings, revision: int
 ) -> None:
-    """Run full production preflight, then atomically activate that exact revision."""
+    """Consume an exact preflight receipt without repeating external probes."""
 
     if settings.environment is not Environment.PRODUCTION:
         raise RuntimeContractError("production activation requires production environment")
@@ -837,16 +837,14 @@ async def activate_production_owner_settings(
     if settings.owner_telegram_fernet_key is None or settings.owner_alerts_fernet_key is None:
         raise RuntimeContractError("production activation requires both encryption keys")
 
+    from datetime import UTC, datetime
+
     from time_tl.admin.settings import OwnerSettingsService
-    from time_tl.entrypoints.operator_preflight import preflight_production_owner_settings
 
-    from .production_release import production_preflight_correlation
+    from .production_release import load_verified_release_attestation
 
-    evidence = await preflight_production_owner_settings(settings, revision)
-    if evidence.release_manifest_sha256 is None or not evidence.host_metrics_ok:
-        raise RuntimeContractError("production preflight evidence is incomplete")
-    correlation_id = production_preflight_correlation(
-        revision, evidence.release_manifest_sha256
+    manifest, manifest_fingerprint = load_verified_release_attestation(
+        expected_config_revision=revision
     )
 
     engine, repository = _postgres_admin_repository(settings)
@@ -858,15 +856,11 @@ async def activate_production_owner_settings(
         default_stale=settings.alert_stale_after_seconds,
     )
     try:
-        await service.mark_active(
+        await service.mark_production_active(
             revision,
-            "operator",
-            correlation_id,
-            {
-                "check_profile": "production-exact-release-v1",
-                "covered_region_count": evidence.covered_region_count,
-                "allowlist_count": evidence.allowlist_count,
-            },
+            manifest_fingerprint,
+            manifest.migration_head,
+            datetime.now(UTC),
         )
     finally:
         await engine.dispose()
