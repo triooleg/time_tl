@@ -139,10 +139,13 @@ compatible with the catalogue region type. An unknown, mismatched or malformed
 UID is not used, mapped, inferred or partially ignored. A single invalid row
 invalidates the complete snapshot globally, including any otherwise known rows,
 and produces UNKNOWN or STALE rather than CLEAR. Recovery still requires a
-complete valid snapshot and the normal two-observation all-clear rule. The
-RC14 adds adversarial regression evidence for this existing
-contract; it does not add a new UID source or compatibility rule and has no
-deployment or preflight evidence.
+complete valid snapshot and the normal two-observation all-clear rule. RC14 adds
+adversarial regression evidence for this existing contract; it does not add a
+new UID source or compatibility rule. Its subsequently authorized single
+STAGING preflight again failed closed as `location_uid_unknown / count=1`. The
+unknown UID was not used, mapped or inferred, no snapshot was accepted, and
+revision 10 was not activated. This is HOLD evidence, not source compatibility
+or launch evidence.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful

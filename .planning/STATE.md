@@ -102,11 +102,11 @@ services or sent a message. No production or canary deployment has occurred.
 ## Session Continuity
 
 Last session: 2026-09-28
-Stopped at: RC13 is installed, but its single preflight rejected the provider
-response as `location_uid_unknown / count=1`; activation did not occur and the
-server remains in `HOLD`. RC14 is a LOCAL safety candidate. It does
-not broaden UID compatibility; an upstream API/catalogue inconsistency remains
-`BLOCKED` pending authoritative provider evidence.
+Stopped at: RC14 is installed, but its single preflight rejected the provider
+response as `location_uid_unknown / count=1`; activation and phase 2 startup are
+prohibited, and the server remains in `HOLD`. RC14 does not broaden UID
+compatibility; the upstream API/catalogue inconsistency remains `BLOCKED`
+pending authoritative provider evidence.
 The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
@@ -370,6 +370,32 @@ residual risk.
 Any future authorized startup must be sequential: start `alert-worker` alone,
 establish and verify the durable restart fence, then start `schedule-worker`, and
 start `sender-worker` last. Sender must not start in parallel with the other
-workers. This LOCAL verification is not deployment, preflight, activation or
-launch evidence. Current server verdict remains RC13 `HOLD`.
+workers. This was LOCAL verification before packaging and did not itself prove a
+deployment, preflight, activation or launch.
+
+The exact RC14 release was subsequently approved and installed from tag
+`time-tl-staging-20260928-rc14-uid-outbox-safety`, commit
+`9b748bd92f220a78a5d2ade7c8925999d3f4f781`, archive SHA-256
+`98c5f13d178be29684ba7ce98b517be5ddf8cd310f367097fe10f2c516ed683b`.
+The verified archive contained 224 entries and was 374,281 bytes. Immutable
+image `sha256:e2894574f901be2057b2b0e0d567af79aa7f566b4b217aa74b94efe1ec3b16b0`
+was built. `admin-web` runs RC14, is healthy with restart count zero, and direct
+and public `/login` checks returned HTTP 200. RC14 `bot` and all three workers
+are `Created` and were never started. PostgreSQL remains at
+`0006_outbox_terminal_retention`; no migration ran.
+
+Exactly one RC14 STAGING preflight ran for pending revision 10. Telegram `getMe`
+passed, then exactly one official `active.json` request failed closed as
+`INVALID_RESPONSE / location_uid_unknown / count=1`; the preflight exited with
+status 2 and did not retry. Owner state remained latest revision 10, pending
+revision 10 and ACTIVE revision 6, with zero revision-10 activation audit rows.
+The outbox was unchanged at 29 total, 24 delivered and 5 undelivered rows, and
+the one-off count remained 0. There was no activation, service start, message,
+persistence change or proxy change. The UID was not used, mapped or inferred.
+
+Fresh verified rollback backup:
+`/home/trio/time-tl-bot/backups/pre-rc14-uid-outbox-safety-20260928T120652Z`.
+Its database dump is 692,590 bytes; recorded source and database hashes were
+reverified. Current verdict is RC14 `HOLD`; phase 2 remains prohibited and no
+launch claim is made.
 Resume file: none.

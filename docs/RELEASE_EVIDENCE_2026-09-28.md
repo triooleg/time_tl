@@ -1,11 +1,10 @@
-# Time TL RC8 incident through RC14 local safety candidate — 2026-09-28
+# Time TL RC8 incident through RC14 live HOLD — 2026-09-28
 
 ## Scope
 
 This record covers the RC8 provider-envelope compatibility release, its bounded
-server operation, the later exact RC9 diagnostic-only deployment, the exact RC10
-through RC13 deployments and preflights, and the RC14 local safety
-candidate. It records
+server operation, the later exact RC9 diagnostic-only deployment, and the exact
+RC10 through RC14 deployments and preflights. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
 boundary and the contained RC9 read-only diagnostic. It is not evidence of
@@ -571,13 +570,52 @@ barriers do not yet have fresh destructive-database evidence in this run. A
 residual send-before-commit duplicate ambiguity also remains: an external send
 can succeed before the database records completion.
 
-If a later exact release is independently accepted and explicitly authorized,
+If an exact release is independently accepted and explicitly authorized,
 worker startup must be sequential: start `alert-worker` alone, establish and
 verify the durable restart fence, then start `schedule-worker`, and start
 `sender-worker` last. The sender must not be started in parallel with the other
 workers.
 
-This LOCAL evidence is not an immutable image, deployment, preflight,
-activation or launch identity. It does
-not change the RC13 server `HOLD`: bot and workers remain stopped and revision 10
-remains unactivated.
+This was LOCAL evidence before packaging. It did not itself prove an immutable
+image, deployment, preflight, activation or launch.
+
+## Exact RC14 server operation and HOLD
+
+The exact approved RC14 identity was:
+
+- tag: `time-tl-staging-20260928-rc14-uid-outbox-safety`;
+- tag object: `c98c350b524004d06ed846583c824aea5f3c137a`;
+- commit: `9b748bd92f220a78a5d2ade7c8925999d3f4f781`;
+- tree: `fed02cd129309387735a2d89f9974d7037f200c0`;
+- archive SHA-256:
+  `98c5f13d178be29684ba7ce98b517be5ddf8cd310f367097fe10f2c516ed683b`;
+- archive size and entry count: 374,281 bytes and 224 entries;
+- immutable image:
+  `sha256:e2894574f901be2057b2b0e0d567af79aa7f566b4b217aa74b94efe1ec3b16b0`.
+
+The server archive matched the approved digest. `admin-web` runs RC14, is
+healthy with restart count zero, and returned HTTP 200 through direct and public
+`/login` checks. RC14 `bot`, `alert-worker`, `schedule-worker` and
+`sender-worker` are `Created` and were never started. PostgreSQL remains at
+`0006_outbox_terminal_retention`; no migration ran.
+
+Exactly one RC14 STAGING preflight ran for pending revision 10. Telegram `getMe`
+passed. Exactly one official `active.json` request then failed closed as
+`INVALID_RESPONSE / location_uid_unknown / count=1`; the preflight exited with
+status 2 and did not retry. Owner state before and after was latest revision 10,
+pending revision 10 and ACTIVE revision 6. Revision 10 has zero activation audit
+rows. The outbox was unchanged at 29 total, 24 delivered and 5 undelivered rows;
+the one-off count remained 0.
+
+There was no activation, bot/worker start, message, persistence mutation or proxy
+change. The rejected UID was not used, mapped or inferred, and no raw UID,
+response body or secret is included in this record.
+
+A fresh rollback backup is retained at
+`/home/trio/time-tl-bot/backups/pre-rc14-uid-outbox-safety-20260928T120652Z`.
+The database dump is 692,590 bytes. Recorded source and database hashes were
+reverified.
+
+The current verdict is RC14 `HOLD`. Phase 2 startup is prohibited; the bot and
+all workers remain stopped and revision 10 remains unactivated. This is not a
+successful Telegram staging run, canary or launch.
