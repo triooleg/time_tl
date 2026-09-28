@@ -104,8 +104,9 @@ services or sent a message. No production or canary deployment has occurred.
 Last session: 2026-09-28
 Stopped at: RC13 is installed, but its single preflight rejected the provider
 response as `location_uid_unknown / count=1`; activation did not occur and the
-server remains in `HOLD`. RC14 diagnosis is `BLOCKED` on an upstream API/catalogue
-inconsistency; no safe code correction is supported by the official evidence.
+server remains in `HOLD`. RC14 is a LOCAL safety candidate. It does
+not broaden UID compatibility; an upstream API/catalogue inconsistency remains
+`BLOCKED` pending authoritative provider evidence.
 The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
@@ -339,8 +340,36 @@ on 2026-09-28. It was byte-identical to the pinned file: 142,029 bytes, SHA-256
 1,622 records, 27 roots and 1,595 parent links. The official alert schema requires
 `location_uid` as a string carrying an int32 value, and the official SDK provides
 no alternate mapping. The live API therefore supplied a required UID absent from
-the current official catalogue. A safe RC14 code fix is `BLOCKED` pending an
-official updated full catalogue with UID, type and parent data, a provider-side
-correction, or an official mapping. No raw UID, response body or secret is
-retained here. Current server verdict remains RC13 `HOLD`; no launch claim is made.
+the current official catalogue. Any compatibility expansion or mapping remains
+`BLOCKED` pending an official updated full catalogue with UID, type and parent
+data, a provider-side correction, or an official mapping. No raw UID, response
+body or secret is retained here.
+
+The RC14 LOCAL candidate preserves the existing authoritative UID
+rule: `location_uid` is usable only when present in the official pinned catalogue
+and its API type is compatible with the catalogue region type. An unknown,
+mismatched or otherwise invalid required UID is never used, mapped or inferred.
+One such row invalidates the complete snapshot globally and results in UNKNOWN,
+or STALE when prior valid state exists, with no CLEAR. Adversarial tests cover
+mixed known/unknown rows, prior ACTIVE state, repeated failures, restart,
+parent/child scopes, recovery requiring the normal two valid clear observations,
+and sanitized preflight output.
+
+RC14 also contains LOCAL queue-safety changes. A late `LESSON_REMINDER` is
+terminally suppressed at or after `starts_at`, both during claim and at the final
+delivery boundary. The sender's final transaction pins the active owner revision,
+the current STAGING allowlist and the expected recipient; runtime wiring passes
+those expectations into the repository. Current LOCAL verification is
+`542 passed, 5 skipped, 1 warning`; Ruff, strict mypy for 72 source files,
+compileall and `git diff --check` pass. Independent queue-safety review issued
+`PASS` for allowlisted STAGING with no CRITICAL, HIGH or MEDIUM findings. The
+five skipped cases remain destructive
+PostgreSQL E2E tests, and send-before-commit duplicate ambiguity remains a
+residual risk.
+
+Any future authorized startup must be sequential: start `alert-worker` alone,
+establish and verify the durable restart fence, then start `schedule-worker`, and
+start `sender-worker` last. Sender must not start in parallel with the other
+workers. This LOCAL verification is not deployment, preflight, activation or
+launch evidence. Current server verdict remains RC13 `HOLD`.
 Resume file: none.

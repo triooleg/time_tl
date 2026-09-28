@@ -35,6 +35,7 @@ from time_tl.infrastructure.db.models import (
     OutboxMessage,
     PendingImportSession,
     RuleLesson,
+    RuntimeSetting,
     User,
     WorkerHeartbeat,
 )
@@ -185,6 +186,7 @@ class DeliverySession:
 class FinalDeliverySession:
     def __init__(self, objects):
         self.objects = objects
+        self.statements = []
 
     def begin(self):
         return AsyncContext(None)
@@ -193,8 +195,12 @@ class FinalDeliverySession:
         return self.objects.get(model)
 
     async def execute(self, statement):
+        self.statements.append(statement)
         descriptions = statement.column_descriptions
         entity = descriptions[0].get("entity") if descriptions else None
+        if entity is RuntimeSetting:
+            key = statement.compile().params.get("key_1")
+            return Result(scalar=self.objects.get((RuntimeSetting, key)))
         return Result(scalar=self.objects.get(entity))
 
 
@@ -471,7 +477,11 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
             aggregate_id=str(user.id),
             event_key="claim-reminder",
             event_type="LESSON_REMINDER",
-            payload={"telegram_chat_id": 999, "profile_revision": 1},
+            payload={
+                "telegram_chat_id": 999,
+                "profile_revision": 1,
+                "starts_at": (AUTHORIZATION_AT + timedelta(minutes=5)).isoformat(),
+            },
         )
         session = ClaimSession(
             {User: user},
@@ -488,6 +498,43 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("confirmed_region_id", claimed[0].payload)
         self.assertNotIn("confirmed_region_name", claimed[0].payload)
         self.assertEqual(row.payload["telegram_chat_id"], 999)
+
+    async def test_restart_claim_terminally_suppresses_late_lesson_reminder(self):
+        user = User(id=uuid4(), telegram_user_id=42, mode="LESSONS_ONLY")
+        profile = ProfileRow(
+            id=uuid4(),
+            user_id=user.id,
+            public_id="school",
+            name="School",
+            is_active=True,
+            version=1,
+        )
+        row = OutboxMessage(
+            id=uuid4(),
+            aggregate_type="schedule",
+            aggregate_id=str(user.id),
+            event_key="late-restart-reminder",
+            event_type="LESSON_REMINDER",
+            payload={
+                "telegram_chat_id": 42,
+                "profile_revision": 1,
+                "starts_at": AUTHORIZATION_AT.isoformat(),
+            },
+        )
+        session = ClaimSession(
+            {User: user},
+            results=(Result(scalars=(row,)), Result(scalar=profile)),
+        )
+        repo = PostgresSenderRepository(  # type: ignore[arg-type]
+            lambda: AsyncContext(session), stale_after_seconds=120
+        )
+
+        claimed = await repo.claim_batch_skip_locked(AUTHORIZATION_AT, limit=10)
+
+        self.assertEqual((), claimed)
+        self.assertEqual(AUTHORIZATION_AT, row.dead_at)
+        self.assertIsNone(row.claimed_at)
+        self.assertEqual("delivery_policy_changed", row.last_error_code)
 
     async def test_claim_defers_alert_events_until_stale_snapshot_recovers(self):
         for event_type, recovered_state in (
@@ -1401,6 +1448,178 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(sent)
         self.assertEqual(message.last_error_code, "final_delivery_policy_changed")
 
+    async def test_final_authorization_blocks_old_owner_revision_and_current_allowlist(self):
+        now = datetime(2026, 9, 21, 6, tzinfo=UTC)
+
+        async def attempt(
+            *,
+            expected_revision: int,
+            active_revision: int,
+            active_allowlist: list[int],
+            expected_allowlist: tuple[int, ...],
+        ):
+            user = User(id=uuid4(), telegram_user_id=42, mode="LESSONS_ONLY")
+            profile = ProfileRow(
+                id=uuid4(),
+                user_id=user.id,
+                public_id="school",
+                name="School",
+                is_active=True,
+                version=1,
+            )
+            message = OutboxMessage(
+                id=uuid4(),
+                aggregate_type="schedule",
+                aggregate_id=str(user.id),
+                event_key=f"config-bound:{expected_revision}:{active_revision}",
+                event_type="LESSON_REMINDER",
+                payload={
+                    "telegram_chat_id": 42,
+                    "profile_revision": 1,
+                    "starts_at": (now + timedelta(minutes=5)).isoformat(),
+                },
+                claimed_at=now,
+            )
+            state = RuntimeSetting(
+                key="owner_configuration_state",
+                value={"active_revision": active_revision},
+                updated_by="owner",
+            )
+            active = RuntimeSetting(
+                key="owner_configuration_active",
+                value={
+                    "revision": active_revision,
+                    "staging_allowlist": active_allowlist,
+                },
+                updated_by="owner",
+            )
+            session = FinalDeliverySession(
+                {
+                    OutboxMessage: message,
+                    User: user,
+                    ProfileRow: profile,
+                    (RuntimeSetting, "owner_configuration_state"): state,
+                    (RuntimeSetting, "owner_configuration_active"): active,
+                }
+            )
+            repo = PostgresSenderRepository(  # type: ignore[arg-type]
+                lambda: AsyncContext(session),
+                stale_after_seconds=120,
+                expected_owner_config_revision=expected_revision,
+                expected_staging_allowlist=expected_allowlist,
+                clock=lambda: now,
+            )
+            sent = False
+
+            async def deliver():
+                nonlocal sent
+                sent = True
+
+            allowed = await repo.deliver_if_authorized(
+                str(message.id),
+                now,
+                deliver,
+                expected_recipient=DeliveryRecipient(42),
+            )
+            return allowed, sent, message, session
+
+        current = await attempt(
+            expected_revision=6,
+            active_revision=6,
+            active_allowlist=[42],
+            expected_allowlist=(42,),
+        )
+        revision_changed = await attempt(
+            expected_revision=6,
+            active_revision=10,
+            active_allowlist=[42],
+            expected_allowlist=(42,),
+        )
+        recipient_removed = await attempt(
+            expected_revision=10,
+            active_revision=10,
+            active_allowlist=[99],
+            expected_allowlist=(99,),
+        )
+
+        self.assertEqual((True, True), current[:2])
+        self.assertEqual((False, False), revision_changed[:2])
+        self.assertEqual((False, False), recipient_removed[:2])
+        self.assertEqual(
+            "delivery_policy_temporarily_unavailable",
+            revision_changed[2].last_error_code,
+        )
+        self.assertEqual(
+            "delivery_policy_temporarily_unavailable",
+            recipient_removed[2].last_error_code,
+        )
+        runtime_locks = [
+            str(statement.compile(dialect=postgresql.dialect()))
+            for statement in current[3].statements
+            if statement.column_descriptions
+            and statement.column_descriptions[0].get("entity") is RuntimeSetting
+        ]
+        self.assertEqual(2, len(runtime_locks))
+        self.assertTrue(all("FOR UPDATE" in statement for statement in runtime_locks))
+
+    async def test_lesson_reminder_is_suppressed_at_start_boundary_after_restart(self):
+        starts_at = datetime(2026, 9, 21, 6, 5, tzinfo=UTC)
+
+        async def attempt(send_at: datetime):
+            authorization_at = starts_at - timedelta(seconds=1)
+            user = User(id=uuid4(), telegram_user_id=42, mode="LESSONS_ONLY")
+            profile = ProfileRow(
+                id=uuid4(),
+                user_id=user.id,
+                public_id="school",
+                name="School",
+                is_active=True,
+                version=1,
+            )
+            message = OutboxMessage(
+                id=uuid4(),
+                aggregate_type="schedule",
+                aggregate_id=str(user.id),
+                event_key=f"restart-reminder:{send_at.isoformat()}",
+                event_type="LESSON_REMINDER",
+                payload={
+                    "telegram_chat_id": 42,
+                    "profile_revision": 1,
+                    "starts_at": starts_at.isoformat(),
+                },
+                claimed_at=authorization_at,
+            )
+            session = FinalDeliverySession(
+                {OutboxMessage: message, User: user, ProfileRow: profile}
+            )
+            clock_values = iter((authorization_at, send_at))
+            repo = PostgresSenderRepository(  # type: ignore[arg-type]
+                lambda: AsyncContext(session),
+                stale_after_seconds=120,
+                clock=lambda: next(clock_values),
+            )
+            sent = False
+
+            async def deliver():
+                nonlocal sent
+                sent = True
+
+            allowed = await repo.deliver_if_authorized(
+                str(message.id),
+                authorization_at,
+                deliver,
+                expected_recipient=DeliveryRecipient(42),
+            )
+            return allowed, sent, message
+
+        before = await attempt(starts_at - timedelta(microseconds=1))
+        at_boundary = await attempt(starts_at)
+
+        self.assertEqual((True, True), before[:2])
+        self.assertEqual((False, False), at_boundary[:2])
+        self.assertEqual("final_delivery_expired", at_boundary[2].last_error_code)
+        self.assertEqual(starts_at, at_boundary[2].dead_at)
+
     async def test_return_expiry_is_rechecked_after_policy_locks_at_exact_boundary(self):
         valid_until = datetime(2026, 9, 21, 6, 5, tzinfo=UTC)
 
@@ -1502,7 +1721,11 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
             aggregate_id=str(user.id),
             event_key="retry-reminder",
             event_type="LESSON_REMINDER",
-            payload={"telegram_chat_id": 42, "profile_revision": 1},
+            payload={
+                "telegram_chat_id": 42,
+                "profile_revision": 1,
+                "starts_at": (now + timedelta(minutes=5)).isoformat(),
+            },
             claimed_at=now,
             attempts=0,
         )

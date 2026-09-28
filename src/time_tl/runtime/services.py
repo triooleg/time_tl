@@ -895,6 +895,12 @@ async def run_sender_worker(settings: Settings) -> None:
     sender_repository = PostgresSenderRepository(
         factory,
         stale_after_seconds=settings.alert_stale_after_seconds,
+        expected_owner_config_revision=settings.owner_config_revision,
+        expected_staging_allowlist=(
+            settings.test_chat_allowlist
+            if settings.environment is Environment.STAGING
+            else None
+        ),
     )
     worker = build_sender_worker(
         sender_repository,

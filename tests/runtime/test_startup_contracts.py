@@ -318,6 +318,16 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("_apply_alert_restart_fence", schedule_source)
         self.assertNotIn("_apply_alert_restart_fence", sender_source)
 
+    def test_sender_final_authorization_is_wired_to_active_revision_and_allowlist(self) -> None:
+        sender_source = inspect.getsource(run_sender_worker)
+
+        self.assertIn(
+            "expected_owner_config_revision=settings.owner_config_revision",
+            sender_source,
+        )
+        self.assertIn("expected_staging_allowlist=", sender_source)
+        self.assertIn("settings.test_chat_allowlist", sender_source)
+
     def test_alert_worker_fences_before_health_serving_loop(self) -> None:
         source = inspect.getsource(_run_postgres_alert_worker)
 

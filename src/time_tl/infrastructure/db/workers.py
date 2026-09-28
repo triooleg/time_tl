@@ -31,6 +31,7 @@ from .models import (
     OutboxMessage,
     OverrideLesson,
     RuleLesson,
+    RuntimeSetting,
     ScheduleProfile,
     User,
     WorkerHeartbeat,
@@ -79,6 +80,23 @@ def _scope_binding_matches(payload: dict[str, object], scope: AlertScope) -> boo
         "applicable_region_ids": sorted(set(scope.applicable_region_ids)),
     }
     return binding == expected
+
+
+def _delivery_deadline(row: OutboxMessage) -> datetime | None:
+    key = {
+        "LESSON_REMINDER": "starts_at",
+        "RETURN_TO_ACTIVE_LESSON": "valid_until",
+    }.get(row.event_type)
+    if key is None:
+        return None
+    raw = row.payload.get(key)
+    if not isinstance(raw, str):
+        return None
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return value if value.tzinfo is not None else None
 
 
 class PostgresScheduleWorkerRepository:
@@ -398,13 +416,27 @@ class PostgresSenderRepository:
         *,
         visibility_timeout: timedelta = timedelta(minutes=5),
         stale_after_seconds: int,
+        expected_owner_config_revision: int | None = None,
+        expected_staging_allowlist: tuple[int, ...] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if stale_after_seconds < 1:
             raise ValueError("stale threshold must be positive")
+        if expected_owner_config_revision is not None and expected_owner_config_revision < 1:
+            raise ValueError("owner configuration revision must be positive")
+        if expected_owner_config_revision is None and expected_staging_allowlist is not None:
+            raise ValueError("staging allowlist requires an owner configuration revision")
+        if expected_staging_allowlist is not None and (
+            not expected_staging_allowlist
+            or any(item <= 0 for item in expected_staging_allowlist)
+            or len(set(expected_staging_allowlist)) != len(expected_staging_allowlist)
+        ):
+            raise ValueError("staging allowlist must contain unique positive chat IDs")
         self._factory = factory
         self._visibility_timeout = visibility_timeout
         self._stale_after = timedelta(seconds=stale_after_seconds)
+        self._expected_owner_config_revision = expected_owner_config_revision
+        self._expected_staging_allowlist = expected_staging_allowlist
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def _current_time(self) -> datetime:
@@ -412,6 +444,64 @@ class PostgresSenderRepository:
         if current.tzinfo is None:
             raise ValueError("repository clock must be timezone-aware")
         return current
+
+    async def _active_owner_config_authorizes(
+        self,
+        session: AsyncSession,
+        *,
+        expected_recipient: DeliveryRecipient | None = None,
+        lock: bool,
+    ) -> bool:
+        """Pin delivery to the process' exact activated configuration.
+
+        Unit-only repositories may explicitly pass ``None`` for the expected
+        revision. Every live sender is wired with a positive revision. At the
+        final boundary the state row is locked until after Telegram I/O, so a
+        new activation cannot commit between this check and the send.
+        """
+
+        revision = self._expected_owner_config_revision
+        if revision is None:
+            return True
+        state_query = select(RuntimeSetting).where(
+            RuntimeSetting.key == "owner_configuration_state"
+        )
+        active_query = select(RuntimeSetting).where(
+            RuntimeSetting.key == "owner_configuration_active"
+        )
+        if lock:
+            state_query = state_query.with_for_update()
+            active_query = active_query.with_for_update()
+        state = (await session.execute(state_query)).scalar_one_or_none()
+        active = (await session.execute(active_query)).scalar_one_or_none()
+        if state is None or active is None:
+            return False
+        raw_state_revision = state.value.get("active_revision")
+        raw_payload_revision = active.value.get("revision")
+        if (
+            not isinstance(raw_state_revision, int)
+            or isinstance(raw_state_revision, bool)
+            or not isinstance(raw_payload_revision, int)
+            or isinstance(raw_payload_revision, bool)
+        ):
+            return False
+        state_revision = raw_state_revision
+        payload_revision = raw_payload_revision
+        if state_revision != revision or payload_revision != revision:
+            return False
+        allowlist = self._expected_staging_allowlist
+        if allowlist is None:
+            return True
+        raw_allowlist = active.value.get("staging_allowlist")
+        if not isinstance(raw_allowlist, list) or any(
+            not isinstance(item, int) or isinstance(item, bool) or item <= 0
+            for item in raw_allowlist
+        ):
+            return False
+        current_allowlist = tuple(raw_allowlist)
+        if current_allowlist != allowlist:
+            return False
+        return expected_recipient is None or expected_recipient.chat_id in current_allowlist
 
     async def prune_terminal_outbox(
         self,
@@ -543,6 +633,8 @@ class PostgresSenderRepository:
                     cooldown_row.status = "READY"
                     cooldown_row.heartbeat_at = now
                     cooldown_row.details = {}
+                if not await self._active_owner_config_authorizes(session, lock=False):
+                    return ()
                 rows = (
                     (
                         await session.execute(
@@ -971,6 +1063,9 @@ class PostgresSenderRepository:
             profile = (await session.execute(profile_query)).scalar_one_or_none()
             if profile is None or profile.version != revision:
                 return False
+            deadline = _delivery_deadline(row)
+            if deadline is None or authorization_at >= deadline:
+                return False
             return True
         return True
 
@@ -1000,6 +1095,13 @@ class PostgresSenderRepository:
                 if row.claimed_at is None:
                     raise LookupError(message_id)
                 authorization_at = self._current_time()
+                if not await self._active_owner_config_authorizes(
+                    session,
+                    expected_recipient=expected_recipient,
+                    lock=True,
+                ):
+                    self._defer_transient(row, authorization_at)
+                    return False
                 if not await self._is_currently_deliverable(
                     session,
                     row,
@@ -1022,16 +1124,7 @@ class PostgresSenderRepository:
                         row.claimed_at = None
                         row.last_error_code = "final_delivery_policy_changed"
                     return False
-                valid_until: datetime | None = None
-                if row.event_type == "RETURN_TO_ACTIVE_LESSON":
-                    raw_valid_until = row.payload.get("valid_until")
-                    if isinstance(raw_valid_until, str):
-                        try:
-                            valid_until = datetime.fromisoformat(raw_valid_until)
-                        except ValueError:
-                            valid_until = None
-                    if valid_until is not None and valid_until.tzinfo is None:
-                        valid_until = None
+                valid_until = _delivery_deadline(row)
                 requires_fresh_provider = row.event_type in {
                     "ALERT_STARTED",
                     "ALL_CLEAR_CONFIRMED",
@@ -1055,7 +1148,10 @@ class PostgresSenderRepository:
                 # return-to-lesson message this is the exact no-send boundary:
                 # equality with valid_until is expired.
                 send_at = self._current_time()
-                if valid_until is None and row.event_type == "RETURN_TO_ACTIVE_LESSON":
+                if valid_until is None and row.event_type in {
+                    "LESSON_REMINDER",
+                    "RETURN_TO_ACTIVE_LESSON",
+                }:
                     row.dead_at = send_at
                     row.claimed_at = None
                     row.last_error_code = "final_delivery_invalid_expiry"

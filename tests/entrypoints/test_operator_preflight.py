@@ -15,6 +15,7 @@ from time_tl.infrastructure.alerts import HttpResponse
 from time_tl.runtime.region_registry_full import EXPECTED_RECORD_COUNT
 
 MARKER = "Thu, 24 Sep 2026 10:00:00 GMT"
+SYNTHETIC_UNKNOWN_UID = "999999"
 
 
 def full_body() -> bytes:
@@ -150,6 +151,42 @@ async def test_probe_rejects_malformed_last_modified_marker() -> None:
     assert "kind=INVALID_RESPONSE code=last_modified_invalid count=1" in message
     assert "not-an-http-date" not in message
     assert "secret" not in message
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_unknown_uid_as_sanitized_non_pass() -> None:
+    payload = json.loads(full_body())
+    unknown = dict(payload["alerts"][0])
+    unknown.update(
+        id=11,
+        location_uid=SYNTHETIC_UNKNOWN_UID,
+        location_title="Синтетична невідома тестова локація",
+    )
+    payload["alerts"].append(unknown)
+
+    class UnknownUidTransport:
+        async def send(self, _request: object) -> HttpResponse:
+            return HttpResponse(
+                200,
+                {"Last-Modified": MARKER},
+                json.dumps(payload).encode(),
+            )
+
+    with pytest.raises(OperatorPreflightError, match="full-snapshot") as captured:
+        await probe_candidate(
+            candidate(),
+            123,
+            bot_factory=FakeBot,
+            transport_factory=UnknownUidTransport,
+        )
+
+    message = str(captured.value)
+    assert "kind=INVALID_RESPONSE code=location_uid_unknown count=1" in message
+    assert "preflight passed" not in message
+    assert SYNTHETIC_UNKNOWN_UID not in message
+    assert "Синтетична" not in message
+    assert "telegram-secret" not in message
+    assert "alerts-secret" not in message
 
 
 @pytest.mark.asyncio

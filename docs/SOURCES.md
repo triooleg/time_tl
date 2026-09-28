@@ -128,10 +128,21 @@ the pinned catalogue: 142,029 bytes, SHA-256
 `a5bf1d312ee7258b16caaaf6c06e3df56fca68b0c14a060ec7c5ee7ce40b9620`,
 1,622 records, 27 roots and 1,595 parent links. Consequently the RC13 preflight
 result is an upstream API/catalogue inconsistency, not evidence supporting an
-invented local hierarchy mapping. RC14 safe-code work is `BLOCKED` until the
-provider publishes an updated full catalogue with UID, type and parent data,
-corrects the API response, or supplies an official mapping. The raw rejected UID
-and response body are not recorded.
+invented local hierarchy mapping. Any UID compatibility expansion or mapping is
+`BLOCKED` until the provider publishes an updated full catalogue with UID, type
+and parent data, corrects the API response, or supplies an official mapping. The
+raw rejected UID and response body are not recorded.
+
+The authoritative rule is unchanged: a required `location_uid` is usable only
+when it exists in the official pinned catalogue and its API location type is
+compatible with the catalogue region type. An unknown, mismatched or malformed
+UID is not used, mapped, inferred or partially ignored. A single invalid row
+invalidates the complete snapshot globally, including any otherwise known rows,
+and produces UNKNOWN or STALE rather than CLEAR. Recovery still requires a
+complete valid snapshot and the normal two-observation all-clear rule. The
+RC14 adds adversarial regression evidence for this existing
+contract; it does not add a new UID source or compatibility rule and has no
+deployment or preflight evidence.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful

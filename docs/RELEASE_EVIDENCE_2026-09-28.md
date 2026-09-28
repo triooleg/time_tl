@@ -1,10 +1,11 @@
-# Time TL RC8 incident through RC14 blocked diagnosis — 2026-09-28
+# Time TL RC8 incident through RC14 local safety candidate — 2026-09-28
 
 ## Scope
 
 This record covers the RC8 provider-envelope compatibility release, its bounded
 server operation, the later exact RC9 diagnostic-only deployment, the exact RC10
-through RC13 deployments and preflights, and the RC14 blocked diagnosis. It records
+through RC13 deployments and preflights, and the RC14 local safety
+candidate. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
 boundary and the contained RC9 read-only diagnostic. It is not evidence of
@@ -523,10 +524,60 @@ parent hierarchy. The RC13 STAGING response therefore exposed an inconsistency
 between the official live API and the current documentation-linked official
 catalogue. Its raw UID and body are deliberately omitted.
 
-A safe RC14 code correction is `BLOCKED`: accepting an unknown required UID,
-inventing its type or parent, or deriving hierarchy from an unofficial source
-would weaken the reviewed alert and all-clear boundary. Work can resume only
-with an official updated full catalogue containing UID, type and parent data, a
-provider-side correction, or an official mapping. RC14 has no code/release/server
-identity and no additional preflight evidence. RC13 remains in `HOLD`; the bot
-and workers remain stopped and revision 10 remains unactivated.
+Any RC14 UID compatibility expansion is `BLOCKED`: accepting an unknown required
+UID, inventing its type or parent, or deriving hierarchy from an unofficial
+source would weaken the reviewed alert and all-clear boundary. Compatibility
+work can resume only with an official updated full catalogue containing UID,
+type and parent data, a provider-side correction, or an official mapping.
+
+## RC14 local safety candidate
+
+The user's authoritative UID rule matches the existing production code: a
+required `location_uid` is usable only when present in the official pinned
+catalogue and type-compatible with that catalogue region. Unknown, malformed or
+type-mismatched UIDs are never used, mapped or inferred. One invalid row rejects
+the complete snapshot globally, so known rows from the same mixed response are
+also discarded. The result is UNKNOWN with no prior valid state or STALE while
+preserving prior valid state; it cannot produce CLEAR or `CLEAR_CONFIRMED`.
+
+New adversarial LOCAL tests cover mixed known and unknown rows, failure after an
+ACTIVE observation, repeated unknown responses, process restart, parent and
+child scopes, recovery followed by the normal two-observation clear sequence,
+and sanitized preflight failure output. These tests strengthen evidence for the
+existing fail-closed rule; they do not make the live unknown UID valid.
+
+The same candidate adds two backend delivery barriers:
+
+- a `LESSON_REMINDER` at or after its `starts_at` is terminally suppressed both
+  when claiming a batch and at the final delivery boundary;
+- the sender final-authorization transaction pins the active owner revision,
+  current STAGING allowlist and expected recipient, with those expectations
+  supplied by runtime wiring.
+
+### RC14 current local verification
+
+| Environment | Check | Result |
+|---|---|---|
+| LOCAL | Full suite | `542 passed, 5 skipped, 1 warning` |
+| LOCAL | Ruff | `PASS` |
+| LOCAL | strict mypy | `PASS`; 72 source files checked |
+| LOCAL | `compileall` | `PASS` |
+| LOCAL | `git diff --check` | `PASS` |
+| LOCAL REVIEW | Independent safety review | `PASS` for allowlisted STAGING; no CRITICAL, HIGH or MEDIUM findings |
+
+The warning is the existing Starlette deprecation warning. The five skipped
+tests are the destructive PostgreSQL E2E cases, so the new transactional
+barriers do not yet have fresh destructive-database evidence in this run. A
+residual send-before-commit duplicate ambiguity also remains: an external send
+can succeed before the database records completion.
+
+If a later exact release is independently accepted and explicitly authorized,
+worker startup must be sequential: start `alert-worker` alone, establish and
+verify the durable restart fence, then start `schedule-worker`, and start
+`sender-worker` last. The sender must not be started in parallel with the other
+workers.
+
+This LOCAL evidence is not an immutable image, deployment, preflight,
+activation or launch identity. It does
+not change the RC13 server `HOLD`: bot and workers remain stopped and revision 10
+remains unactivated.

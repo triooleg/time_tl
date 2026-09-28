@@ -19,6 +19,7 @@ MARKER_1 = "Sun, 20 Sep 2026 10:00:00 GMT"
 MARKER_2 = "Sun, 20 Sep 2026 11:00:00 GMT"
 MARKER_3 = "Sun, 20 Sep 2026 12:00:00 GMT"
 SIGNED_INT64_MAX = (1 << 63) - 1
+SYNTHETIC_UNKNOWN_UID = "999999"
 REGION_TYPES = {
     "1903": "Громада",
     "1803": "Район",
@@ -76,6 +77,24 @@ def active(
             }
         ]
     }
+
+
+def mixed_with_synthetic_unknown(
+    *,
+    known_uid: str = "1903",
+    known_location_type: str = "hromada",
+    unknown_alert_type: str = "air_raid",
+):
+    payload = active(uid=known_uid, location_type=known_location_type)
+    unknown = dict(payload["alerts"][0])
+    unknown.update(
+        id=11,
+        location_uid=SYNTHETIC_UNKNOWN_UID,
+        location_title="Синтетична невідома тестова локація",
+        alert_type=unknown_alert_type,
+    )
+    payload["alerts"].append(unknown)
+    return payload
 
 
 def official_envelope(payload=None, *, meta=None, disclaimer="Official alerts.in.ua data"):
@@ -936,13 +955,204 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.clock = 100.0
 
     def worker(self, transport):
+        return self.worker_for(self.repo, transport)
+
+    def worker_for(self, repository, transport):
         return AlertWorker(
             provider=adapter(transport),
-            repository=self.repo,
+            repository=repository,
             lease=InMemorySingletonLease(),
             monotonic=lambda: self.clock,
             jitter=lambda a, b: 7.0,
         )
+
+    async def test_mixed_unknown_uid_globally_degrades_and_discards_known_rows(self):
+        second_scope = RegionScope.from_hierarchy("31")
+        repository = InMemoryAlertRepository(
+            [("community", self.scope), ("special-city", second_scope)]
+        )
+
+        await self.worker_for(
+            repository,
+            Transport(
+                response(
+                    200,
+                    mixed_with_synthetic_unknown(),
+                    **{"Last-Modified": MARKER_1},
+                )
+            ),
+        ).run_once()
+
+        for scope_id in ("community", "special-city"):
+            snapshot = await repository.snapshot_for(scope_id)
+            assert snapshot is not None
+            self.assertEqual(AlertState.UNKNOWN, snapshot.state)
+            self.assertEqual((), snapshot.active_episodes)
+        self.assertEqual((), await repository.outbox())
+
+    async def test_unknown_uid_after_known_active_degrades_every_scope_and_preserves_active(self):
+        second_scope = RegionScope.from_hierarchy("31")
+        repository = InMemoryAlertRepository(
+            [("community", self.scope), ("special-city", second_scope)]
+        )
+        worker = self.worker_for(
+            repository,
+            Transport(
+                response(200, active(), **{"Last-Modified": MARKER_1}),
+                response(
+                    200,
+                    mixed_with_synthetic_unknown(),
+                    **{"Last-Modified": MARKER_2},
+                ),
+            ),
+        )
+
+        await worker.run_once()
+        initial_outbox = await repository.outbox()
+        self.clock += 15
+        await worker.run_once()
+
+        community = await repository.snapshot_for("community")
+        special_city = await repository.snapshot_for("special-city")
+        assert community is not None and special_city is not None
+        self.assertEqual(AlertState.STALE, community.state)
+        self.assertEqual(1, len(community.active_episodes))
+        self.assertEqual(AlertState.STALE, special_city.state)
+        self.assertEqual((), special_city.active_episodes)
+        self.assertEqual(MARKER_1, (await repository.poll_state()).last_modified)
+        self.assertEqual(initial_outbox, await repository.outbox())
+        self.assertFalse(
+            any(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await repository.outbox()
+            )
+        )
+
+    async def test_repeated_unknown_uid_polls_continue_fail_closed_without_outbox(self):
+        worker = self.worker(
+            Transport(
+                response(
+                    200,
+                    mixed_with_synthetic_unknown(),
+                    **{"Last-Modified": MARKER_1},
+                ),
+                response(
+                    200,
+                    mixed_with_synthetic_unknown(unknown_alert_type="chemical"),
+                    **{"Last-Modified": MARKER_2},
+                ),
+            )
+        )
+
+        first_delay = await worker.run_once()
+        self.clock += first_delay
+        second_delay = await worker.run_once()
+
+        snapshot = await self.repo.snapshot_for("student-1")
+        poll_state = await self.repo.poll_state()
+        assert snapshot is not None
+        self.assertEqual(AlertState.UNKNOWN, snapshot.state)
+        self.assertEqual(2, poll_state.fetch_revision)
+        self.assertEqual(2, poll_state.consecutive_failures)
+        self.assertGreaterEqual(second_delay, first_delay)
+        self.assertEqual((), await self.repo.outbox())
+
+    async def test_unknown_uid_then_empty_requires_normal_two_observation_clear(self):
+        no_air_alert = active(alert_type="chemical")
+        worker = self.worker(
+            Transport(
+                response(200, active(), **{"Last-Modified": MARKER_1}),
+                response(
+                    200,
+                    mixed_with_synthetic_unknown(),
+                    **{"Last-Modified": MARKER_2},
+                ),
+                response(200, no_air_alert, **{"Last-Modified": MARKER_3}),
+                response(304, **{"Last-Modified": MARKER_3}),
+            )
+        )
+
+        await worker.run_once()
+        self.clock += 15
+        await worker.run_once()
+        self.assertEqual(AlertState.STALE, (await self.repo.snapshot_for("student-1")).state)
+        self.clock += 15
+        await worker.run_once()
+        first_empty = await self.repo.snapshot_for("student-1")
+        assert first_empty is not None
+        self.assertEqual(AlertState.STALE, first_empty.state)
+        self.assertTrue(first_empty.pending_clear_candidate)
+        self.assertFalse(
+            any(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await self.repo.outbox()
+            )
+        )
+        self.clock += 15
+        await worker.run_once()
+        self.assertEqual(
+            AlertState.CLEAR_CONFIRMED,
+            (await self.repo.snapshot_for("student-1")).state,
+        )
+        self.assertEqual(
+            1,
+            sum(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await self.repo.outbox()
+            ),
+        )
+
+    async def test_restart_then_unknown_uid_preserves_stale_active_without_outbox(self):
+        await self.worker(
+            Transport(response(200, active(), **{"Last-Modified": MARKER_1}))
+        ).run_once()
+        initial_outbox = await self.repo.outbox()
+        await self.repo.apply_process_restart_atomically()
+        self.clock += 15
+
+        await self.worker(
+            Transport(
+                response(
+                    200,
+                    mixed_with_synthetic_unknown(),
+                    **{"Last-Modified": MARKER_2},
+                )
+            )
+        ).run_once()
+
+        snapshot = await self.repo.snapshot_for("student-1")
+        assert snapshot is not None
+        self.assertEqual(AlertState.STALE, snapshot.state)
+        self.assertEqual(1, len(snapshot.active_episodes))
+        self.assertEqual(initial_outbox, await self.repo.outbox())
+
+    async def test_unknown_uid_blocks_known_parent_and_child_active_rows(self):
+        scope = RegionScope.from_hierarchy(
+            "1803",
+            ancestors=("16",),
+            descendants=("1903",),
+        )
+        for uid, location_type in (("16", "oblast"), ("1903", "hromada")):
+            with self.subTest(uid=uid):
+                repository = InMemoryAlertRepository([("student", scope)])
+                await self.worker_for(
+                    repository,
+                    Transport(
+                        response(
+                            200,
+                            mixed_with_synthetic_unknown(
+                                known_uid=uid,
+                                known_location_type=location_type,
+                            ),
+                            **{"Last-Modified": MARKER_1},
+                        )
+                    ),
+                ).run_once()
+
+                snapshot = await repository.snapshot_for("student")
+                assert snapshot is not None
+                self.assertEqual(AlertState.UNKNOWN, snapshot.state)
+                self.assertEqual((), await repository.outbox())
 
     async def test_restart_rejects_unverifiable_304_without_false_clear(self):
         integer_oblast_active = active()
