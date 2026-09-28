@@ -518,14 +518,14 @@ def create_async_admin_app(
                 owner_view = None
         saved_message = ""
         if request.query_params.get("setup") == "saved":
-            saved_message = "Чернетку збережено. Реальні сервіси не активовано."
+            saved_message = "Черновик сохранён. Реальные сервисы не активированы."
         elif request.query_params.get("setup") == "activated":
             saved_message = (
-                "Read-only preflight пройдено. Версію позначено ACTIVE; "
-                "дочекайтеся збігу applied revision усіх воркерів."
+                "Read-only предварительная проверка пройдена. Версия отмечена ACTIVE; "
+                "дождитесь совпадения применённой версии у всех воркеров."
             )
         elif request.query_params.get("setup") == "rolled-back":
-            saved_message = "Попередню активну версію відновлено. Дочекайтеся збігу heartbeat."
+            saved_message = "Предыдущая активная версия восстановлена. Дождитесь совпадения heartbeat."
         page = _dashboard_html(
             session.csrf_token,
             settings.environment.value,
@@ -533,15 +533,15 @@ def create_async_admin_app(
             int(stale),
             saved_message
             or (
-                "Налаштування збережено. Наступний цикл застосує нові значення."
+                "Настройки сохранены. Следующий цикл применит новые значения."
                 if request.query_params.get("saved")
                 else ""
             ),
             owner_view,
         )
         page = page.replace(
-            "Агрегований PostgreSQL backend ще не підключено.",
-            "Очікуємо локальні агрегати.",
+            "Агрегированные данные PostgreSQL ещё не подключены.",
+            "Ожидаем локальные агрегаты.",
         )
         return HTMLResponse(page)
 
@@ -623,7 +623,7 @@ def create_async_admin_app(
         if not session or session.must_change_password:
             return redirect_login(True)
         if owner_settings is None:
-            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+            return HTMLResponse("Защищённое хранилище настроек недоступно.", 503)
         data = _form(await request.body())
         if not compare_digest(session.csrf_token, data.get("csrf", "")):
             return Response(status_code=403)
@@ -632,14 +632,14 @@ def create_async_admin_app(
         )
         if not authenticated:
             if remaining:
-                return HTMLResponse(f"Забагато спроб. Повторіть через {_duration(remaining)}", 429)
+                return HTMLResponse(f"Слишком много попыток. Повторите через {_duration(remaining)}", 429)
             return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
 
         async def validation_response(message: str) -> HTMLResponse:
             try:
                 owner_view = await owner_settings.view()
             except OwnerSettingsError:
-                return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+                return HTMLResponse("Защищённое хранилище настроек недоступно.", 503)
             poll = await repository.get_setting("poll", settings.alert_poll_interval_seconds)
             stale = await repository.get_setting("stale", settings.alert_stale_after_seconds)
             return HTMLResponse(
@@ -664,7 +664,7 @@ def create_async_admin_app(
                 )
             except ValueError as exc:
                 raise OwnerSettingsValidationError(
-                    "STAGING allowlist має містити лише числові Telegram chat ID, розділені комами."
+                    "STAGING allowlist должен содержать только числовые Telegram chat ID, разделённые запятыми."
                 ) from exc
             command = OwnerConfigurationUpdate(
                 expected_revision=int(data.get("expected_revision", "0")),
@@ -684,22 +684,22 @@ def create_async_admin_app(
             await owner_settings.save(command, session.username)
         except (KeyError, ValueError):
             return await validation_response(
-                "Перевірте числові поля: версію, інтервал опитування та поріг застарівання."
+                "Проверьте числовые поля: версию, интервал опроса и порог устаревания."
             )
         except OwnerSettingsValidationError as exc:
             return await validation_response(str(exc))
         except OwnerSettingsConflictError:
-            return HTMLResponse("Конфігурацію змінено. Оновіть сторінку.", 409)
+            return HTMLResponse("Конфигурация изменена. Обновите страницу.", 409)
         except OwnerSettingsError:
-            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+            return HTMLResponse("Защищённое хранилище настроек недоступно.", 503)
         return RedirectResponse("/?setup=saved#service-setup", 303)
 
     @app.post("/settings/service/request-activation")
     async def legacy_request_service_activation(request: Request) -> Response:
         del request
         return HTMLResponse(
-            "Окремий операторський handoff більше не використовується. "
-            "Оновіть сторінку та скористайтеся перевіркою й активацією STAGING.",
+            "Отдельная передача оператору больше не используется. "
+            "Обновите страницу и воспользуйтесь проверкой и активацией STAGING.",
             410,
         )
 
@@ -709,18 +709,18 @@ def create_async_admin_app(
         if not session or session.must_change_password:
             return redirect_login(True)
         if owner_settings is None:
-            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+            return HTMLResponse("Защищённое хранилище настроек недоступно.", 503)
         data = _form(await request.body())
         if not compare_digest(session.csrf_token, data.get("csrf", "")):
             return Response(status_code=403)
         if data.get("activation_ack", "").strip() != "АКТИВУВАТИ STAGING":
-            return HTMLResponse("Введіть точне підтвердження активації STAGING.", 422)
+            return HTMLResponse("Введите точное подтверждение активации STAGING.", 422)
         authenticated, remaining = await owner_reauthenticated(
             request, session, data.get("current_password", "")
         )
         if not authenticated:
             if remaining:
-                return HTMLResponse(f"Забагато спроб. Повторіть через {_duration(remaining)}", 429)
+                return HTMLResponse(f"Слишком много попыток. Повторите через {_duration(remaining)}", 429)
             return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
         pending_created = False
         revision = 0
@@ -729,10 +729,10 @@ def create_async_admin_app(
             view = await owner_settings.view()
             if view.environment == "production" or settings.environment.value == "production":
                 return HTMLResponse(
-                    "PRODUCTION потребує окремого схвалення точної release-версії.", 403
+                    "PRODUCTION требует отдельного одобрения точной версии релиза.", 403
                 )
             if view.environment != settings.environment.value or view.environment != "staging":
-                return HTMLResponse("Самоактивація дозволена лише для поточного STAGING.", 422)
+                return HTMLResponse("Самоактивация разрешена только для текущего STAGING.", 422)
             await owner_settings.request_activation(revision, session.username)
             pending_created = True
             candidate = await owner_settings.activation_candidate(revision)
@@ -761,13 +761,13 @@ def create_async_admin_app(
                 await owner_settings.record_preflight_failure(
                     revision, session.username, failure_code
                 )
-            return HTMLResponse("Read-only preflight не пройдено. Активну версію не змінено.", 502)
+            return HTMLResponse("Read-only предварительная проверка не пройдена. Активная версия не изменена.", 502)
         except (ValueError, OwnerSettingsValidationError):
-            return HTMLResponse("Конфігурація ще не готова до активації.", 422)
+            return HTMLResponse("Конфигурация ещё не готова к активации.", 422)
         except OwnerSettingsConflictError:
-            return HTMLResponse("Конфігурацію змінено. Оновіть сторінку.", 409)
+            return HTMLResponse("Конфигурация изменена. Обновите страницу.", 409)
         except OwnerSettingsError:
-            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+            return HTMLResponse("Защищённое хранилище настроек недоступно.", 503)
         return RedirectResponse("/?setup=activated#service-setup", 303)
 
     @app.post("/settings/service/rollback")
@@ -776,7 +776,7 @@ def create_async_admin_app(
         if not session or session.must_change_password:
             return redirect_login(True)
         if owner_settings is None:
-            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+            return HTMLResponse("Защищённое хранилище настроек недоступно.", 503)
         data = _form(await request.body())
         if not compare_digest(session.csrf_token, data.get("csrf", "")):
             return Response(status_code=403)
@@ -785,7 +785,7 @@ def create_async_admin_app(
         )
         if not authenticated:
             if remaining:
-                return HTMLResponse(f"Забагато спроб. Повторіть через {_duration(remaining)}", 429)
+                return HTMLResponse(f"Слишком много попыток. Повторите через {_duration(remaining)}", 429)
             return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
         try:
             expected_active = int(data.get("expected_active_revision", "0"))
@@ -795,20 +795,20 @@ def create_async_admin_app(
                 view.rollback_revision is None
                 or data.get("rollback_ack", "").strip() != expected_ack
             ):
-                return HTMLResponse("Введіть точне підтвердження rollback.", 422)
+                return HTMLResponse("Введите точное подтверждение отката.", 422)
             if settings.environment.value == "production":
-                return HTMLResponse("Rollback PRODUCTION потребує окремого release-рішення.", 403)
+                return HTMLResponse("Откат PRODUCTION требует отдельного решения о релизе.", 403)
             await owner_settings.rollback(
                 expected_active, settings.environment.value, session.username
             )
         except ValueError:
-            return HTMLResponse("Невірна активна версія.", 422)
+            return HTMLResponse("Неверная активная версия.", 422)
         except OwnerSettingsValidationError as exc:
             return HTMLResponse(str(exc), 422)
         except OwnerSettingsConflictError:
-            return HTMLResponse("Активну версію змінено. Оновіть сторінку.", 409)
+            return HTMLResponse("Активная версия изменена. Обновите страницу.", 409)
         except OwnerSettingsError:
-            return HTMLResponse("Захищене сховище налаштувань недоступне.", 503)
+            return HTMLResponse("Защищённое хранилище настроек недоступно.", 503)
         return RedirectResponse("/?setup=rolled-back#service-setup", 303)
 
     @app.post("/settings/provider")
@@ -817,8 +817,8 @@ def create_async_admin_app(
         if not session or session.must_change_password:
             return redirect_login(True)
         return HTMLResponse(
-            "Цей маршрут вимкнено. Змініть інтервали у майстрі налаштування сервісу; "
-            "вони набудуть чинності лише після окремої активації.",
+            "Этот маршрут отключён. Измените интервалы в мастере настройки сервиса; "
+            "они вступят в силу только после отдельной активации.",
             410,
         )
 
@@ -830,13 +830,13 @@ def create_async_admin_app(
         allowed = {"setup": "SETUP_BOT.md", "admin": "ADMIN_PANEL.md"}
         filename = allowed.get(document)
         if filename is None:
-            return HTMLResponse("Інструкція не знайдена.", 404)
+            return HTMLResponse("Инструкция не найдена.", 404)
         path = help_root / filename
         if not path.is_file():
-            return HTMLResponse("Інструкція ще не створена.", 404)
+            return HTMLResponse("Инструкция ещё не создана.", 404)
         content = await asyncio.to_thread(path.read_text, encoding="utf-8")
         return HTMLResponse(
-            "<html><body><main><h1>Довідка</h1><pre>"
+            "<html lang=\"ru\"><body><main><h1>Справка</h1><pre>"
             + html.escape(content)
             + "</pre></main></body></html>"
         )

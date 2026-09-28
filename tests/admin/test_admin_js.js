@@ -14,7 +14,7 @@ test('storage metrics calculate a percent when the backend omits it', () => {
 });
 
 test('storage metrics keep a clear fallback for missing or invalid data', () => {
-  assert.equal(storageMetric('RAM', null), 'RAM: Метрики недоступні');
-  assert.equal(storageMetric('Disk', {value: ['invalid', 1073741824, 0]}), 'Disk: Метрики недоступні');
-  assert.equal(storageMetric('Disk', {value: [0, 0, 0]}), 'Disk: Метрики недоступні');
+  assert.equal(storageMetric('RAM', null), 'RAM: Метрики недоступны');
+  assert.equal(storageMetric('Disk', {value: ['invalid', 1073741824, 0]}), 'Disk: Метрики недоступны');
+  assert.equal(storageMetric('Disk', {value: [0, 0, 0]}), 'Disk: Метрики недоступны');
 });

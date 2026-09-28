@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,17 +51,17 @@ class AdminContractTests(unittest.TestCase):
             self.assertIn("deploy: {replicas: 1}", block, service)
 
     def test_ui_contains_contract_and_no_remote_assets(self) -> None:
-        from time_tl.admin.app import _JS, _dashboard_html
+        from time_tl.admin.app import _JS, _dashboard_html, _project_setup_guide_html
 
         page = _dashboard_html("csrf", "simulation", 15, 120)
         for copy in [
-            "Оновити дані",
+            "Обновить данные",
             "UNKNOWN",
-            "Метрики недоступні",
-            "read-only host exporter",
+            "Метрики недоступны",
+            "read-only экспортёр метрик хоста",
             "Возобновить отправку",
             "Отмена",
-            "Майстер налаштування сервісу",
+            "Мастер настройки сервиса",
             "bootstrap-only",
             "SIMULATION",
             "schedule-worker",
@@ -94,20 +95,29 @@ class AdminContractTests(unittest.TestCase):
                 alerts_in_ua_token_configured=True,
                 ready_for_activation=True,
                 validation_issues=(),
-                onboarding_text="<b>Інструкція</b>",
+                onboarding_text="Огляд <b>Інструкція</b> Налаштовано",
             ),
         )
         self.assertIn('name="telegram_token"', configured)
         self.assertIn('name="alerts_in_ua_token"', configured)
         self.assertIn('name="onboarding_text"', configured)
         self.assertIn('id="owner-convergence"', configured)
-        self.assertIn("PRODUCTION залишається окремим release-gate", configured)
-        self.assertIn("&lt;b&gt;Інструкція&lt;/b&gt;", configured)
+        self.assertIn("PRODUCTION остаётся отдельным шлюзом выпуска", configured)
+        self.assertIn("Огляд &lt;b&gt;Інструкція&lt;/b&gt; Налаштовано", configured)
         self.assertNotIn("<b>Інструкція</b>", configured)
         self.assertNotRegex(configured, r'name="telegram_token"[^>]*\svalue=')
         self.assertNotRegex(configured, r'name="alerts_in_ua_token"[^>]*\svalue=')
         self.assertNotIn("docker.sock", configured)
         self.assertNotIn("https://", configured)
+        chrome = re.sub(r"<textarea[^>]*>.*?</textarea>", "", configured, flags=re.DOTALL)
+        self.assertIsNone(re.search(r"[іїєґІЇЄҐ]", chrome), chrome)
+        guide = _project_setup_guide_html()
+        self.assertIn("Настройка проекта", guide)
+        self.assertIsNone(re.search(r"[іїєґІЇЄҐ]", guide), guide)
+        source = Path("src/time_tl/admin/app.py").read_text(encoding="utf-8")
+        self.assertNotIn("_russianize_admin_html", source)
+        self.assertNotIn("_dashboard_html_untranslated", source)
+        self.assertNotIn("_project_setup_guide_html_untranslated", source)
         for aggregate in (
             "aggregates.users",
             "aggregates.profiles",

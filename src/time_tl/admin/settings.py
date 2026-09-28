@@ -318,14 +318,14 @@ class OwnerSettingsService:
     ) -> OwnerConfigurationView:
         bundle = await self._store.owner_settings_bundle()
         if bundle.active_revision != expected_active_revision:
-            raise OwnerSettingsConflictError("Активна версія змінилася. Оновіть сторінку.")
+            raise OwnerSettingsConflictError("Активная версия изменилась. Обновите страницу.")
         previous = bundle.previous_active
         if previous is None:
-            raise OwnerSettingsValidationError("Немає попередньої активної версії.")
+            raise OwnerSettingsValidationError("Нет предыдущей активной версии.")
         if str(previous.get("environment")) != expected_environment:
-            raise OwnerSettingsValidationError("Попередня версія належить іншому середовищу.")
+            raise OwnerSettingsValidationError("Предыдущая версия относится к другой среде.")
         if self._issues(previous):
-            raise OwnerSettingsValidationError("Попередня версія більше не є дійсною.")
+            raise OwnerSettingsValidationError("Предыдущая версия больше не действительна.")
         return self._view(
             await self._store.rollback_owner_settings_active(expected_active_revision, actor)
         )
@@ -437,10 +437,11 @@ class OwnerSettingsService:
         normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
         if len(normalized) > MAX_ONBOARDING_TEXT_LENGTH:
             raise OwnerSettingsValidationError(
-                f"Коротка інструкція має містити не більше {MAX_ONBOARDING_TEXT_LENGTH} символів."
+                "Краткая инструкция должна содержать не более "
+                f"{MAX_ONBOARDING_TEXT_LENGTH} символов."
             )
         if any(ord(char) < 32 and char not in {"\n", "\t"} for char in normalized):
-            raise OwnerSettingsValidationError("Коротка інструкція містить недопустимі символи.")
+            raise OwnerSettingsValidationError("Краткая инструкция содержит недопустимые символы.")
         return normalized
 
     @classmethod

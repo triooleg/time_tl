@@ -316,7 +316,7 @@ class AsyncEndpointTests(unittest.TestCase):
         self.assertNotIn(telegram, rendered.text)
         self.assertNotIn(alerts, rendered.text)
         self.assertNotIn("123456789", rendered.text)
-        self.assertIn("Налаштовано", rendered.text)
+        self.assertIn("Настроено", rendered.text)
         api = self.client.get("/api/dashboard")
         self.assertNotIn(telegram, api.text)
         self.assertNotIn(alerts, api.text)
@@ -477,8 +477,8 @@ class AsyncEndpointTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 422)
-        self.assertIn("Майстер налаштування сервісу", response.text)
-        self.assertIn("лише числові Telegram chat ID", response.text)
+        self.assertIn("Мастер настройки сервиса", response.text)
+        self.assertIn("только числовые Telegram chat ID", response.text)
         self.assertNotIn(fake_secret, response.text)
         self.assertEqual(self.owner_store.bundle.latest_revision, 0)
 
