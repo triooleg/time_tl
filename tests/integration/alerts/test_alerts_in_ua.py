@@ -431,6 +431,68 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         assert summary is not None
         self.assertNotIn(private_uid, summary)
 
+    async def test_invalid_oblast_uid_diagnostics_are_opaque_and_fail_closed(self):
+        samples = (
+            (987654321, "location_oblast_uid_integer"),
+            ("private-noncanonical-value", "location_oblast_uid_noncanonical_string"),
+            (True, "location_oblast_uid_boolean"),
+            (["private-list-value"], "location_oblast_uid_other"),
+        )
+
+        for value, code in samples:
+            with self.subTest(code=code):
+                payload = active()
+                payload["alerts"][0]["location_oblast_uid"] = value
+                payload["alerts"][0]["provider_private_field"] = "must-not-leak"
+
+                result = await adapter(
+                    Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
+                ).fetch(fetch_revision=1, last_modified=None)
+
+                self.assertIsNone(result.snapshot)
+                self.assertEqual(code, result.diagnostic_code)
+                self.assertEqual(1, result.diagnostic_count)
+                summary = result.sanitized_failure()
+                assert summary is not None
+                self.assertNotIn(str(value), summary)
+                self.assertNotIn("provider_private_field", summary)
+                self.assertNotIn("must-not-leak", summary)
+
+    async def test_invalid_oblast_uid_does_not_advance_validated_baseline(self):
+        invalid = active()
+        invalid["alerts"][0]["location_oblast_uid"] = False
+        transport = Transport(
+            response(200, active(), **{"Last-Modified": MARKER_1}),
+            response(200, invalid, **{"Last-Modified": MARKER_2}),
+            response(304, **{"Last-Modified": MARKER_1}),
+        )
+        provider = adapter(transport)
+
+        baseline = await provider.fetch(fetch_revision=1, last_modified=None)
+        rejected = await provider.fetch(fetch_revision=2, last_modified=MARKER_1)
+        unchanged = await provider.fetch(fetch_revision=3, last_modified=MARKER_1)
+
+        self.assertIsNotNone(baseline.snapshot)
+        self.assertIsNone(rejected.snapshot)
+        self.assertEqual("location_oblast_uid_boolean", rejected.diagnostic_code)
+        self.assertIsNotNone(unchanged.snapshot)
+        assert unchanged.snapshot is not None
+        self.assertEqual("NOT_MODIFIED_304", unchanged.snapshot.kind.value)
+        self.assertEqual(MARKER_1, unchanged.last_modified)
+
+    async def test_canonical_oblast_uid_keeps_catalogue_validation(self):
+        for oblast_uid in ("999", "1903"):
+            with self.subTest(oblast_uid=oblast_uid):
+                payload = active()
+                payload["alerts"][0]["location_oblast_uid"] = oblast_uid
+
+                result = await adapter(
+                    Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
+                ).fetch(fetch_revision=1, last_modified=None)
+
+                self.assertIsNone(result.snapshot)
+                self.assertEqual("location_oblast_uid_unknown", result.diagnostic_code)
+
     async def test_diagnostic_taxonomy_identifies_rejected_predicate(self):
         missing = active()
         del missing["alerts"][0]["updated_at"]
@@ -841,6 +903,29 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             Transport(response(200, unknown, **{"Last-Modified": MARKER_2}))
         ).run_once()
         self.assertEqual(AlertState.STALE, (await self.repo.snapshot_for("student-1")).state)
+        self.assertFalse(
+            any(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await self.repo.outbox()
+            )
+        )
+
+    async def test_invalid_oblast_uid_after_active_is_stale_without_outbox(self):
+        await self.worker(
+            Transport(response(200, active(), **{"Last-Modified": MARKER_1}))
+        ).run_once()
+        initial_outbox = await self.repo.outbox()
+        invalid = active()
+        invalid["alerts"][0]["location_oblast_uid"] = {"private": "must-not-leak"}
+
+        self.clock += 15
+        await self.worker(
+            Transport(response(200, invalid, **{"Last-Modified": MARKER_2}))
+        ).run_once()
+
+        snapshot = await self.repo.snapshot_for("student-1")
+        self.assertEqual(AlertState.STALE, snapshot.state)
+        self.assertEqual(initial_outbox, await self.repo.outbox())
         self.assertFalse(
             any(
                 item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED

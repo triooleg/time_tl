@@ -490,7 +490,9 @@ class AlertsInUaAdapter:
             if "location_oblast_uid" in item and item["location_oblast_uid"] is not None:
                 oblast_uid = item["location_oblast_uid"]
                 if not isinstance(oblast_uid, str) or not self._is_canonical_uid(oblast_uid):
-                    raise SnapshotValidationError("location_oblast_uid_format_invalid")
+                    raise SnapshotValidationError(
+                        self._invalid_location_oblast_uid_code(oblast_uid)
+                    )
                 oblast_type = self._region_types.get(oblast_uid)
                 if oblast_type not in {"Область", "Місто з спеціальним статусом"}:
                     raise SnapshotValidationError("location_oblast_uid_unknown")
@@ -514,6 +516,18 @@ class AlertsInUaAdapter:
             separators=(",", ":"),
         ).encode("utf-8")
         return tuple(sorted(parsed)), sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _invalid_location_oblast_uid_code(value: object) -> str:
+        """Categorize a rejected optional oblast UID without exposing its value."""
+
+        if isinstance(value, bool):
+            return "location_oblast_uid_boolean"
+        if isinstance(value, int):
+            return "location_oblast_uid_integer"
+        if isinstance(value, str):
+            return "location_oblast_uid_noncanonical_string"
+        return "location_oblast_uid_other"
 
     @classmethod
     def _validate_ignored_alert_extras(

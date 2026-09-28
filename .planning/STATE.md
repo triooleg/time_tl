@@ -101,8 +101,10 @@ been performed.
 ## Session Continuity
 
 Last session: 2026-09-28
-Stopped at: local RC10 compatibility candidate `REVIEW`; it is not packaged or
-deployed. The server remains on the contained RC9 `HOLD` state.
+Stopped at: RC10 is installed but its single preflight failed closed; activation
+was rejected and the server remains in `HOLD`. RC11 is a LOCAL code-only
+diagnostic candidate and has not been committed, tagged, packaged, deployed or
+preflighted.
 The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
@@ -200,9 +202,40 @@ the current read-only check. No proxy, access-control or application setting was
 changed, so this is current reachability evidence rather than proof of a repaired
 root cause.
 
-Current server truth remains RC9: `admin-web` is healthy; ACTIVE owner revision
-is 6 and pending revision is 10; `bot` and all workers remain stopped. Activation,
-startup, messages and another live preflight remain blocked until an exact RC10
-package, deployment scope and preflight are separately approved. G6-G9 are not
-advanced.
+The exact RC10 release was subsequently approved and installed from tag
+`time-tl-staging-20260928-rc10-ignore-undocumented`, commit
+`42352cb6c04b00e912b847befb8aa91c67d009c9`, archive SHA-256
+`2ed1cf7cfedf7132776487a406b0293a028e8c4817316763210f515679b940e3`.
+The server archive matched the approved digest and immutable RC10 image
+`sha256:577fa52128fdecfeaa9370a56039f04fdb1da266881f9f62d899130c72fbc16d`
+was built. `admin-web` runs RC10, is healthy and returned HTTP 200. RC10 `bot` and
+all three workers were created stopped and were never started. Database revision
+remains `0006_outbox_terminal_retention`; no migration ran. Owner state remains
+ACTIVE revision 6 and pending revision 10.
+
+Exactly one RC10 preflight ran at `10:19:39Z` for pending revision 10. Telegram
+`getMe` passed and the official provider made one `active.json` request that
+returned HTTP 200. The response then failed closed as
+`INVALID_RESPONSE / location_oblast_uid_format_invalid / count=1`. There was no
+retry, activation, message or delivered outbox item. Independent safety review
+rejected activation and accepted the contained `HOLD` state only while `bot` and
+all workers remain stopped. The current server truth is therefore RC10 `HOLD`,
+not a staging pass; G6, G7 and G9 remain unadvanced.
+
+Fresh verified rollback backup:
+`/home/trio/time-tl-bot/backups/pre-rc10-ignore-undocumented-20260928T101742Z`.
+
+RC11 is a narrow LOCAL diagnostic candidate for that rejected optional
+`location_oblast_uid` predicate. It preserves rejection and classifies only the
+invalid value shape as `boolean`, `integer`, `noncanonical_string` or `other`.
+It does not expose the value or the ignored undocumented field, does not advance
+the validated provider baseline, and cannot produce a snapshot, alert state,
+outbox message or all-clear from the rejected response.
+
+RC11 LOCAL evidence: 66 focused tests passed; the full suite passed 522 tests
+with five opt-in destructive PostgreSQL E2E skips and one Starlette warning.
+Ruff, strict mypy for 72 source files, compileall and `git diff --check` passed.
+Independent safety review passed this code-only diagnostic scope. RC11 has no
+release identity: it is not committed, tagged, packaged, deployed or preflighted.
+No further server operation is implied or authorized by the local evidence.
 Resume file: none.

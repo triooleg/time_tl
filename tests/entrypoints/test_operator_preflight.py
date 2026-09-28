@@ -210,6 +210,49 @@ async def test_probe_does_not_use_previously_diagnostic_only_alert_field() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "code"),
+    [
+        (987654321, "location_oblast_uid_integer"),
+        ("private-noncanonical-value", "location_oblast_uid_noncanonical_string"),
+        (True, "location_oblast_uid_boolean"),
+        (["private-list-value"], "location_oblast_uid_other"),
+    ],
+)
+async def test_probe_rejects_invalid_oblast_uid_with_sanitized_category(
+    value: object,
+    code: str,
+) -> None:
+    payload = json.loads(full_body())
+    payload["alerts"][0]["location_oblast_uid"] = value
+    payload["alerts"][0]["private_provider_field"] = "must-not-leak"
+
+    class InvalidOblastUidTransport:
+        async def send(self, _request: object) -> HttpResponse:
+            return HttpResponse(
+                200,
+                {"Last-Modified": MARKER},
+                json.dumps(payload).encode(),
+            )
+
+    with pytest.raises(OperatorPreflightError, match="full-snapshot") as captured:
+        await probe_candidate(
+            candidate(),
+            123,
+            bot_factory=FakeBot,
+            transport_factory=InvalidOblastUidTransport,
+        )
+
+    message = str(captured.value)
+    assert f"kind=INVALID_RESPONSE code={code} count=1" in message
+    assert str(value) not in message
+    assert "private_provider_field" not in message
+    assert "must-not-leak" not in message
+    assert "telegram-secret" not in message
+    assert "alerts-secret" not in message
+
+
+@pytest.mark.asyncio
 async def test_probe_rejects_malformed_official_metadata_without_leaking_value() -> None:
     payload = json.loads(full_body())
     payload["meta"]["last_updated_at"] = "private-invalid-timestamp"

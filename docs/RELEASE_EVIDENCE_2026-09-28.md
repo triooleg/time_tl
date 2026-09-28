@@ -1,10 +1,10 @@
-# Time TL RC8 incident, RC9 deployment and RC10 local evidence — 2026-09-28
+# Time TL RC8 incident through RC11 local diagnostics — 2026-09-28
 
 ## Scope
 
 This record covers the RC8 provider-envelope compatibility release, its bounded
-server operation, the later exact RC9 diagnostic-only deployment, and the RC10
-local compatibility candidate. It records
+server operation, the later exact RC9 diagnostic-only deployment, the exact RC10
+deployment and preflight, and the RC11 local diagnostic candidate. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
 boundary and the contained RC9 read-only diagnostic. It is not evidence of
@@ -260,6 +260,81 @@ endpoint returned HTTP 200. No proxy, access-control or application mutation was
 made, so the cause of the screenshot's earlier 403 is not established and no
 repair claim is made.
 
-RC10 remains `REVIEW` as a LOCAL candidate. An exact package identity and
-separate deployment/preflight approval are required before any server change.
-G6-G9 remain unadvanced.
+That statement described the state before the exact RC10 approval and is
+superseded by the server evidence below.
+
+## Exact RC10 server operation and HOLD
+
+The exact approved RC10 identity was:
+
+- tag: `time-tl-staging-20260928-rc10-ignore-undocumented`;
+- commit: `42352cb6c04b00e912b847befb8aa91c67d009c9`;
+- archive SHA-256:
+  `2ed1cf7cfedf7132776487a406b0293a028e8c4817316763210f515679b940e3`.
+
+The approved scope allowed archive transfer, server-side SHA-256 verification,
+an immutable image build, `admin-web` replacement, and exactly one preflight for
+pending revision 10. Activation and allowlisted bot/worker startup were
+conditional on a completely successful preflight and an independent safety
+`PASS`; messages outside the approved allowlist were prohibited.
+
+The server archive matched the approved SHA-256 and immutable RC10 image
+`sha256:577fa52128fdecfeaa9370a56039f04fdb1da266881f9f62d899130c72fbc16d`
+was built. `admin-web` runs RC10, is healthy and returned HTTP 200. RC10 `bot`,
+`alert-worker`, `schedule-worker` and `sender-worker` were created stopped and
+have never been started. PostgreSQL remains at
+`0006_outbox_terminal_retention`; no migration ran. Owner state remains ACTIVE
+revision 6 and pending revision 10.
+
+Exactly one RC10 preflight ran at `10:19:39Z`. Telegram `getMe` passed. The
+official provider made exactly one `active.json` request and returned HTTP 200,
+after which RC10 failed closed with
+`INVALID_RESPONSE / location_oblast_uid_format_invalid / count=1`. There was no
+retry, activation, message or delivered outbox item.
+
+A fresh verified rollback backup is retained at
+`/home/trio/time-tl-bot/backups/pre-rc10-ignore-undocumented-20260928T101742Z`.
+
+Independent safety review rejected activation because the preflight condition
+did not pass. It accepted the contained `HOLD` state only while `bot` and all
+workers remain stopped. Thus the exact deployment/preflight authorization was
+used, but G6 Telegram staging, G7 server readiness and G9 canary were not
+advanced. The HTTP 200 is transport evidence only, not a valid alert snapshot or
+an all-clear.
+
+## RC11 local diagnostic candidate
+
+RC11 is a code-only diagnostic refinement for the exact predicate rejected by
+the RC10 preflight. It keeps an invalid optional `location_oblast_uid` fail
+closed and emits only one fixed shape category:
+
+- `location_oblast_uid_boolean`;
+- `location_oblast_uid_integer`;
+- `location_oblast_uid_noncanonical_string`;
+- `location_oblast_uid_other`.
+
+The rejected value and the ignored undocumented key/value are not emitted. A
+rejected response produces no snapshot, cannot advance the validated baseline,
+and after an ACTIVE observation moves state to STALE without adding outbox work
+or producing `CLEAR_CONFIRMED`. Canonical strings still undergo the existing
+official catalogue and location-type validation.
+
+### RC11 local verification
+
+| Environment | Check | Result |
+|---|---|---|
+| LOCAL | Focused provider and preflight regressions | `66 passed` |
+| LOCAL | Full suite | `522 passed, 5 skipped, 1 warning` |
+| LOCAL | Ruff | `PASS` |
+| LOCAL | strict mypy | `PASS`; 72 source files checked |
+| LOCAL | `compileall` | `PASS` |
+| LOCAL | `git diff --check` | `PASS` |
+| LOCAL REVIEW | Independent safety review of the code-only RC11 scope | `PASS` |
+
+The warning is the existing Starlette deprecation warning. The five skipped
+tests are the opt-in destructive PostgreSQL E2E cases. RC11 has no release
+identity: it is not committed, tagged, packaged, deployed or preflighted. These
+results are LOCAL evidence only and do not authorize another provider call,
+activation, bot/worker startup or messages. The current server state remains
+RC10 `HOLD`, with ACTIVE revision 6, pending revision 10, and all delivery-capable
+services stopped.

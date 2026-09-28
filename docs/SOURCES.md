@@ -58,8 +58,9 @@ The one authorized RC9 server preflight on 2026-09-28 received HTTP 200 from
 `active.json` but failed closed as `alert_fields_unknown / count=1`; the unknown
 field was not `calculated`. Raw-name and hash-based field discovery were rejected
 by independent safety review because provider-controlled information could be
-disclosed or made re-identifiable. RC9 remains the deployed server version and
-did not accept that response as a snapshot or advance alert or all-clear state.
+disclosed or made re-identifiable. At that point RC9 remained the deployed
+server version; it did not accept that response as a snapshot or advance alert
+or all-clear state. The later RC10 server evidence is recorded below.
 
 The user then explicitly directed that an undocumented alert-row field must not
 be used. The independently reviewed RC10 local compatibility candidate therefore
@@ -75,9 +76,22 @@ documented fields, enums, UIDs, timestamps, threats and row uniqueness remain
 strictly validated. More than one undocumented key, different undocumented keys
 across rows, or an invalid or oversized undocumented value rejects the complete
 snapshot. Parent/child ACTIVE applicability and the two-successful-observation
-requirement for `CLEAR_CONFIRMED` are unchanged. RC10 currently has LOCAL
-code-and-test evidence only; it is not packaged, deployed or authorized for
-another live preflight.
+requirement for `CLEAR_CONFIRMED` are unchanged.
+
+The exact RC10 release was later installed and subjected to one authorized
+preflight. Telegram `getMe` passed and one `active.json` request returned HTTP
+200, but the payload was rejected as
+`location_oblast_uid_format_invalid / count=1`. The HTTP response was not an
+accepted provider snapshot and did not advance alert or all-clear state. RC10
+was not activated; the bot and workers remain stopped.
+
+The RC11 LOCAL diagnostic candidate keeps this predicate fail closed and reports
+only a fixed invalid-value shape category: `boolean`, `integer`,
+`noncanonical_string` or `other`. It does not emit the rejected value, does not
+emit the ignored undocumented key or value, and does not change catalogue
+validation for a canonical UID. A rejected response still cannot establish or
+advance a validated baseline. RC11 is code-only evidence: it has not been
+committed, tagged, packaged, deployed or preflighted.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful
