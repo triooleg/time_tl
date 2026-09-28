@@ -1,10 +1,10 @@
-# Time TL RC8 incident through RC13 local contract correction — 2026-09-28
+# Time TL RC8 incident through RC14 blocked diagnosis — 2026-09-28
 
 ## Scope
 
 This record covers the RC8 provider-envelope compatibility release, its bounded
 server operation, the later exact RC9 diagnostic-only deployment, the exact RC10
-through RC12 deployments and preflights, and the RC13 local contract correction. It records
+through RC13 deployments and preflights, and the RC14 blocked diagnosis. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
 boundary and the contained RC9 read-only diagnostic. It is not evidence of
@@ -369,7 +369,7 @@ record.
 
 A fresh rollback backup is retained at
 `/home/trio/time-tl-bot/backups/pre-rc11-oblast-uid-shape-diag-20260928T104023Z`.
-The current server verdict remains RC11 `HOLD`; this diagnostic outcome is not a
+At that point the server verdict was RC11 `HOLD`; this diagnostic outcome is not a
 staging pass and does not advance G6, G7 or G9.
 
 ## RC12 local integer compatibility candidate
@@ -433,7 +433,7 @@ delivered rows.
 
 A fresh rollback backup is retained at
 `/home/trio/time-tl-bot/backups/pre-rc12-pinned-oblast-uid-20260928T111523Z`.
-The current server verdict is RC12 `HOLD`; the result is not a staging pass and
+At that point the server verdict was RC12 `HOLD`; the result is not a staging pass and
 does not advance G6, G7 or G9.
 
 ## RC13 local contract correction
@@ -468,7 +468,65 @@ fail-closed barriers remain unchanged.
 
 The warning is the existing Starlette deprecation warning and the five skipped
 tests are the opt-in destructive PostgreSQL E2E cases. The combined independent
-re-review found no residual safety or documentation blocker. RC13 has no commit,
-tag, archive, package, immutable image, deployment or preflight identity. These
-LOCAL results do not change the RC12 server `HOLD` state and do not authorize
-activation, service startup or messages.
+re-review found no residual safety or documentation blocker. This was LOCAL
+evidence before exact RC13 packaging. It did not itself authorize a provider
+call, activation, service startup or messages.
+
+## Exact RC13 server operation and HOLD
+
+The exact approved RC13 identity was:
+
+- tag: `time-tl-staging-20260928-rc13-ignore-oblast-uid-hint`;
+- commit: `f44d7ceddaf0f4baad366a03b155075edc9e4445`;
+- archive SHA-256:
+  `6ed97ab51e6a5ced4671bc20c1d7b92a1ea2097837d8863c69e1fc2fd7efdc1b`;
+- immutable image:
+  `sha256:9683f8d69728154cf80722a8b166469c517e8ec1797d069f83dabf599e471a56`.
+
+The server archive matched the approved digest. `admin-web` runs RC13, is
+healthy with restart count zero, and returned HTTP 200 through both direct and
+public `/login` checks. RC13 `bot`, `alert-worker`, `schedule-worker` and
+`sender-worker` are `Created` and were never started. PostgreSQL remains at
+`0006_outbox_terminal_retention`; no migration ran. Owner state before and after
+the operation was latest revision 10, pending revision 10 and ACTIVE revision 6.
+Revision 10 has zero activation audit entries.
+
+Exactly one RC13 STAGING preflight ran for pending revision 10. Telegram `getMe`
+passed. The official provider then made exactly one `active.json` request, which
+failed closed as `INVALID_RESPONSE / location_uid_unknown / count=1`; the
+preflight exited with status 2. There was no retry, activation, bot/worker start,
+message, persistence change or proxy change. The outbox was unchanged at 29
+total rows, 24 delivered rows and 5 undelivered rows.
+
+A fresh rollback backup is retained at
+`/home/trio/time-tl-bot/backups/pre-rc13-ignore-oblast-uid-hint-20260928T113445Z`.
+The current server verdict is RC13 `HOLD`. This transport and fail-closed
+evidence is not a successful Telegram staging run, canary or launch and does not
+advance G6 or G9. G7 server-readiness evidence is partial: the backup, immutable
+image, health checks and rollback material passed, while the provider contract
+blocker prevents a release-ready verdict.
+
+## RC14 upstream-contract diagnosis — BLOCKED
+
+A read-only source diagnosis re-fetched the documentation-linked official
+location CSV on 2026-09-28. It was byte-identical to the pinned catalogue:
+
+- 142,029 bytes;
+- SHA-256 `a5bf1d312ee7258b16caaaf6c06e3df56fca68b0c14a060ec7c5ee7ce40b9620`;
+- 1,622 records;
+- 27 roots;
+- 1,595 parent links.
+
+The official alert schema requires `location_uid` as a string carrying an int32
+value. The official SDK supplies no alternate mapping from an API UID to type and
+parent hierarchy. The RC13 STAGING response therefore exposed an inconsistency
+between the official live API and the current documentation-linked official
+catalogue. Its raw UID and body are deliberately omitted.
+
+A safe RC14 code correction is `BLOCKED`: accepting an unknown required UID,
+inventing its type or parent, or deriving hierarchy from an unofficial source
+would weaken the reviewed alert and all-clear boundary. Work can resume only
+with an official updated full catalogue containing UID, type and parent data, a
+provider-side correction, or an official mapping. RC14 has no code/release/server
+identity and no additional preflight evidence. RC13 remains in `HOLD`; the bot
+and workers remain stopped and revision 10 remains unactivated.

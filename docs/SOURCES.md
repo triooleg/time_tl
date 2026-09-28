@@ -102,7 +102,7 @@ preflight at `11:17:43Z` failed closed as
 `location_oblast_uid_unknown / count=1`. The response was not accepted as a
 snapshot, revision 10 was not activated, and bot/workers remained stopped.
 
-The RC13 LOCAL contract correction does not use `location_oblast_uid` as
+The RC13 contract correction does not use `location_oblast_uid` as
 authority. When present, it is accepted only as a dedicated bounded optional
 input and then discarded. It is separate from the one permitted generic bounded
 undocumented alert-row field, so its presence does not consume that generic
@@ -115,7 +115,23 @@ the optional oblast hint cannot repair a missing, malformed, unknown or
 type-incompatible required UID. Complete-row validation, bounded generic-extra
 handling, parent/child applicability, freshness, restart behavior and the two-
 successful-observation requirement for `CLEAR_CONFIRMED` remain unchanged.
-RC13 has passed local code review and tests but has no release or server identity.
+RC13 passed local code review and tests, then was packaged and installed under
+the exact identity recorded in the release-evidence document. Its one authorized
+STAGING preflight made one `active.json` request and failed closed as
+`location_uid_unknown / count=1`. It did not accept a snapshot, activate revision
+10, start the bot or workers, or send a message.
+
+The alert schema documents required `location_uid` as a string carrying an int32
+value. The official SDK provides no alternate UID-to-hierarchy mapping. A
+2026-09-28 refresh of the documentation-linked official CSV was byte-identical to
+the pinned catalogue: 142,029 bytes, SHA-256
+`a5bf1d312ee7258b16caaaf6c06e3df56fca68b0c14a060ec7c5ee7ce40b9620`,
+1,622 records, 27 roots and 1,595 parent links. Consequently the RC13 preflight
+result is an upstream API/catalogue inconsistency, not evidence supporting an
+invented local hierarchy mapping. RC14 safe-code work is `BLOCKED` until the
+provider publishes an updated full catalogue with UID, type and parent data,
+corrects the API response, or supplies an official mapping. The raw rejected UID
+and response body are not recorded.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful
@@ -183,7 +199,8 @@ value for safe retry.
 - Documentation: <https://devs.alerts.in.ua/#location-uid>
 - Linked sheet: <https://docs.google.com/spreadsheets/d/1XnTOzcPHd1LZUrarR1Fk43FUyl8Ae6a6M7pcwDRjNdA/edit?usp=sharing>
 - Pinned CSV: `data/alerts_in_ua/locations.csv`
-- Retrieval date: 2026-09-20
+- Pinned artifact retrieval date: 2026-09-20
+- Documentation-linked source rechecked: 2026-09-28; byte-identical
 - Bytes: 142029
 - SHA256: `a5bf1d312ee7258b16caaaf6c06e3df56fca68b0c14a060ec7c5ee7ce40b9620`
 

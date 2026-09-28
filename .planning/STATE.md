@@ -94,17 +94,18 @@ persisted. This does not yet satisfy the requested geolocation experience.
    exposing credentials, then request an exact staging approval.
 4. Run allowlisted Telegram staging, then a separately approved canary.
 
-An isolated permanent SIMULATION deployment has been performed. No Telegram staging,
-production deployment, official-provider polling or real-user message delivery has
-been performed.
+An isolated permanent SIMULATION deployment was the first server baseline. The
+later STAGING-scoped, read-only provider preflights are recorded below; none
+produced an accepted snapshot, activated a revision, started delivery-capable
+services or sent a message. No production or canary deployment has occurred.
 
 ## Session Continuity
 
 Last session: 2026-09-28
-Stopped at: RC12 is installed, but its single preflight rejected the provider
-response as `location_oblast_uid_unknown / count=1`; activation was excluded and
-the server remains in `HOLD`. RC13 is a LOCAL code-only contract correction with
-no commit, tag, package, deployment or preflight identity.
+Stopped at: RC13 is installed, but its single preflight rejected the provider
+response as `location_uid_unknown / count=1`; activation did not occur and the
+server remains in `HOLD`. RC14 diagnosis is `BLOCKED` on an upstream API/catalogue
+inconsistency; no safe code correction is supported by the official evidence.
 The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
@@ -219,7 +220,7 @@ returned HTTP 200. The response then failed closed as
 `INVALID_RESPONSE / location_oblast_uid_format_invalid / count=1`. There was no
 retry, activation, message or delivered outbox item. Independent safety review
 rejected activation and accepted the contained `HOLD` state only while `bot` and
-all workers remain stopped. The current server truth is therefore RC10 `HOLD`,
+all workers remained stopped. At that point the server truth was RC10 `HOLD`,
 not a staging pass; G6, G7 and G9 remain unadvanced.
 
 Fresh verified rollback backup:
@@ -256,7 +257,7 @@ returned HTTP 200. The response then failed closed as
 activation, message or delivered outbox item; the delivered-outbox baseline
 remained 24. No raw UID was recorded. Fresh rollback backup:
 `/home/trio/time-tl-bot/backups/pre-rc11-oblast-uid-shape-diag-20260928T104023Z`.
-The current server truth is RC11 `HOLD`, not a staging pass.
+At that point the server truth was RC11 `HOLD`, not a staging pass.
 
 RC12 is a narrow LOCAL compatibility candidate. It accepts a positive integer
 `location_oblast_uid` only by normalizing it to the same canonical decimal form
@@ -292,7 +293,7 @@ failed closed as `INVALID_RESPONSE / location_oblast_uid_unknown / count=1`.
 There was no retry, activation or message. The outbox remained 29 total rows and
 24 delivered rows. Fresh rollback backup:
 `/home/trio/time-tl-bot/backups/pre-rc12-pinned-oblast-uid-20260928T111523Z`.
-The current server truth is RC12 `HOLD`, not a staging pass.
+At that point the server truth was RC12 `HOLD`, not a staging pass.
 
 RC13 corrects the source contract locally: optional `location_oblast_uid` is a
 dedicated bounded, non-authoritative ignored input. It is separate from the one
@@ -308,7 +309,38 @@ tests passed; the full suite retained five opt-in destructive PostgreSQL E2E
 skips and one Starlette warning. Ruff, strict mypy for 72 source files,
 compileall and `git diff --check` passed. Independent final code review passed,
 and the combined code, ADR and release-evidence re-review passed after the
-documentation blocker was corrected. RC13 has no commit, tag, archive, package,
-image, deployment or preflight identity and does not change the RC12 server
-`HOLD` status.
+documentation blocker was corrected. That was LOCAL evidence before packaging
+and did not itself authorize or prove a server operation.
+
+The exact RC13 release was subsequently approved and installed from tag
+`time-tl-staging-20260928-rc13-ignore-oblast-uid-hint`, commit
+`f44d7ceddaf0f4baad366a03b155075edc9e4445`, archive SHA-256
+`6ed97ab51e6a5ced4671bc20c1d7b92a1ea2097837d8863c69e1fc2fd7efdc1b`.
+The server archive matched the approved digest and immutable image
+`sha256:9683f8d69728154cf80722a8b166469c517e8ec1797d069f83dabf599e471a56`
+was built. `admin-web` runs RC13, is healthy with restart count zero, and both
+direct and public `/login` checks returned HTTP 200. RC13 `bot` and all three
+workers are `Created` and were never started. PostgreSQL remains at
+`0006_outbox_terminal_retention`; no migration ran. Owner state remained latest
+revision 10, pending revision 10 and ACTIVE revision 6, with zero activation
+audit entries for revision 10.
+
+Exactly one RC13 STAGING preflight ran for pending revision 10. Telegram `getMe`
+passed, then the one official `active.json` request failed closed as
+`INVALID_RESPONSE / location_uid_unknown / count=1` and exited with status 2.
+There was no retry, activation, startup, message or persistence/proxy change.
+The outbox was unchanged at 29 total, 24 delivered and 5 undelivered rows.
+Fresh verified rollback backup:
+`/home/trio/time-tl-bot/backups/pre-rc13-ignore-oblast-uid-hint-20260928T113445Z`.
+
+RC14 read-only diagnosis re-fetched the documentation-linked official catalogue
+on 2026-09-28. It was byte-identical to the pinned file: 142,029 bytes, SHA-256
+`a5bf1d312ee7258b16caaaf6c06e3df56fca68b0c14a060ec7c5ee7ce40b9620`,
+1,622 records, 27 roots and 1,595 parent links. The official alert schema requires
+`location_uid` as a string carrying an int32 value, and the official SDK provides
+no alternate mapping. The live API therefore supplied a required UID absent from
+the current official catalogue. A safe RC14 code fix is `BLOCKED` pending an
+official updated full catalogue with UID, type and parent data, a provider-side
+correction, or an official mapping. No raw UID, response body or secret is
+retained here. Current server verdict remains RC13 `HOLD`; no launch claim is made.
 Resume file: none.
