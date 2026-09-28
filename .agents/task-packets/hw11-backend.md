@@ -20,4 +20,3 @@
 - Unverified items:
 - Risks or follow-up:
 - Recommended verdict: `REVIEW` / `BLOCKED`
-
