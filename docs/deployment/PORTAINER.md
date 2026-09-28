@@ -4,6 +4,137 @@ This runbook records the verified exact-version **SIMULATION** deployment and th
 additional gates for any future Telegram staging or production release. Simulation
 success is not staging or production approval.
 
+## Detached production attestation workflow (prepared, not deployed)
+
+`docker-compose.production.yml` is a standalone production contract; do not merge
+it with the simulation/staging file. It requires digest-pinned references for the
+application, PostgreSQL and node-exporter images. It also mounts one
+operator-controlled host directory read-only at `/run/time-tl-release` in every
+application role and operator job. That directory must contain exactly the reviewed
+`release-manifest.json` bytes and their detached
+`release-manifest.ed25519` signature at the runtime's fixed paths.
+
+The signing private key must remain in an external protected signing system. Never
+generate it in this repository, put it in Portainer, copy it to the server, include
+it in an image/build argument, or store it beside the detached signature. Only the
+reviewed Ed25519 public key may be compiled into an exact release image.
+
+The mandatory order for an approved production candidate is:
+
+1. Build, test and scan the exact source first. Push the immutable image and resolve
+   its registry digest. Pin PostgreSQL and node-exporter by digest as well.
+2. Create the manifest from the final tag, commit, tree, source-archive SHA-256,
+   application image digest, configuration revision, catalogue SHA-256, Alembic
+   head, provider, territory mode and singleton count. Do not rewrite or normalize
+   the manifest after signing.
+3. Have the external signing system sign those exact manifest bytes with the
+   protected Ed25519 private key. Transfer only the fixed manifest and base64
+   detached signature into a root/operator-owned directory. Make files read-only
+   to the container UID and make the directory non-writable by that UID.
+4. Populate protected environment values from `.env.production.example`. Confirm
+   `TEST_CHAT_ALLOWLIST` renders as the empty string, `TIME_TL_ENV=production`,
+   `OWNER_CONFIG_SOURCE=database`, `ADMIN_BACKEND=postgres`,
+   `ADMIN_COOKIE_SECURE=true`, and `ALLOW_SCAFFOLD_SERVICES=false`. Before invoking
+   Compose, run the fail-closed input verifier. It rejects blank, tag-only,
+   `latest`, uppercase, short and otherwise non-canonical image references:
+
+   ```bash
+   python scripts/deployment/verify_production_images.py \
+     --env-file /protected/time-tl-production.env
+   ```
+
+   A `PASS (environment)` result is mandatory. Never replace this verifier with a
+   visual check or `${VAR:?}`; Compose only proves that a variable is non-empty.
+5. Render the standalone file to protected JSON before any change, then run the
+   verifier again against the resolved Compose semantics:
+
+   ```bash
+   umask 077
+   docker compose --env-file /protected/time-tl-production.env \
+     -f docker-compose.production.yml --profile ops config --format json \
+     > /tmp/time-tl-production.rendered.json
+   python scripts/deployment/verify_production_images.py \
+     --env-file /protected/time-tl-production.env \
+     --compose-config-json /tmp/time-tl-production.rendered.json
+   ```
+
+   A `PASS (environment+compose)` result is mandatory. The protected JSON contains
+   resolved secrets: do not print or attach it to shared logs, and remove it after
+   the gate. Separately inspect its structure in the protected operator session.
+   Reject missing read-only attestation mounts, excess per-role secrets/networks, a
+   non-empty staging allowlist, public PostgreSQL/node-exporter ports, or more than
+   one replica for bot/alert/schedule/sender.
+6. Pull the exact references, then compare the external deployed identity with the
+   signed manifest before preflight. For each container, verify `docker inspect`
+   `.Config.Image` is the approved `repository@sha256:...`, its `.Image` equals the
+   ID returned by `docker image inspect` for that reference, and the approved
+   digest is present in `RepoDigests`. Runtime attestation does not replace this
+   external comparison.
+7. Take an encrypted logical backup, checksum it, and restore it into an isolated
+   PostgreSQL instance. Verify integrity, row counts and the rollback artifact.
+   Start only PostgreSQL and internal node-exporter, then run the one migration job:
+
+   ```bash
+   docker compose --env-file /protected/time-tl-production.env \
+     -f docker-compose.production.yml --profile ops run --rm migrate
+   ```
+
+8. Run exactly one detached production preflight. It verifies the fixed signature,
+   manifest/revision, actual database migration head, pending configuration,
+   official provider, Telegram `getMe`, and the internal metrics endpoint without
+   sending messages or activating the revision:
+
+   ```bash
+   docker compose --env-file /protected/time-tl-production.env \
+     -f docker-compose.production.yml --profile ops run --rm production-preflight
+   ```
+
+9. Only after independent safety-review `PASS`, exact-version G8 approval and a
+   verified G9 plan, run the separate activation job once:
+
+   ```bash
+   docker compose --env-file /protected/time-tl-production.env \
+     -f docker-compose.production.yml --profile ops run --rm production-activate
+   ```
+
+10. Start `admin-web`, then the singleton `alert-worker`. Require a fresh complete
+    official snapshot, closed circuit and current heartbeat before starting `bot`
+    and `schedule-worker`. Start `sender-worker` last. Observe outbox depth/age,
+    Telegram errors, leases, restart counters and resource metrics throughout the
+    bounded canary. Container health alone is not release evidence.
+
+The repository's production capability switch remains deliberately false until an
+exact independently reviewed public release changes it. Therefore this Compose
+contract and a passing render do not themselves enable or approve production.
+
+### Production rollback
+
+Stop `sender-worker`, then bot/schedule/alert delivery paths before rollback when
+code/schema compatibility or alert freshness is uncertain. Preserve the failed
+volume and logs. Compare the previous image digest, signed manifest, migration head
+and Compose checksum with the recorded rollback packet. Restore the verified backup
+into a new volume; never overwrite the only database copy. Use the prior immutable
+image only when its code is compatible with the restored schema, remount its matching
+signed attestation, run the same external digest checks, and start in the same order.
+Any restart, restore, missing snapshot or ambiguous provider state remains
+`UNKNOWN/STALE`; it never authorizes an all-clear.
+
+### Residual live gates
+
+This repository work is local preparation only:
+
+- **G7 SERVER READINESS remains unverified** until a fresh read-only server check
+  confirms Docker/Compose versions, resources, ownership, protected secrets,
+  existing volumes/stacks, internal networks, TLS/proxy mapping, backup destination,
+  restore capacity and the actual digest-pinned render.
+- **G8 DEPLOY APPROVAL remains blocked** until the final compiled public key/switch,
+  exact tag/commit/tree/archive checksum, signed manifest bytes/signature, three
+  image references, Compose checksum, migration evidence, restore evidence and
+  independent safety verdict are approved as one immutable packet.
+- **G9 CANARY remains blocked** until the approved production accounts, monitoring
+  thresholds, stop/rollback authority and an observed inbound-to-outbound canary
+  are recorded. No public message or all-clear is authorized by these files.
+
 ## Verified simulation deployment
 
 - source commit: `4ea3b1bedfc31142ae2c53d32e550e4e8a20dcff`;

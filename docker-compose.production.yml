@@ -1,0 +1,242 @@
+name: time-tl-production
+
+# This is a standalone, fail-closed production contract. Do not merge it with
+# docker-compose.yml: render and deploy it explicitly with `-f`.
+x-production-app: &production-app
+  image: ${TIME_TL_PRODUCTION_IMAGE:?set an immutable repository@sha256 digest reference}
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=16m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  environment: &production-env
+    TIME_TL_ENV: production
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    TZ: ${TZ:-Europe/Kyiv}
+    DATABASE_URL: ${DATABASE_URL:?set the internal postgresql+asyncpg URL securely}
+    OWNER_CONFIG_SOURCE: database
+    OWNER_CONFIG_REVISION: ${OWNER_CONFIG_REVISION:?set the signed ACTIVE revision}
+    TEST_CHAT_ALLOWLIST: ""
+    ALERT_POLL_INTERVAL_SECONDS: ${ALERT_POLL_INTERVAL_SECONDS:-15}
+    ALERT_RATE_LIMIT_PER_MINUTE: ${ALERT_RATE_LIMIT_PER_MINUTE:-5}
+    ALERT_RATE_LIMIT_BURST: ${ALERT_RATE_LIMIT_BURST:-1}
+    ALERT_STALE_AFTER_SECONDS: ${ALERT_STALE_AFTER_SECONDS:-120}
+    HEALTH_HOST: 0.0.0.0
+    HEALTH_PORT: 8080
+    RUNTIME_STATE_DIR: /var/lib/time-tl-runtime
+    SCHEDULE_WORKER_INTERVAL_SECONDS: ${SCHEDULE_WORKER_INTERVAL_SECONDS:-30}
+    SENDER_WORKER_INTERVAL_SECONDS: ${SENDER_WORKER_INTERVAL_SECONDS:-2}
+    SENDER_MESSAGES_PER_SECOND: ${SENDER_MESSAGES_PER_SECOND:-20}
+    SENDER_TRANSPORT_TIMEOUT_SECONDS: ${SENDER_TRANSPORT_TIMEOUT_SECONDS:-8}
+    ALLOW_SCAFFOLD_SERVICES: "false"
+  depends_on:
+    postgres: {condition: service_healthy}
+  networks: [database]
+  volumes:
+    - type: bind
+      source: ${TIME_TL_RELEASE_ATTESTATION_DIR:?set the operator-controlled attestation directory}
+      target: /run/time-tl-release
+      read_only: true
+      bind:
+        create_host_path: false
+  healthcheck:
+    test: ["CMD", "python", "-m", "time_tl.entrypoints.healthcheck"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 10s
+
+services:
+  bot:
+    <<: *production-app
+    command: ["bot"]
+    environment:
+      <<: *production-env
+      SERVICE_ROLE: bot
+      ALERT_PROVIDER: alerts_in_ua
+      TELEGRAM_TRANSPORT: live
+      OWNER_TELEGRAM_FERNET_KEY: ${OWNER_TELEGRAM_FERNET_KEY:?set in protected secrets}
+      LESSON_LINK_FERNET_KEY: ${LESSON_LINK_FERNET_KEY:?set in protected secrets}
+    networks: [egress, database]
+    deploy: {replicas: 1}
+
+  alert-worker:
+    <<: *production-app
+    command: ["alert-worker"]
+    environment:
+      <<: *production-env
+      SERVICE_ROLE: alert-worker
+      ALERT_PROVIDER: alerts_in_ua
+      TELEGRAM_TRANSPORT: live
+      OWNER_ALERTS_FERNET_KEY: ${OWNER_ALERTS_FERNET_KEY:?set in protected secrets}
+    volumes:
+      - type: bind
+        source: ${TIME_TL_RELEASE_ATTESTATION_DIR:?set the operator-controlled attestation directory}
+        target: /run/time-tl-release
+        read_only: true
+        bind:
+          create_host_path: false
+      - runtime-state:/var/lib/time-tl-runtime
+    networks: [egress, database]
+    deploy: {replicas: 1}
+
+  schedule-worker:
+    <<: *production-app
+    command: ["schedule-worker"]
+    environment:
+      <<: *production-env
+      SERVICE_ROLE: schedule-worker
+      ALERT_PROVIDER: alerts_in_ua
+      TELEGRAM_TRANSPORT: live
+      LESSON_LINK_FERNET_KEY: ${LESSON_LINK_FERNET_KEY:?set in protected secrets}
+    deploy: {replicas: 1}
+
+  sender-worker:
+    <<: *production-app
+    command: ["sender-worker"]
+    environment:
+      <<: *production-env
+      SERVICE_ROLE: sender-worker
+      ALERT_PROVIDER: alerts_in_ua
+      TELEGRAM_TRANSPORT: live
+      OWNER_TELEGRAM_FERNET_KEY: ${OWNER_TELEGRAM_FERNET_KEY:?set in protected secrets}
+      LESSON_LINK_FERNET_KEY: ${LESSON_LINK_FERNET_KEY:?set in protected secrets}
+    networks: [egress, database]
+    deploy: {replicas: 1}
+
+  admin-web:
+    <<: *production-app
+    command: ["admin-web"]
+    environment:
+      <<: *production-env
+      SERVICE_ROLE: admin-web
+      ADMIN_BACKEND: postgres
+      ADMIN_IP_HASH_KEY: ${ADMIN_IP_HASH_KEY:?set in protected secrets}
+      OWNER_TELEGRAM_FERNET_KEY: ${OWNER_TELEGRAM_FERNET_KEY:?set in protected secrets}
+      OWNER_ALERTS_FERNET_KEY: ${OWNER_ALERTS_FERNET_KEY:?set in protected secrets}
+      HOST_METRICS_URL: http://node-exporter:9100/metrics
+      ADMIN_HOST: 0.0.0.0
+      ADMIN_PORT: 8081
+      HEALTH_PORT: 8081
+      HEALTH_PATH: /login
+      ADMIN_STATE_DIR: /var/lib/time-tl-admin
+      ADMIN_COOKIE_SECURE: "true"
+      ADMIN_TRUSTED_PROXY_CIDRS: ${ADMIN_TRUSTED_PROXY_CIDRS:?set only verified proxy CIDRs}
+      ADMIN_BOOTSTRAP_ARTIFACT_PATH: /var/lib/time-tl-admin/admin-bootstrap.txt
+    ports:
+      - "${ADMIN_BIND_ADDRESS:-127.0.0.1}:${ADMIN_PORT:-8081}:8081"
+    volumes:
+      - type: bind
+        source: ${TIME_TL_RELEASE_ATTESTATION_DIR:?set the operator-controlled attestation directory}
+        target: /run/time-tl-release
+        read_only: true
+        bind:
+          create_host_path: false
+      - admin-state:/var/lib/time-tl-admin
+    networks: [database, metrics]
+
+  migrate:
+    <<: *production-app
+    command: ["migrate"]
+    profiles: ["ops"]
+    restart: "no"
+    environment:
+      <<: *production-env
+      SERVICE_ROLE: migrate
+    healthcheck: {disable: true}
+
+  production-preflight:
+    <<: *production-app
+    command:
+      - preflight-production-owner-settings
+      - --revision
+      - ${OWNER_CONFIG_REVISION:?set the signed ACTIVE revision}
+    profiles: ["ops"]
+    restart: "no"
+    environment:
+      <<: *production-env
+      SERVICE_ROLE: admin-web
+      ALERT_PROVIDER: alerts_in_ua
+      TELEGRAM_TRANSPORT: live
+      ADMIN_BACKEND: postgres
+      ADMIN_IP_HASH_KEY: ${ADMIN_IP_HASH_KEY:?set in protected secrets}
+      OWNER_TELEGRAM_FERNET_KEY: ${OWNER_TELEGRAM_FERNET_KEY:?set in protected secrets}
+      OWNER_ALERTS_FERNET_KEY: ${OWNER_ALERTS_FERNET_KEY:?set in protected secrets}
+      LESSON_LINK_FERNET_KEY: ${LESSON_LINK_FERNET_KEY:?set in protected secrets}
+      HOST_METRICS_URL: http://node-exporter:9100/metrics
+      ADMIN_COOKIE_SECURE: "true"
+      ADMIN_TRUSTED_PROXY_CIDRS: ${ADMIN_TRUSTED_PROXY_CIDRS:?set only verified proxy CIDRs}
+      ADMIN_BOOTSTRAP_ARTIFACT_PATH: /var/lib/time-tl-admin/admin-bootstrap.txt
+    networks: [egress, database, metrics]
+    healthcheck: {disable: true}
+
+  production-activate:
+    <<: *production-app
+    command:
+      - activate-production-owner-settings
+      - --revision
+      - ${OWNER_CONFIG_REVISION:?set the signed ACTIVE revision}
+    profiles: ["ops"]
+    restart: "no"
+    environment:
+      <<: *production-env
+      SERVICE_ROLE: admin-web
+      ALERT_PROVIDER: alerts_in_ua
+      TELEGRAM_TRANSPORT: live
+      ADMIN_BACKEND: postgres
+      ADMIN_IP_HASH_KEY: ${ADMIN_IP_HASH_KEY:?set in protected secrets}
+      OWNER_TELEGRAM_FERNET_KEY: ${OWNER_TELEGRAM_FERNET_KEY:?set in protected secrets}
+      OWNER_ALERTS_FERNET_KEY: ${OWNER_ALERTS_FERNET_KEY:?set in protected secrets}
+      LESSON_LINK_FERNET_KEY: ${LESSON_LINK_FERNET_KEY:?set in protected secrets}
+      HOST_METRICS_URL: http://node-exporter:9100/metrics
+      ADMIN_COOKIE_SECURE: "true"
+      ADMIN_TRUSTED_PROXY_CIDRS: ${ADMIN_TRUSTED_PROXY_CIDRS:?set only verified proxy CIDRs}
+      ADMIN_BOOTSTRAP_ARTIFACT_PATH: /var/lib/time-tl-admin/admin-bootstrap.txt
+    networks: [egress, database, metrics]
+    healthcheck: {disable: true}
+
+  node-exporter:
+    image: ${TIME_TL_NODE_EXPORTER_IMAGE:?set an immutable repository@sha256 digest reference}
+    restart: unless-stopped
+    pid: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/host/root
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/containers/storage/.+)($$|/)
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro,rslave
+    networks: [metrics]
+
+  postgres:
+    image: ${TIME_TL_POSTGRES_IMAGE:?set an immutable repository@sha256 digest reference}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set in protected secrets}
+      POSTGRES_USER: ${POSTGRES_USER:?set in protected secrets}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in protected secrets}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  egress: {}
+  database: {internal: true}
+  metrics: {internal: true}
+
+volumes:
+  postgres-data: {}
+  admin-state: {}
+  runtime-state: {}
