@@ -1,7 +1,8 @@
 # Project state
 
-Updated: 2026-09-23. This document separates verified local and server simulation
-evidence from Telegram staging and production evidence.
+Baseline gate/state snapshot: 2026-09-23. Session continuity updated: 2026-09-28.
+This document separates verified local and server simulation evidence from
+Telegram staging and production evidence.
 
 ## Implemented
 
@@ -99,13 +100,19 @@ been performed.
 
 ## Session Continuity
 
-Last session: 2026-09-23
-Stopped at: Owner web setup wizard implemented locally with write-only encrypted
-Telegram/alerts tokens, versioned DRAFT/PENDING/ACTIVE flow, split least-privilege
-keys, operator-only activation, applied-revision worker heartbeats and the legacy
-direct provider-settings route disabled. Current uncommitted-tree evidence:
-`pytest` 257 passed / 1 opt-in destructive PostgreSQL E2E skipped; Ruff passed;
-strict mypy passed for 67 source files; compileall and admin JavaScript syntax passed.
-Independent repeat safety review returned PASS for the local diff. No new server
-deploy was performed; G6-G9 remain blocked by their documented external gates.
+Last session: 2026-09-28
+Stopped at: The explicitly approved RC8 provider-envelope compatibility patch is
+a documented LOCAL candidate. RC8 permits at most eight bounded additional
+fields inside `meta`; they are digest-only and cannot affect ACTIVE/CLEAR.
+Duplicate JSON object keys, excessive JSON depth and any metadata limit violation
+fail closed to `UNKNOWN`/`STALE` without an all-clear. Local evidence is 52 focused
+tests passed; the full suite with `D:\Projects\Time_tl_RC8\src` explicitly pinned
+passed 508 tests with five opt-in destructive PostgreSQL E2E cases skipped and one
+Starlette deprecation warning; Ruff, strict mypy for 72 source files and
+compileall passed. Independent safety re-review returned PASS for the patch scope.
+Documentation and the exact local packet
+`time-tl-staging-20260928-rc8-bounded-meta` are complete. No server, provider,
+Telegram, push or deployment action was performed; current STAGING remains RC6.
+G3 is PASS for the LOCAL patch scope only, G4 is PASS for the non-destructive
+local suite with E2E skips, and G6-G9 were not advanced.
 Resume file: none.

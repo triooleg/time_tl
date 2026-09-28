@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -137,6 +138,12 @@ class AlertsInUaAdapter:
     MAX_RESPONSE_BYTES = 1_048_576
     MAX_ALERT_ID = (1 << 63) - 1
     MAX_DISCLAIMER_CHARS = 4_096
+    MAX_META_EXTRA_FIELDS = 8
+    MAX_META_EXTRA_DEPTH = 3
+    MAX_META_EXTRA_CONTAINER_ELEMENTS = 32
+    MAX_META_EXTRA_NODES = 128
+    MAX_META_EXTRA_STRING_CHARS = 2_048
+    MAX_META_EXTRA_SERIALIZED_BYTES = 32_768
 
     _BARE_ROOT_FIELDS = frozenset({"alerts"})
     _ENVELOPE_ROOT_FIELDS = frozenset({"alerts", "meta", "disclaimer"})
@@ -144,6 +151,13 @@ class AlertsInUaAdapter:
     _META_TIMESTAMP_FORMAT = "%Y/%m/%d %H:%M:%S %z"
     _META_TIMESTAMP_PATTERN = re.compile(
         r"\A\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}\Z"
+    )
+    _META_EXTRA_KEY_PATTERN = re.compile(
+        r"\A[a-z][a-z0-9]*(?:_[a-z0-9]+)*\Z",
+        re.ASCII,
+    )
+    _META_REQUIRED_KEY_SIGNATURES = frozenset(
+        key.replace("_", "") for key in _META_FIELDS
     )
 
     _LOCATION_TYPES = frozenset({"oblast", "raion", "city", "hromada", "unknown"})
@@ -299,7 +313,13 @@ class AlertsInUaAdapter:
                     error.code,
                     error.count,
                 )
-            except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                TypeError,
+                ValueError,
+                RecursionError,
+            ):
                 return self._invalid(
                     SourceFailureKind.INVALID_RESPONSE,
                     "payload_unclassified",
@@ -371,9 +391,11 @@ class AlertsInUaAdapter:
         except UnicodeDecodeError as error:
             raise SnapshotValidationError("body_encoding_invalid") from error
         try:
-            root = json.loads(decoded)
+            root = json.loads(decoded, object_pairs_hook=self._strict_json_object)
         except json.JSONDecodeError as error:
             raise SnapshotValidationError("json_invalid") from error
+        except RecursionError as error:
+            raise SnapshotValidationError("json_depth_unprocessable") from error
         if not isinstance(root, dict):
             raise SnapshotValidationError("root_not_object")
         root_keys = frozenset(root)
@@ -482,6 +504,19 @@ class AlertsInUaAdapter:
         ).encode("utf-8")
         return tuple(sorted(parsed)), sha256(canonical).hexdigest()
 
+    @staticmethod
+    def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        parsed: dict[str, object] = {}
+        duplicate_count = 0
+        for key, value in pairs:
+            if key in parsed:
+                duplicate_count += 1
+            else:
+                parsed[key] = value
+        if duplicate_count:
+            raise SnapshotValidationError("json_object_keys_duplicate", duplicate_count)
+        return parsed
+
     @classmethod
     def _validate_envelope_metadata(cls, meta: object, disclaimer: object) -> None:
         """Validate the exact envelope consumed by the official Python SDK.
@@ -499,11 +534,24 @@ class AlertsInUaAdapter:
                 "meta_fields_missing",
                 len(cls._META_FIELDS - meta_keys),
             )
-        if not meta_keys.issubset(cls._META_FIELDS):
+        extra_keys = meta_keys - cls._META_FIELDS
+        if len(extra_keys) > cls.MAX_META_EXTRA_FIELDS:
             raise SnapshotValidationError(
-                "meta_fields_unknown",
-                len(meta_keys - cls._META_FIELDS),
+                "meta_extra_fields_limit",
+                len(extra_keys),
             )
+        invalid_key_count = sum(
+            len(key) > 64 or cls._META_EXTRA_KEY_PATTERN.fullmatch(key) is None
+            for key in extra_keys
+        )
+        if invalid_key_count:
+            raise SnapshotValidationError("meta_extra_key_invalid", invalid_key_count)
+        conflicting_key_count = sum(
+            key.replace("_", "") in cls._META_REQUIRED_KEY_SIGNATURES
+            for key in extra_keys
+        )
+        if conflicting_key_count:
+            raise SnapshotValidationError("meta_extra_key_conflict", conflicting_key_count)
         last_updated_at = meta["last_updated_at"]
         if not isinstance(last_updated_at, str):
             raise SnapshotValidationError("meta_last_updated_at_type_invalid")
@@ -516,10 +564,74 @@ class AlertsInUaAdapter:
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise SnapshotValidationError("meta_last_updated_at_timezone_missing")
 
+        extra_nodes = [0]
+        for key in sorted(extra_keys):
+            cls._validate_meta_extra_value(meta[key], container_depth=0, nodes=extra_nodes)
+        canonical_extras = json.dumps(
+            {key: meta[key] for key in extra_keys},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        if len(canonical_extras) > cls.MAX_META_EXTRA_SERIALIZED_BYTES:
+            raise SnapshotValidationError("meta_extra_serialized_size")
+
         if not isinstance(disclaimer, str):
             raise SnapshotValidationError("disclaimer_type_invalid")
         if not 1 <= len(disclaimer) <= cls.MAX_DISCLAIMER_CHARS:
             raise SnapshotValidationError("disclaimer_length_invalid")
+
+    @classmethod
+    def _validate_meta_extra_value(
+        cls,
+        value: object,
+        *,
+        container_depth: int,
+        nodes: list[int],
+    ) -> None:
+        nodes[0] += 1
+        if nodes[0] > cls.MAX_META_EXTRA_NODES:
+            raise SnapshotValidationError("meta_extra_nodes_limit")
+
+        if value is None or isinstance(value, bool):
+            return
+        if isinstance(value, int):
+            if not -(1 << 63) <= value <= (1 << 63) - 1:
+                raise SnapshotValidationError("meta_extra_integer_range")
+            return
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise SnapshotValidationError("meta_extra_float_non_finite")
+            return
+        if isinstance(value, str):
+            if len(value) > cls.MAX_META_EXTRA_STRING_CHARS:
+                raise SnapshotValidationError("meta_extra_string_length")
+            return
+        if isinstance(value, (list, dict)):
+            next_depth = container_depth + 1
+            if next_depth > cls.MAX_META_EXTRA_DEPTH:
+                raise SnapshotValidationError("meta_extra_depth_limit")
+            if len(value) > cls.MAX_META_EXTRA_CONTAINER_ELEMENTS:
+                raise SnapshotValidationError("meta_extra_container_limit")
+            children: Iterable[object]
+            if isinstance(value, list):
+                children = value
+            else:
+                for key in value:
+                    if not isinstance(key, str):
+                        raise SnapshotValidationError("meta_extra_value_type_invalid")
+                    if len(key) > cls.MAX_META_EXTRA_STRING_CHARS:
+                        raise SnapshotValidationError("meta_extra_string_length")
+                children = value.values()
+            for child in children:
+                cls._validate_meta_extra_value(
+                    child,
+                    container_depth=next_depth,
+                    nodes=nodes,
+                )
+            return
+        raise SnapshotValidationError("meta_extra_value_type_invalid")
 
     @staticmethod
     def _is_canonical_uid(value: object) -> bool:

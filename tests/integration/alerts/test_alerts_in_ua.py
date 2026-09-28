@@ -39,6 +39,10 @@ def response(status, body=None, **headers):
     return HttpResponse(status, headers, b"" if body is None else json.dumps(body).encode())
 
 
+def raw_response(body, marker=MARKER_1):
+    return HttpResponse(200, {"Last-Modified": marker}, body)
+
+
 def active(
     alert_id=10,
     *,
@@ -78,6 +82,27 @@ def official_envelope(payload=None, *, meta=None, disclaimer="Official alerts.in
     }
 
 
+def duplicate_root_alerts_payload():
+    encoded_alerts = json.dumps(active()["alerts"]).encode()
+    return b'{"alerts":' + encoded_alerts + b',"alerts":[]}'
+
+
+def deeply_nested_metadata_payload(depth=10_000):
+    timestamp = json.dumps(META_TIMESTAMP).encode()
+    disclaimer = json.dumps("Official alerts.in.ua data").encode()
+    return (
+        b'{"alerts":[],"meta":{"last_updated_at":'
+        + timestamp
+        + b',"nested":'
+        + (b"[" * depth)
+        + b"null"
+        + (b"]" * depth)
+        + b'},"disclaimer":'
+        + disclaimer
+        + b"}"
+    )
+
+
 def adapter(transport):
     return AlertsInUaAdapter(
         token="secret-not-logged",
@@ -94,6 +119,62 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 response(
                     200,
                     official_envelope(),
+                    **{"Last-Modified": MARKER_1},
+                )
+            )
+        ).fetch(fetch_revision=1, last_modified=None)
+
+        self.assertIsNotNone(result.snapshot)
+        assert result.snapshot is not None
+        self.assertEqual("10", result.snapshot.active_episodes[0].episode_id)
+
+    async def test_bounded_additional_metadata_is_digest_only(self):
+        metadata = {
+            "last_updated_at": META_TIMESTAMP,
+            "schema_version": 3,
+            "provider_ok": True,
+            "optional_value": None,
+            "ratio": 0.5,
+            "nested": {"level_2": [{"level_3": "complete"}]},
+        }
+        provider = adapter(Transport())
+        episodes, digest = provider._parse_active_payload(
+            json.dumps(official_envelope(meta=metadata)).encode()
+        )
+        reordered = dict(reversed(tuple(metadata.items())))
+        reordered_episodes, reordered_digest = provider._parse_active_payload(
+            json.dumps(official_envelope(meta=reordered)).encode()
+        )
+        changed = dict(metadata)
+        changed["nested"] = {"level_2": [{"level_3": "changed"}]}
+        changed_episodes, changed_digest = provider._parse_active_payload(
+            json.dumps(official_envelope(meta=changed)).encode()
+        )
+
+        self.assertEqual(episodes, reordered_episodes)
+        self.assertEqual(episodes, changed_episodes)
+        self.assertEqual(digest, reordered_digest)
+        self.assertNotEqual(digest, changed_digest)
+        self.assertEqual(("10",), tuple(item.episode_id for item in episodes))
+
+    async def test_metadata_accepts_documented_boundaries(self):
+        exact_depth_three = {"one": {"two": {"three": "ok"}}}
+        metadata = {
+            "last_updated_at": META_TIMESTAMP,
+            "field_one": exact_depth_three,
+            "field_two": list(range(32)),
+            "field_three": -(1 << 63),
+            "field_four": (1 << 63) - 1,
+            "field_five": "x" * AlertsInUaAdapter.MAX_META_EXTRA_STRING_CHARS,
+            "field_six": False,
+            "field_seven": 1.25,
+            "k" * 64: None,
+        }
+        result = await adapter(
+            Transport(
+                response(
+                    200,
+                    official_envelope(meta=metadata),
                     **{"Last-Modified": MARKER_1},
                 )
             )
@@ -343,13 +424,6 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             (official_envelope(meta=[]), "meta_type_invalid", 1),
             (official_envelope(meta={}), "meta_fields_missing", 1),
             (
-                official_envelope(
-                    meta={"last_updated_at": META_TIMESTAMP, "private": "must-not-leak"}
-                ),
-                "meta_fields_unknown",
-                1,
-            ),
-            (
                 official_envelope(meta={"last_updated_at": 123}),
                 "meta_last_updated_at_type_invalid",
                 1,
@@ -391,6 +465,164 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 assert summary is not None
                 self.assertNotIn("must-not-leak", summary)
                 self.assertNotIn(META_TIMESTAMP, summary)
+
+    async def test_additional_metadata_violations_are_redacted_and_fail_closed(self):
+        base = {"last_updated_at": META_TIMESTAMP}
+        too_many = {**base, **{f"field_{index}": index for index in range(9)}}
+        too_many_nodes = {
+            **base,
+            **{f"field_{index}": list(range(16)) for index in range(8)},
+        }
+        too_large = {
+            **base,
+            **{
+                f"field_{index}": {
+                    "first": "x" * AlertsInUaAdapter.MAX_META_EXTRA_STRING_CHARS,
+                    "second": "y" * AlertsInUaAdapter.MAX_META_EXTRA_STRING_CHARS,
+                }
+                for index in range(8)
+            },
+        }
+        samples = (
+            (too_many, "meta_extra_fields_limit", 9),
+            (
+                {**base, "PrivateProviderField": "must-not-leak"},
+                "meta_extra_key_invalid",
+                1,
+            ),
+            ({**base, "k" * 65: "must-not-leak"}, "meta_extra_key_invalid", 1),
+            ({**base, "private__field": "must-not-leak"}, "meta_extra_key_invalid", 1),
+            ({**base, "lastupdated_at": "must-not-leak"}, "meta_extra_key_conflict", 1),
+            (
+                {
+                    **base,
+                    "nested": {"two": {"three": {"four": {"five": "too-deep"}}}},
+                },
+                "meta_extra_depth_limit",
+                1,
+            ),
+            (
+                {
+                    **base,
+                    "items": list(
+                        range(AlertsInUaAdapter.MAX_META_EXTRA_CONTAINER_ELEMENTS + 1)
+                    ),
+                },
+                "meta_extra_container_limit",
+                1,
+            ),
+            (too_many_nodes, "meta_extra_nodes_limit", 1),
+            (
+                {
+                    **base,
+                    "text": "x" * (AlertsInUaAdapter.MAX_META_EXTRA_STRING_CHARS + 1),
+                },
+                "meta_extra_string_length",
+                1,
+            ),
+            ({**base, "number": -(1 << 63) - 1}, "meta_extra_integer_range", 1),
+            ({**base, "number": (1 << 63)}, "meta_extra_integer_range", 1),
+            ({**base, "number": float("nan")}, "meta_extra_float_non_finite", 1),
+            ({**base, "number": float("inf")}, "meta_extra_float_non_finite", 1),
+            (too_large, "meta_extra_serialized_size", 1),
+        )
+
+        for metadata, code, count in samples:
+            with self.subTest(code=code):
+                result = await adapter(
+                    Transport(
+                        response(
+                            200,
+                            official_envelope(meta=metadata),
+                            **{"Last-Modified": MARKER_1},
+                        )
+                    )
+                ).fetch(fetch_revision=1, last_modified=None)
+                self.assertIsNotNone(result.failure)
+                self.assertEqual(code, result.diagnostic_code)
+                self.assertEqual(count, result.diagnostic_count)
+                summary = result.sanitized_failure()
+                assert summary is not None
+                self.assertNotIn("PrivateProviderField", summary)
+                self.assertNotIn("lastupdated_at", summary)
+                self.assertNotIn("must-not-leak", summary)
+
+    async def test_duplicate_json_object_keys_at_every_level_fail_closed(self):
+        encoded_alerts = json.dumps(active()["alerts"]).encode()
+        encoded_alert = json.dumps(active()["alerts"][0]).encode()
+        duplicate_id_alert = encoded_alert.replace(
+            b'"id": 10',
+            b'"id": 10, "id": 11',
+            1,
+        )
+        timestamp = json.dumps(META_TIMESTAMP).encode()
+        disclaimer = json.dumps("Official alerts.in.ua data").encode()
+        payloads = (
+            duplicate_root_alerts_payload(),
+            b'{"alerts":[' + duplicate_id_alert + b"]}",
+            (
+                b'{"alerts":'
+                + encoded_alerts
+                + b',"meta":{"last_updated_at":'
+                + timestamp
+                + b',"last_updated_at":"must-not-leak"},"disclaimer":'
+                + disclaimer
+                + b"}"
+            ),
+            (
+                b'{"alerts":'
+                + encoded_alerts
+                + b',"meta":{"last_updated_at":'
+                + timestamp
+                + b',"provider_ok":true,"provider_ok":false},"disclaimer":'
+                + disclaimer
+                + b"}"
+            ),
+            (
+                b'{"alerts":'
+                + encoded_alerts
+                + b',"meta":{"last_updated_at":'
+                + timestamp
+                + b',"nested":{"private_flag":true,"private_flag":false}},'
+                + b'"disclaimer":'
+                + disclaimer
+                + b"}"
+            ),
+        )
+
+        for payload in payloads:
+            with self.subTest(payload_length=len(payload)):
+                result = await adapter(Transport(raw_response(payload))).fetch(
+                    fetch_revision=1,
+                    last_modified=None,
+                )
+                self.assertIsNotNone(result.failure)
+                self.assertEqual("json_object_keys_duplicate", result.diagnostic_code)
+                self.assertEqual(1, result.diagnostic_count)
+                summary = result.sanitized_failure()
+                self.assertEqual(
+                    "kind=INVALID_RESPONSE code=json_object_keys_duplicate count=1",
+                    summary,
+                )
+                assert summary is not None
+                self.assertNotIn("alerts", summary)
+                self.assertNotIn("last_updated_at", summary)
+                self.assertNotIn("provider_ok", summary)
+                self.assertNotIn("private_flag", summary)
+                self.assertNotIn("must-not-leak", summary)
+
+    async def test_excessively_deep_raw_json_is_redacted_invalid_response(self):
+        result = await adapter(
+            Transport(raw_response(deeply_nested_metadata_payload()))
+        ).fetch(fetch_revision=1, last_modified=None)
+
+        self.assertIsNotNone(result.failure)
+        self.assertEqual("json_depth_unprocessable", result.diagnostic_code)
+        self.assertEqual(1, result.diagnostic_count)
+        self.assertEqual(
+            "kind=INVALID_RESPONSE code=json_depth_unprocessable count=1",
+            result.sanitized_failure(),
+        )
 
     async def test_marker_regression_and_same_marker_changed_content_are_invalid(self):
         regression_provider = adapter(
@@ -555,6 +787,85 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.clock += 15
             await self.worker(
                 Transport(response(200, invalid_empty, **{"Last-Modified": marker}))
+            ).run_once()
+            self.assertEqual(
+                AlertState.STALE,
+                (await self.repo.snapshot_for("student-1")).state,
+            )
+
+        self.assertFalse(
+            any(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await self.repo.outbox()
+            )
+        )
+
+    async def test_invalid_additional_metadata_after_active_is_stale_never_clear(self):
+        await self.worker(
+            Transport(
+                response(
+                    200,
+                    official_envelope(),
+                    **{"Last-Modified": MARKER_1},
+                )
+            )
+        ).run_once()
+        invalid_empty = official_envelope(
+            {"alerts": []},
+            meta={
+                "last_updated_at": META_TIMESTAMP,
+                "private_depth": {"two": {"three": {"four": {"five": "invalid"}}}},
+            },
+        )
+
+        for marker in (MARKER_2, MARKER_3):
+            self.clock += 15
+            await self.worker(
+                Transport(response(200, invalid_empty, **{"Last-Modified": marker}))
+            ).run_once()
+            self.assertEqual(
+                AlertState.STALE,
+                (await self.repo.snapshot_for("student-1")).state,
+            )
+
+        self.assertFalse(
+            any(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await self.repo.outbox()
+            )
+        )
+
+    async def test_duplicate_root_alerts_after_active_never_clear(self):
+        await self.worker(
+            Transport(response(200, active(), **{"Last-Modified": MARKER_1}))
+        ).run_once()
+
+        for marker in (MARKER_2, MARKER_3):
+            self.clock += 15
+            await self.worker(
+                Transport(raw_response(duplicate_root_alerts_payload(), marker))
+            ).run_once()
+            self.assertEqual(
+                AlertState.STALE,
+                (await self.repo.snapshot_for("student-1")).state,
+            )
+
+        self.assertFalse(
+            any(
+                item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                for item in await self.repo.outbox()
+            )
+        )
+
+    async def test_excessively_deep_raw_json_after_active_never_clear(self):
+        await self.worker(
+            Transport(response(200, active(), **{"Last-Modified": MARKER_1}))
+        ).run_once()
+
+        for marker in (MARKER_2, MARKER_3):
+            self.clock += 15
+            await self.worker(
+                Transport(raw_response(deeply_nested_metadata_payload(), marker))
             ).run_once()
             self.assertEqual(
                 AlertState.STALE,

@@ -1,6 +1,6 @@
 # External source register
 
-Updated: 2026-09-27. Only the user-approved alerts.in.ua service is permitted for
+Updated: 2026-09-28. Only the user-approved alerts.in.ua service is permitted for
 production alert decisions.
 
 ## Official active-alert full snapshot
@@ -25,12 +25,24 @@ the whole snapshot. Both `red` and `yellow` `air_raid` rows are ACTIVE.
 
 Two explicit official root variants are accepted: the documentation example
 containing only `alerts`, and the official SDK envelope containing exactly
-`alerts`, `meta` and `disclaimer`. In the envelope, `meta` contains exactly the
-SDK-consumed `last_updated_at` timestamp in `%Y/%m/%d %H:%M:%S %z` format and
-`disclaimer` is a bounded string. Partial envelopes, unknown root or metadata
-fields, malformed timestamps and invalid disclaimers invalidate the entire
-snapshot. Metadata is never used to infer ACTIVE or CLEAR; it is validation and
-content-digest input only.
+`alerts`, `meta` and `disclaimer`. In the envelope, `meta` must contain the
+SDK-consumed `last_updated_at` timestamp in `%Y/%m/%d %H:%M:%S %z` format. RC8
+also accepts at most eight additional metadata fields under a bounded
+compatibility policy: lowercase ASCII snake-case keys of at most 64 characters,
+no normalized spelling conflict with `last_updated_at`, at most three nested
+container levels, 32 elements per container, 128 total extra-value nodes, 2,048
+characters per string or nested object key, signed 64-bit integers, finite
+floats, and at most 32,768 canonical UTF-8 bytes across all extras. Supported
+values are JSON scalars, lists and objects. The `disclaimer` remains a bounded
+string.
+
+Additional metadata is digest-only: its canonical form participates in content
+identity but cannot infer or alter ACTIVE or CLEAR. Duplicate JSON object keys at
+the root or any nested level, JSON too deep for safe parsing, a metadata bound or
+type violation, partial envelopes, unknown root fields, malformed timestamps and
+invalid disclaimers invalidate the entire snapshot. These failures use bounded,
+redacted diagnostics and move affected alert state to `UNKNOWN`/`STALE`; they
+never synthesize `CLEAR_CONFIRMED`.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful
