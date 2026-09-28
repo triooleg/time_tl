@@ -35,6 +35,7 @@ from time_tl.infrastructure.db.models import (
     AlertScope,
     AlertSnapshot,
     OutboxMessage,
+    RuntimeSetting,
     TerritoryCatalogVersion,
     User,
 )
@@ -802,7 +803,7 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
             update_id="e2e-active-1",
             fetch_revision=active_revision,
             kind=ProviderSnapshotKind.FULL_200,
-            covered_region_ids=frozenset({"14"}),
+            covered_region_ids=frozenset({"14", "1401", "140101"}),
             active_episodes=(episode,),
             fetched_at=base,
             is_complete=True,
@@ -825,7 +826,7 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
             update_id="e2e-clear-candidate",
             fetch_revision=active_revision + 1,
             kind=ProviderSnapshotKind.FULL_200,
-            covered_region_ids=frozenset({"14"}),
+            covered_region_ids=frozenset({"14", "1401", "140101"}),
             active_episodes=(),
             fetched_at=worker_now - timedelta(seconds=10),
             is_complete=True,
@@ -842,7 +843,7 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
             update_id="e2e-clear-confirmed",
             fetch_revision=active_revision + 2,
             kind=ProviderSnapshotKind.FULL_200,
-            covered_region_ids=frozenset({"14"}),
+            covered_region_ids=frozenset({"14", "1401", "140101"}),
             active_episodes=(),
             fetched_at=worker_now,
             is_complete=True,
@@ -863,7 +864,7 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
             update_id="e2e-realert-must-rollback",
             fetch_revision=active_revision + 3,
             kind=ProviderSnapshotKind.FULL_200,
-            covered_region_ids=frozenset({"14"}),
+            covered_region_ids=frozenset({"14", "1401", "140101"}),
             active_episodes=(AlertEpisode("14", "AIR", "e2e-episode-2"),),
             fetched_at=worker_now + timedelta(seconds=1),
             is_complete=True,
@@ -1088,7 +1089,29 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
             "delete-race": ScheduleProfile("delete-race", "Delete race", active=True)
         }
         await accounts.save(target)
-        await accounts.get_or_create(other_chat_id)
+        other = await accounts.get_or_create(other_chat_id)
+        other.mode = BotNotificationMode.LESSONS
+        other.profiles = {
+            "config-race": ScheduleProfile("config-race", "Config race", active=True)
+        }
+        await accounts.save(other)
+
+        async with self.factory() as session:
+            async with session.begin():
+                session.add_all(
+                    (
+                        RuntimeSetting(
+                            key="owner_configuration_state",
+                            value={"active_revision": 1},
+                            updated_by="e2e",
+                        ),
+                        RuntimeSetting(
+                            key="owner_configuration_active",
+                            value={"revision": 1, "staging_allowlist": [target_chat_id]},
+                            updated_by="e2e",
+                        ),
+                    )
+                )
 
         async with self.factory() as session:
             async with session.begin():
@@ -1102,7 +1125,11 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
                     aggregate_type="schedule",
                     aggregate_id=str(target_row.id),
                     event_type="LESSON_REMINDER",
-                    payload={"lesson_title": "Race lesson", "profile_revision": 1},
+                    payload={
+                        "lesson_title": "Race lesson",
+                        "profile_revision": 1,
+                        "starts_at": (now + timedelta(minutes=5)).isoformat(),
+                    },
                     available_at=now,
                     claimed_at=now,
                 )
@@ -1111,7 +1138,11 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
                 message_id = str(outbox.id)
 
         repository = PostgresSenderRepository(
-            self.factory, stale_after_seconds=120, clock=lambda: now
+            self.factory,
+            stale_after_seconds=120,
+            expected_owner_config_revision=1,
+            expected_staging_allowlist=(target_chat_id,),
+            clock=lambda: now,
         )
         entered_transport = asyncio.Event()
         release_transport = asyncio.Event()
@@ -1132,14 +1163,81 @@ class PostgreSQLRestartFaultE2E(unittest.IsolatedAsyncioTestCase):
             )
         )
         await asyncio.wait_for(entered_transport.wait(), timeout=5)
+
+        async def activate_next_revision() -> None:
+            async with self.factory() as session:
+                async with session.begin():
+                    state = (
+                        await session.execute(
+                            select(RuntimeSetting)
+                            .where(RuntimeSetting.key == "owner_configuration_state")
+                            .with_for_update()
+                        )
+                    ).scalar_one()
+                    active = (
+                        await session.execute(
+                            select(RuntimeSetting)
+                            .where(RuntimeSetting.key == "owner_configuration_active")
+                            .with_for_update()
+                        )
+                    ).scalar_one()
+                    state.value = {"active_revision": 2}
+                    active.value = {
+                        "revision": 2,
+                        "staging_allowlist": [other_chat_id],
+                    }
+
+        activation_task = asyncio.create_task(activate_next_revision())
         delete_task = asyncio.create_task(accounts.delete_account(target_chat_id))
         await asyncio.sleep(0.05)
+        self.assertFalse(activation_task.done())
         self.assertFalse(delete_task.done())
         release_transport.set()
 
         self.assertTrue(await asyncio.wait_for(delivery_task, timeout=5))
+        await asyncio.wait_for(activation_task, timeout=5)
         self.assertTrue(await asyncio.wait_for(delete_task, timeout=5))
         self.assertEqual(sent, 1)
+
+        async with self.factory() as session:
+            async with session.begin():
+                other_row = (
+                    await session.execute(
+                        select(User).where(User.telegram_user_id == other_chat_id)
+                    )
+                ).scalar_one()
+                stale_sender_message = OutboxMessage(
+                    event_key="stale-config-reminder",
+                    aggregate_type="schedule",
+                    aggregate_id=str(other_row.id),
+                    event_type="LESSON_REMINDER",
+                    payload={
+                        "lesson_title": "Config race lesson",
+                        "profile_revision": 1,
+                        "starts_at": (now + timedelta(minutes=5)).isoformat(),
+                    },
+                    available_at=now,
+                    claimed_at=now,
+                )
+                session.add(stale_sender_message)
+                await session.flush()
+                stale_message_id = str(stale_sender_message.id)
+
+        stale_callback_called = False
+
+        async def stale_delivery() -> None:
+            nonlocal stale_callback_called
+            stale_callback_called = True
+
+        self.assertFalse(
+            await repository.deliver_if_authorized(
+                stale_message_id,
+                now,
+                stale_delivery,
+                expected_recipient=DeliveryRecipient(other_chat_id),
+            )
+        )
+        self.assertFalse(stale_callback_called)
 
         async with self.factory() as session:
             target_count = int(
