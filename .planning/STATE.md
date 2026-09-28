@@ -101,7 +101,8 @@ been performed.
 ## Session Continuity
 
 Last session: 2026-09-28
-Stopped at: The exact RC8 packet
+Stopped at: `EXTERNALLY BLOCKED` after the exact RC9 diagnostic deployment.
+The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
 `bb44f8aa79b8d52518f3e369367d8adc6a9667d95e66d8558ad792d918bf03fe`,
@@ -125,13 +126,15 @@ disablement cannot be claimed. No provider call or preflight occurred. Pending
 revision 9 is production-scoped and is blocked by the STAGING-only preflight;
 owner audit entries from the operation are zero.
 
-Current server status is `HOLD` only while the bot and all three workers remain
-stopped. G6-G9 were not advanced. Pending owner revision 10 now exists while
-ACTIVE revision remains 6. Its first read-only preflight failed with a generic
-result; no second preflight has been performed and activation remains blocked.
+Current server status remains `HOLD` only while the bot and all three workers
+remain stopped. G6-G9 were not advanced. Pending owner revision 10 exists while
+ACTIVE revision remains 6.
 
-A separate diagnostic-only RC9 local candidate is intended for tag
-`time-tl-staging-20260928-rc9-alert-field-diag`. The official API schema omits
+A separate diagnostic-only RC9 release was built from tag
+`time-tl-staging-20260928-rc9-alert-field-diag`, commit
+`fb4c64d96e740ddd811b88f35b36a1c3187c8312`, archive SHA-256
+`1e271f50c8fd20facfa8037252fd094ecf59e0688c546c1e43a104ea17519760`.
+The official API schema omits
 `calculated`, while the official Python SDK reads it without documenting its
 wire type or safety semantics. RC9 does not accept this field: a containing
 response remains `INVALID_RESPONSE` and fails closed. It adds only fixed opaque
@@ -141,7 +144,32 @@ field value for alert state.
 RC9 local evidence: 57 focused tests passed; the full suite passed 513 tests with
 five opt-in destructive PostgreSQL E2E skips and one Starlette warning; Ruff,
 strict mypy for 72 source files, compileall and diff checks passed. Independent
-safety review passed for the diagnostic-only scope. RC9 has not been deployed or
-used for a second preflight. Its local evidence does not authorize package
-transfer, activation, canary, bot or worker startup, or messages.
+safety review passed for the diagnostic-only scope. At completion of local
+verification, deployment remained separately gated; local evidence did not
+itself authorize package transfer, activation, canary, bot or worker startup, or
+messages.
+
+The exact RC9 archive was subsequently authorized, transferred and verified on
+the server with the same SHA-256. Immutable image prefix
+`sha256:fea4ff501b87` was built. `admin-web` now runs that image, is healthy and
+returned HTTP 200. RC9 `bot` and all three workers are `Created` with zero
+`StartedAt` values; they were never started. Database revision remains
+`0006_outbox_terminal_retention`; no migration ran. Owner state remains
+latest/pending revision 10 and ACTIVE revision 6.
+
+Exactly one RC9 diagnostic read-only preflight ran at `09:22:57Z` for pending
+revision 10. Telegram `getMe` passed; the provider made one
+`active.json` request and received HTTP 200, then failed closed as
+`INVALID_RESPONSE / alert_fields_unknown / count=1`. There was no retry,
+activation, message, or delivered outbox item. No raw provider response, unknown
+field name or value was retained in release evidence.
+
+Fresh rollback backup
+`/home/trio/time-tl-bot/backups/pre-rc9-alert-field-diag-20260928T092016Z`
+and the RC8/RC7 images are retained. Independent review rejected raw or hashed
+unknown-field diagnostics because they could disclose or make a provider field
+re-identifiable. The release is therefore `EXTERNALLY BLOCKED` pending an
+authoritative provider schema update or a provider-supplied sanitized response
+sample. Activation, bot/workers, messages and all-clear processing remain
+blocked; G6-G9 are not advanced.
 Resume file: none.

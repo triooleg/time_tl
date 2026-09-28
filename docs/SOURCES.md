@@ -54,6 +54,15 @@ The RC9 change is diagnostic-only and emits only a fixed opaque category for the
 observed value (`null`, `boolean` or `other`); it does not treat the value as alert
 state, accept the row, or expose the value itself in diagnostics.
 
+The one authorized RC9 server preflight on 2026-09-28 received HTTP 200 from
+`active.json` but failed closed as `alert_fields_unknown / count=1`; the unknown
+field was not `calculated`. Raw-name and hash-based field discovery were rejected
+by independent safety review because provider-controlled information could be
+disclosed or made re-identifiable. Live source integration is therefore
+`EXTERNALLY BLOCKED` pending an authoritative provider schema update or a
+provider-supplied sanitized response sample. The unknown response is not accepted
+as a snapshot and cannot advance alert or all-clear state.
+
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful
 observations without an applicable episode before `CLEAR_CONFIRMED`. A valid

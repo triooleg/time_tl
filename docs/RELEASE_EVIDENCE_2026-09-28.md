@@ -1,13 +1,13 @@
-# Time TL RC8 incident and RC9 local-candidate evidence — 2026-09-28
+# Time TL RC8 incident and RC9 diagnostic deployment evidence — 2026-09-28
 
 ## Scope
 
-This record covers both the local RC8 provider-envelope compatibility candidate
-and the subsequently authorized, bounded server operation for that exact packet.
-It records local non-destructive verification, independent safety review and the
-actual server outcome, including a breach of the approved Telegram-disablement
-boundary. It is not evidence of a successful deployment, Telegram staging,
-canary or production readiness.
+This record covers the RC8 provider-envelope compatibility release, its bounded
+server operation, and the later exact RC9 diagnostic-only deployment. It records
+local non-destructive verification, independent safety reviews and the actual
+server outcomes, including the RC8 breach of the approved Telegram-disablement
+boundary and the contained RC9 read-only diagnostic. It is not evidence of
+Telegram staging, canary or production readiness.
 
 The authorized packet was:
 
@@ -117,11 +117,17 @@ separately reviewable:
 
 Neither step authorizes activation, canary, workers, bot startup or messages.
 
-## RC9 diagnostic-only local candidate
+## RC9 diagnostic-only release
 
-RC9 is a separate local candidate intended for the tag
-`time-tl-staging-20260928-rc9-alert-field-diag`. It does not change or supersede
-the RC8 deployment verdict, server containment requirements or gate state.
+RC9 is a separate diagnostic release. Its exact identity is:
+
+- tag: `time-tl-staging-20260928-rc9-alert-field-diag`;
+- commit: `fb4c64d96e740ddd811b88f35b36a1c3187c8312`;
+- archive SHA-256:
+  `1e271f50c8fd20facfa8037252fd094ecf59e0688c546c1e43a104ea17519760`.
+
+It does not change or supersede the RC8 deployment verdict, server containment
+requirements or gate state.
 
 The current official API schema omits the alert-row field `calculated`. The
 official Python SDK reads it, but neither its wire type nor its safety semantics
@@ -146,17 +152,51 @@ recording or exposing the value itself.
 
 The warning and skips retain the same boundary as RC8: one Starlette deprecation
 warning and five opt-in destructive PostgreSQL E2E tests not enabled for this
-run. This evidence is local only. RC9 has not been packaged as an approved exact
-artifact, deployed, used for another preflight or activated.
+run. This table is LOCAL evidence only; the separately authorized server action
+and its evidence are recorded below.
 
-### Current server boundary after RC9 local verification
+### Exact RC9 server operation
 
-The server remains in the contained RC8 `HOLD` state: RC8 `admin-web` is healthy,
-while `bot`, `alert-worker`, `schedule-worker` and `sender-worker` are stopped.
-ACTIVE owner revision remains 6 and the current pending revision is 10. The first
-read-only preflight for that pending revision failed with a generic result; it is
-not a passing provider or Telegram check. No second preflight has been performed.
+The exact archive transfer, server-side SHA-256 verification, immutable image
+build, `admin-web` replacement, stopped `bot` creation and one diagnostic
+read-only preflight were explicitly authorized. Activation, bot or worker start,
+and message delivery were expressly excluded.
 
-Activation remains blocked. G6-G9 are not advanced. RC9 local tests and safety
-review do not authorize package transfer, image replacement, a second preflight,
-activation, canary, bot or worker startup, or messages.
+The server archive SHA-256 matched the approved value. The immutable RC9 image
+has prefix `sha256:fea4ff501b87`. The unchanged Compose file remained in use.
+After the operation:
+
+- `admin-web` runs RC9, is healthy, has restart count zero and returned HTTP 200;
+- `bot`, `alert-worker`, `schedule-worker` and `sender-worker` are `Created` with
+  zero `StartedAt` values and were never started;
+- PostgreSQL remains at `0006_outbox_terminal_retention`; no migration ran;
+- owner configuration remains latest revision 10, pending revision 10 and ACTIVE
+  revision 6; revision 10 has zero activation audit entries.
+
+Exactly one RC9 diagnostic read-only preflight ran at `09:22:57Z` for pending
+revision 10. Telegram `getMe` passed. The official provider made exactly one
+`active.json` request and returned HTTP 200, after which RC9 failed closed with
+the bounded result `INVALID_RESPONSE / alert_fields_unknown / count=1`. The
+response did not match RC9's `calculated` diagnostic category. No retry,
+activation, message, delivered outbox item, raw response, unknown field name or
+unknown value was recorded.
+
+A fresh rollback backup is retained at
+`/home/trio/time-tl-bot/backups/pre-rc9-alert-field-diag-20260928T092016Z`.
+The RC8 and RC7 images also remain available for rollback.
+
+### Current verdict and external blocker
+
+The server remains in `HOLD`. Independent safety review accepted the contained
+state only while `bot` and all three workers remain stopped, and rejected both
+raw-name and hash-based diagnostics for the unknown provider field because they
+could disclose or make provider-controlled information re-identifiable. Such a
+diagnostic must not be added merely to force schema discovery.
+
+RC9 is `EXTERNALLY BLOCKED` pending either an authoritative provider schema
+update that defines the live field or a provider-supplied sanitized response
+sample suitable for review. The HTTP 200 is transport evidence, not a valid
+alert snapshot and not an all-clear. Activation remains blocked. G6-G9 are not
+advanced; there was no canary, bot/worker execution or message delivery.
+
+No further preflight is authorized by this record.
