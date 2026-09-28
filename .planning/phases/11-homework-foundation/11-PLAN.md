@@ -1,6 +1,6 @@
 ---
 phase: 11-homework-foundation
-status: local_pass_production_hold
+status: code_gate_pass_release_packaging_pending
 scope: local_only
 ---
 
@@ -55,9 +55,18 @@ phase. Shared schedules and homework notifications are also deferred.
 ## Result
 
 - LOCAL code verdict: PASS after independent safety review.
-- Final local checks: 679 passed, 6 PostgreSQL E2E skipped; Ruff, strict mypy for 76
-  source files, compileall, Alembic head, and diff-check passed.
-- Production/public verdict: HOLD. The updated destructive PostgreSQL migration harness must
-  run against an isolated database before an exact-version release can be prepared.
+- Isolated PostgreSQL 17.11 verdict: PASS. All 6 protected destructive restart/fault tests ran
+  against the disposable `time_tl_e2e` database, including
+  `0007 -> 0008 -> 0007 -> 0008`; the temporary server was then stopped and removed.
+- The real PostgreSQL run found and closed a 63-byte identifier-limit defect in the draft
+  confirmation foreign key. A schema regression test now compiles the table with the
+  PostgreSQL dialect and enforces the identifier limit.
+- Final local checks after the fix: 679 passed, 6 environment-gated PostgreSQL E2E skipped in
+  the ordinary suite; Ruff, strict mypy for 76 source files, compileall, and diff-check passed.
+- Independent safety re-review: PASS. The alert and outbox paths were unchanged.
+- Production/public verdict: HOLD until a new exact artifact/commit/tag/hash and attestation
+  with `migration_head=0008` are prepared and the approved migration, preflight, and canary
+  gates pass. Any persistent database already stamped `0008` must be inspected before reuse
+  because Alembic would not rerun an edited historical revision.
 - No server, Compose, production database, worker, alert state, outbox, or Telegram delivery
   was changed during this phase.

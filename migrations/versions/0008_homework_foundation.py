@@ -222,7 +222,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["confirmed_homework_id"],
             ["homework_assignments.id"],
-            name="fk_pending_homework_drafts_confirmed_homework_id_homework_assignments",
+            name="fk_pending_homework_confirmed_assignment",
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(

@@ -55,6 +55,15 @@ def test_draft_persists_only_token_hash_and_has_bounded_active_index() -> None:
         fk for fk in table.foreign_key_constraints if "confirmed_homework_id" in fk.column_keys
     )
     assert confirmed_fk.ondelete == "CASCADE"
+    assert confirmed_fk.name == "fk_pending_homework_confirmed_assignment"
+    # PostgreSQL rejects identifiers longer than 63 bytes.  Compile the full
+    # table here so generated constraint names cannot hide behind SQLite tests.
+    ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
+    assert "fk_pending_homework_confirmed_assignment" in ddl
+    assert all(
+        constraint.name is None or len(constraint.name.encode("utf-8")) <= 63
+        for constraint in table.constraints
+    )
 
 
 def test_manual_only_source_constraint_has_no_excluded_integrations() -> None:

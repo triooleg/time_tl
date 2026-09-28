@@ -270,7 +270,12 @@ class PendingHomeworkDraft(TimestampMixin, Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     confirmed_homework_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("homework_assignments.id", ondelete="CASCADE"), unique=True
+        ForeignKey(
+            "homework_assignments.id",
+            name="fk_pending_homework_confirmed_assignment",
+            ondelete="CASCADE",
+        ),
+        unique=True,
     )
     __table_args__ = (
         ForeignKeyConstraint(
