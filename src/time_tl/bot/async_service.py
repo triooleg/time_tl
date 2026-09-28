@@ -195,6 +195,7 @@ class AsyncTelegramApplication:
         region_confirmation: AsyncRegionConfirmationPort | None = None,
         territory_catalog: AsyncTerritoryCatalog | None = None,
         allow_process_local_imports: bool = True,
+        coordinate_suggestions_enabled: bool = False,
         onboarding_text: str = "",
         process_state_max_users: int = 256,
         process_state_ttl_seconds: float = 900.0,
@@ -219,6 +220,7 @@ class AsyncTelegramApplication:
             repository=self._memory,
             import_sessions=import_sessions,
             allow_in_memory_import_sessions=allow_process_local_imports,
+            coordinate_suggestions_enabled=coordinate_suggestions_enabled,
             process_state_max_users=process_state_max_users,
             process_state_ttl_seconds=process_state_ttl_seconds,
             process_state_clock=process_state_clock,
@@ -337,7 +339,9 @@ class AsyncTelegramApplication:
 
     async def submit_location(self, user_id: int, latitude: float, longitude: float) -> View:
         # The wrapped service retains only a Region candidate, never coordinates.
-        return await self._app.submit_location(user_id, latitude, longitude)
+        async with self._user_lock(user_id):
+            await self._hydrate(user_id)
+            return await self._app.submit_location(user_id, latitude, longitude)
 
     def list_regions(self) -> View:
         return self._app.list_regions()

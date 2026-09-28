@@ -59,7 +59,10 @@ class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.repo = InMemoryAccountRepository()
         self.resolver = FakeResolver(self.kyiv)
         self.app = TelegramApplication(
-            regions=(self.kyiv, self.lviv), resolver=self.resolver, repository=self.repo
+            regions=(self.kyiv, self.lviv),
+            resolver=self.resolver,
+            repository=self.repo,
+            coordinate_suggestions_enabled=True,
         )
 
     async def _onboard(self, user_id: int = 1) -> None:
@@ -73,24 +76,49 @@ class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
         callbacks = [button.callback_data for row in view.rows for button in row]
         self.assertEqual(callbacks, ["mode:lessons", "mode:lessons_and_sirens", "mode:sirens"])
 
-    def test_region_prompt_is_manual_only_without_location_request(self) -> None:
+    def test_region_prompt_offers_location_and_command_free_manual_fallback(self) -> None:
         view = self.app.choose_mode(6, NotificationMode.SIRENS)
         buttons = [button for row in view.rows for button in row]
         self.assertIn("вручну", view.text)
-        self.assertEqual(["region:list"], [button.callback_data for button in buttons])
-        self.assertFalse(any(button.request_location for button in buttons))
+        self.assertIn("не зберігається", view.text)
+        self.assertEqual(
+            ["📍 Надіслати геолокацію", "🗺 Обрати вручну"],
+            [button.label for button in buttons],
+        )
+        self.assertTrue(buttons[0].request_location)
+        self.assertTrue(all(button.callback_data is None for button in buttons))
 
-    async def test_location_is_rejected_without_resolution_or_coordinate_storage(self) -> None:
+    async def test_location_suggests_region_without_coordinate_storage_and_requires_confirmation(
+        self,
+    ) -> None:
         self.app.choose_mode(7, NotificationMode.SIRENS)
         view = await self.app.submit_location(7, 49.8397, 24.0297)
-        self.assertIn("не використовується", view.text)
-        self.assertIn("вручну", view.text)
-        self.assertEqual([], self.resolver.calls)
+        self.assertIn("не збережено", view.text)
+        self.assertIn("Підтвердьте регіон: м. Київ", view.text)
+        self.assertEqual([(49.8397, 24.0297)], self.resolver.calls)
         account = self.repo.accounts[7]
         self.assertIsNone(account.region_id)
-        self.assertNotIn(7, self.app._pending_regions)
+        self.assertEqual(self.kyiv, self.app._pending_regions[7])
         self.assertNotIn("latitude", vars(account))
         self.assertNotIn("longitude", vars(account))
+        self.app.confirm_region(7, confirmed=True)
+        self.assertEqual("31", account.region_id)
+
+    async def test_location_capability_is_fail_closed_by_default(self) -> None:
+        resolver = FakeResolver(self.kyiv)
+        app = TelegramApplication(
+            regions=(self.kyiv,),
+            resolver=resolver,
+            repository=InMemoryAccountRepository(),
+        )
+
+        prompt = app.choose_mode(12, NotificationMode.SIRENS)
+        self.assertFalse(any(button.request_location for row in prompt.rows for button in row))
+        response = await app.submit_location(12, 49.8397, 24.0297)
+
+        self.assertIn("ще не підтримується", response.text)
+        self.assertEqual([], resolver.calls)
+        self.assertIsNone(app.repository.get_or_create(12).region_id)
 
     def test_manual_region_requires_confirmation_and_can_be_rejected(self) -> None:
         self.app.propose_manual_region(3, "46")
@@ -335,6 +363,41 @@ class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Активовано", result.text)
         self.assertTrue(self.repo.accounts[1].profiles[second].active)
         self.assertFalse(self.repo.accounts[1].profiles[first].active)
+
+    async def test_activation_preview_labels_breaks_and_free_windows(self) -> None:
+        await self._onboard()
+        self.app.create_profile(1, "Основний")
+        candidate = self.app.create_profile(1, "З проміжками")
+        for weekday in range(7):
+            self.app.add_lesson(
+                1,
+                candidate,
+                weekday=weekday,
+                start=time(9),
+                end=time(9, 45),
+                title="Перший",
+            )
+            self.app.add_lesson(
+                1,
+                candidate,
+                weekday=weekday,
+                start=time(10),
+                end=time(10, 15),
+                title="Другий",
+            )
+            self.app.add_lesson(
+                1,
+                candidate,
+                weekday=weekday,
+                start=time(11),
+                end=time(11, 15),
+                title="Третій",
+            )
+
+        _, preview = self.app.request_activation(1, candidate)
+
+        self.assertIn("перерва 15 хв", preview.text)
+        self.assertIn("вільне вікно 45 хв", preview.text)
 
     async def test_import_shows_metadata_and_creates_independent_copy(self) -> None:
         await self._onboard()

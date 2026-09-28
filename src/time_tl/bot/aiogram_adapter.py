@@ -115,7 +115,28 @@ def build_router(application: TelegramApplication) -> Any:
 
 
 async def _answer(message: Any, view: View) -> None:
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    from aiogram.types import (
+        InlineKeyboardButton,
+        InlineKeyboardMarkup,
+        KeyboardButton,
+        ReplyKeyboardMarkup,
+    )
+
+    reply_rows = [
+        [KeyboardButton(text=b.label, request_location=b.request_location) for b in row]
+        for row in view.rows
+        if any(b.request_location or b.callback_data is None for b in row)
+    ]
+    if reply_rows:
+        await message.answer(
+            view.text,
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=reply_rows,
+                resize_keyboard=True,
+                one_time_keyboard=True,
+            ),
+        )
+        return
 
     rows = [
         [
@@ -133,6 +154,9 @@ async def _answer(message: Any, view: View) -> None:
 async def _edit(callback: Any, view: View) -> None:
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+    reply_rows = [
+        row for row in view.rows if any(b.request_location or b.callback_data is None for b in row)
+    ]
     rows = [
         [
             InlineKeyboardButton(text=b.label, callback_data=b.callback_data)
@@ -145,6 +169,26 @@ async def _edit(callback: Any, view: View) -> None:
     markup = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
     if callback.message is not None:
         await callback.message.edit_text(view.text, reply_markup=markup)
+        if reply_rows:
+            # Reply-keyboard buttons cannot be attached to editMessageText.
+            # Send the keyboard as a short follow-up after preserving the
+            # explanatory and safety text in the edited message.
+            from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+
+            await callback.message.answer(
+                "Оберіть спосіб нижче:",
+                reply_markup=ReplyKeyboardMarkup(
+                    keyboard=[
+                        [
+                            KeyboardButton(text=b.label, request_location=b.request_location)
+                            for b in row
+                        ]
+                        for row in reply_rows
+                    ],
+                    resize_keyboard=True,
+                    one_time_keyboard=True,
+                ),
+            )
     await callback.answer()
 
 

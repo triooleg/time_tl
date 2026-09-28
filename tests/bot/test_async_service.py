@@ -135,7 +135,10 @@ class AsyncTelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.repo.accounts[1] = UserAccount(1)
         self.resolver = Resolver(self.kyiv)
         self.app = AsyncTelegramApplication(
-            regions=(self.kyiv, self.lviv), resolver=self.resolver, repository=self.repo
+            regions=(self.kyiv, self.lviv),
+            resolver=self.resolver,
+            repository=self.repo,
+            coordinate_suggestions_enabled=True,
         )
 
     async def onboard(self, user_id: int = 1) -> None:
@@ -456,20 +459,41 @@ class AsyncTelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_unresolved_or_unsupported_geo_never_guesses_or_persists_coordinates(
         self,
     ) -> None:
+        await self.app.start(7)
         self.resolver.result = None
         view = await self.app.submit_location(7, 1.25, 2.5)
-        self.assertIn("не використовується", view.text)
+        self.assertIn("Не вдалося", view.text)
         self.assertIn("вручну", view.text)
-        self.assertNotIn(7, self.repo.accounts)
+        self.assertIn(7, self.repo.accounts)
         self.assertNotIn(7, self.app._app._pending_regions)
 
         self.resolver.result = Region("unknown", "Невідомий")
         view = await self.app.submit_location(7, 3.5, 4.5)
         self.assertIn("вручну", view.text)
-        self.assertEqual([], self.resolver.calls)
-        self.assertNotIn(7, self.repo.accounts)
+        self.assertEqual([(1.25, 2.5), (3.5, 4.5)], self.resolver.calls)
+        self.assertIsNone(self.repo.accounts[7].region_id)
         self.assertNotIn("latitude", repr(self.app.__dict__))
         self.assertNotIn("longitude", repr(self.app.__dict__))
+
+    async def test_geo_suggestion_requires_confirmation_and_persists_only_region(self) -> None:
+        await self.app.start(8)
+        await self.app.choose_mode(8, NotificationMode.LESSONS_AND_SIRENS)
+        view = await self.app.submit_location(8, 50.4501, 30.5234)
+        self.assertIn("не збережено", view.text)
+        self.assertIn("Підтвердьте регіон", view.text)
+        self.assertIsNone(self.repo.accounts[8].region_id)
+        self.assertEqual(self.kyiv, self.app._app._pending_regions[8])
+
+        rejected = await self.app.confirm_region(8, confirmed=False)
+        self.assertIn("вручну", rejected.text)
+        self.assertIsNone(self.repo.accounts[8].region_id)
+
+        await self.app.submit_location(8, 50.4501, 30.5234)
+        confirmed = await self.app.confirm_region(8, confirmed=True)
+        self.assertIn("Налаштування завершено", confirmed.text)
+        self.assertEqual("31", self.repo.accounts[8].region_id)
+        self.assertNotIn("50.4501", repr(self.repo.accounts[8]))
+        self.assertNotIn("30.5234", repr(self.repo.accounts[8]))
 
     async def test_confirmed_region_invokes_atomic_scope_coordinator(self) -> None:
         coordinator = RegionConfirmationRecorder()

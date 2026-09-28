@@ -199,6 +199,7 @@ class TelegramApplication:
         repository: AccountRepository | None = None,
         import_sessions: ImportSessionRepository | None = None,
         allow_in_memory_import_sessions: bool = True,
+        coordinate_suggestions_enabled: bool = False,
         process_state_max_users: int = 256,
         process_state_ttl_seconds: float = 900.0,
         process_state_clock: Callable[[], float] = monotonic,
@@ -206,6 +207,7 @@ class TelegramApplication:
         self.regions = tuple(regions)
         self._region_by_id = {item.region_id: item for item in regions}
         self.resolver = resolver
+        self.coordinate_suggestions_enabled = coordinate_suggestions_enabled
         self.repository = repository or InMemoryAccountRepository()
         if import_sessions is not None:
             selected_import_sessions = import_sessions
@@ -276,16 +278,56 @@ class TelegramApplication:
         return self.menu(user_id) if account.region_id else self.region_prompt()
 
     def region_prompt(self) -> View:
+        if not self.coordinate_suggestions_enabled:
+            return View(
+                "Оберіть область, район і громаду вручну. Геолокація стане доступною "
+                "лише після окремої перевірки безпечного визначення території.\n\n"
+                "⚠️ Бот є допоміжним. Завжди виконуйте офіційні вказівки та прямуйте "
+                "до укриття.",
+                ((Button("🗺 Обрати територію", "region:list"),),),
+            )
         return View(
-            "Оберіть територію вручну. Бот не запитує та не обробляє геолокацію.",
-            ((Button("🗺 Обрати територію", "region:list"),),),
+            "Оберіть спосіб визначення території. Геолокація потрібна лише для "
+            "одноразової пропозиції та не зберігається. Запропоновану територію "
+            "потрібно підтвердити. Також завжди можна обрати область, район і "
+            "громаду вручну.\n\n"
+            "⚠️ Бот є допоміжним. Завжди виконуйте офіційні вказівки та прямуйте "
+            "до укриття.",
+            (
+                (Button("📍 Надіслати геолокацію", request_location=True),),
+                (Button("🗺 Обрати вручну"),),
+            ),
         )
 
     async def submit_location(self, user_id: int, latitude: float, longitude: float) -> View:
-        del user_id, latitude, longitude
+        # Coordinates are deliberately scoped to this await. They are never
+        # copied into account or pending state, nor included in user-visible
+        # errors where they could later reach logs.
+        if not self.coordinate_suggestions_enabled:
+            return View(
+                "Геолокація ще не підтримується. Оберіть область, район і громаду "
+                "вручну. Налаштування не змінено.",
+                ((Button("🗺 Обрати територію", "region:list"),),),
+            )
+        try:
+            candidate = await self.resolver.resolve(latitude, longitude)
+        except (LookupError, RuntimeError, TimeoutError):
+            candidate = None
+        if candidate is None or candidate.region_id not in self._region_by_id:
+            return View(
+                "Не вдалося безпечно визначити підтримувану територію. "
+                "Оберіть область, район і громаду вручну. Налаштування не змінено.\n\n"
+                "⚠️ Бот є допоміжним. Завжди виконуйте офіційні вказівки.",
+                ((Button("🗺 Обрати територію", "region:list"),),),
+            )
+        self.repository.get_or_create(user_id)
+        canonical = self._region_by_id[candidate.region_id]
+        self._pending_regions[user_id] = canonical
+        confirmation = self._region_confirmation(canonical)
         return View(
-            "Геолокація не використовується. Оберіть область, район і громаду вручну.",
-            ((Button("🗺 Обрати територію", "region:list"),),),
+            "Геолокацію оброблено одноразово й не збережено.\n\n"
+            + confirmation.text,
+            confirmation.rows,
         )
 
     def list_regions(self) -> View:
@@ -768,7 +810,9 @@ class TelegramApplication:
             ]
             if len(enabled) > len(visible):
                 labels.append(f"ще {len(enabled) - len(visible)}")
-            result.append(f"• {item.day:%d.%m}: {', '.join(labels) or 'вихідний'}")
+            gaps = TelegramApplication._gap_preview(item)
+            suffix = f"; {gaps}" if gaps else ""
+            result.append(f"• {item.day:%d.%m}: {', '.join(labels) or 'вихідний'}{suffix}")
         return tuple(result)
 
     def revoke_import_preview(self, user_id: int, token: str) -> None:
@@ -848,8 +892,18 @@ class TelegramApplication:
                 ", ".join(f"{lesson.start:%H:%M} {lesson.title}" for lesson in enabled)
                 or "вихідний"
             )
-            result.append(f"• {day:%d.%m}: {label}")
+            gaps = TelegramApplication._gap_preview(item)
+            suffix = f"; {gaps}" if gaps else ""
+            result.append(f"• {day:%d.%m}: {label}{suffix}")
         return tuple(result)
+
+    @staticmethod
+    def _gap_preview(day: ResolvedDay) -> str:
+        labels = []
+        for gap in day.gaps:
+            kind = "перерва" if gap.kind.value == "BREAK" else "вільне вікно"
+            labels.append(f"{kind} {gap.minutes} хв")
+        return ", ".join(labels)
 
     @staticmethod
     def _mode_rows() -> tuple[tuple[Button, ...], ...]:
