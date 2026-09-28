@@ -299,7 +299,6 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 changed(location_type="unknown"),
                 changed(started_at="2026-09-20T10:00:00"),
                 changed(updated_at="not-a-timestamp"),
-                changed(undocumented="schema-drift"),
             )
         )
         duplicate = active()
@@ -335,68 +334,83 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(invalid=alert_id), self.assertRaises(ValueError):
                 provider._parse_active_payload(json.dumps(active(alert_id)).encode())
 
-    async def test_invalid_snapshot_reports_only_redacted_taxonomy(self):
+    async def test_bounded_undocumented_alert_fields_are_discarded_and_not_digested(self):
         payload = active()
         payload["alerts"][0]["provider_private_field"] = "must-not-leak"
-        payload["alerts"][0]["another_private_field"] = "also-must-not-leak"
-        result = await adapter(
-            Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
-        ).fetch(fetch_revision=1, last_modified=None)
+        second_row = dict(payload["alerts"][0])
+        second_row.update(id=11, alert_type="chemical")
+        second_row["provider_private_field"] = {"same_key": "different-private-value"}
+        payload["alerts"].append(second_row)
+        changed = active()
+        changed["alerts"][0]["provider_private_field"] = {"nested": [False, None]}
+        changed_second_row = dict(changed["alerts"][0])
+        changed_second_row.update(id=11, alert_type="chemical")
+        changed_second_row["provider_private_field"] = "changed-secret"
+        changed["alerts"].append(changed_second_row)
+        provider = adapter(Transport())
 
-        self.assertIsNotNone(result.failure)
-        self.assertEqual("alert_fields_unknown", result.diagnostic_code)
-        self.assertEqual(2, result.diagnostic_count)
-        summary = result.sanitized_failure()
-        self.assertEqual(
-            "kind=INVALID_RESPONSE code=alert_fields_unknown count=2",
-            summary,
+        episodes, digest = provider._parse_active_payload(json.dumps(payload).encode())
+        changed_episodes, changed_digest = provider._parse_active_payload(
+            json.dumps(changed).encode()
         )
-        assert summary is not None
-        self.assertNotIn("provider_private_field", summary)
-        self.assertNotIn("must-not-leak", summary)
-        self.assertNotIn("1903", summary)
 
-    async def test_diagnostic_only_alert_field_categories_never_create_snapshot(self):
+        self.assertEqual(episodes, changed_episodes)
+        self.assertEqual(digest, changed_digest)
+        self.assertEqual(("10",), tuple(item.episode_id for item in episodes))
+
+    async def test_undocumented_alert_fields_are_structurally_bounded(self):
+        too_many = active()
+        too_many["alerts"][0].update(
+            {
+                f"private_{index}": index
+                for index in range(AlertsInUaAdapter.MAX_ALERT_EXTRA_FIELDS + 1)
+            }
+        )
+        oversized_key = active()
+        oversized_key["alerts"][0]["x" * 65] = "must-not-leak"
+        too_deep = active()
+        too_deep["alerts"][0]["provider_data"] = {
+            "two": {"three": {"four": {"five": "must-not-leak"}}}
+        }
+        inconsistent = active()
+        inconsistent["alerts"][0]["provider_data"] = None
+        inconsistent_second_row = dict(inconsistent["alerts"][0])
+        inconsistent_second_row["id"] = 11
+        del inconsistent_second_row["provider_data"]
+        inconsistent_second_row["different_provider_data"] = None
+        inconsistent["alerts"].append(inconsistent_second_row)
         samples = (
-            (None, "alert_schema_probe_a_null"),
-            (True, "alert_schema_probe_a_boolean"),
-            ("private-value-must-not-leak", "alert_schema_probe_a_other"),
+            (too_many, "alert_extra_fields_limit"),
+            (oversized_key, "alert_extra_key_invalid"),
+            (too_deep, "alert_extra_value_invalid"),
+            (inconsistent, "alert_extra_key_inconsistent"),
         )
 
-        for value, code in samples:
+        for payload, code in samples:
             with self.subTest(code=code):
-                payload = active()
-                payload["alerts"][0]["calculated"] = value
                 result = await adapter(
                     Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
                 ).fetch(fetch_revision=1, last_modified=None)
-
                 self.assertIsNone(result.snapshot)
-                self.assertIsNotNone(result.failure)
                 self.assertEqual(code, result.diagnostic_code)
-                self.assertEqual(1, result.diagnostic_count)
                 summary = result.sanitized_failure()
                 assert summary is not None
-                self.assertNotIn("calculated", summary)
-                self.assertNotIn("private-value-must-not-leak", summary)
-                self.assertNotIn("1903", summary)
-                self.assertNotIn("secret-not-logged", summary)
+                self.assertNotIn("provider_data", summary)
+                self.assertNotIn("must-not-leak", summary)
 
-    async def test_diagnostic_only_field_with_another_unknown_stays_generic(self):
-        payload = active()
-        payload["alerts"][0]["calculated"] = None
-        payload["alerts"][0]["private_provider_field"] = "must-not-leak"
+    async def test_ignored_field_cannot_mask_malformed_documented_field(self):
+        payload = active(alert_level="green")
+        payload["alerts"][0]["undocumented_provider_data"] = "must-not-leak"
+
         result = await adapter(
             Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
         ).fetch(fetch_revision=1, last_modified=None)
 
         self.assertIsNone(result.snapshot)
-        self.assertEqual("alert_fields_unknown", result.diagnostic_code)
-        self.assertEqual(2, result.diagnostic_count)
+        self.assertEqual("alert_level_enum_invalid", result.diagnostic_code)
         summary = result.sanitized_failure()
         assert summary is not None
-        self.assertNotIn("calculated", summary)
-        self.assertNotIn("private_provider_field", summary)
+        self.assertNotIn("undocumented_provider_data", summary)
         self.assertNotIn("must-not-leak", summary)
 
     async def test_unknown_uid_diagnostic_never_exposes_uid(self):
@@ -689,23 +703,23 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         changed = await changed_provider.fetch(fetch_revision=2, last_modified=MARKER_1)
         self.assertIsNotNone(changed.failure)
 
-    async def test_diagnostic_only_field_failure_does_not_replace_validated_baseline(self):
+    async def test_ignored_alert_field_does_not_change_validated_content_digest(self):
         candidate = active()
         candidate["alerts"][0]["calculated"] = False
         transport = Transport(
             response(200, active(), **{"Last-Modified": MARKER_1}),
-            response(200, candidate, **{"Last-Modified": MARKER_2}),
+            response(200, candidate, **{"Last-Modified": MARKER_1}),
             response(304),
         )
         provider = adapter(transport)
 
         baseline = await provider.fetch(fetch_revision=1, last_modified=None)
-        rejected = await provider.fetch(fetch_revision=2, last_modified=MARKER_1)
+        ignored = await provider.fetch(fetch_revision=2, last_modified=MARKER_1)
         unchanged = await provider.fetch(fetch_revision=3, last_modified=MARKER_1)
 
         self.assertIsNotNone(baseline.snapshot)
-        self.assertIsNone(rejected.snapshot)
-        self.assertEqual("alert_schema_probe_a_boolean", rejected.diagnostic_code)
+        self.assertIsNotNone(ignored.snapshot)
+        self.assertIsNone(ignored.failure)
         self.assertIsNotNone(unchanged.snapshot)
         assert unchanged.snapshot is not None
         self.assertEqual("NOT_MODIFIED_304", unchanged.snapshot.kind.value)
@@ -901,38 +915,71 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_diagnostic_only_alert_field_after_active_never_clears_or_delivers(self):
-        candidate_null = active()
-        candidate_null["alerts"][0]["calculated"] = None
-        candidate_boolean = active()
-        candidate_boolean["alerts"][0]["calculated"] = True
+    async def test_ignored_field_on_non_air_row_cannot_bypass_two_observation_clear(self):
+        no_applicable_alert = active(alert_type="chemical")
+        no_applicable_alert["alerts"][0]["undocumented_provider_data"] = {"private": True}
+        second_no_applicable_alert = active(alert_type="chemical")
+        second_no_applicable_alert["alerts"][0]["undocumented_provider_data"] = {"private": False}
         transport = Transport(
             response(200, active(), **{"Last-Modified": MARKER_1}),
-            response(200, candidate_null, **{"Last-Modified": MARKER_2}),
-            response(200, candidate_boolean, **{"Last-Modified": MARKER_3}),
+            response(200, no_applicable_alert, **{"Last-Modified": MARKER_2}),
+            response(200, second_no_applicable_alert, **{"Last-Modified": MARKER_3}),
         )
         worker = self.worker(transport)
 
         await worker.run_once()
-        initial_outbox = await self.repo.outbox()
-        self.assertEqual(1, len(initial_outbox))
-
-        for _ in range(2):
-            self.clock += 15
-            await worker.run_once()
-            self.assertEqual(
-                AlertState.STALE,
-                (await self.repo.snapshot_for("student-1")).state,
-            )
-
-        outbox = await self.repo.outbox()
-        self.assertEqual(initial_outbox, outbox)
+        self.clock += 15
+        await worker.run_once()
+        self.assertEqual(
+            AlertState.STALE,
+            (await self.repo.snapshot_for("student-1")).state,
+        )
         self.assertFalse(
             any(
                 item.transition_kind is TransitionKind.ALL_CLEAR_CONFIRMED
-                for item in outbox
+                for item in await self.repo.outbox()
             )
         )
+
+        self.clock += 15
+        await worker.run_once()
+        self.assertEqual(
+            AlertState.CLEAR_CONFIRMED,
+            (await self.repo.snapshot_for("student-1")).state,
+        )
+        outbox = await self.repo.outbox()
+        self.assertFalse(
+            any("undocumented" in repr(item) or "private" in repr(item) for item in outbox)
+        )
+
+    async def test_ignored_field_cannot_suppress_parent_or_child_alerts(self):
+        scope = RegionScope.from_hierarchy(
+            "1803",
+            ancestors=("16",),
+            descendants=("1903",),
+        )
+
+        for uid, location_type in (("16", "oblast"), ("1903", "hromada")):
+            with self.subTest(uid=uid):
+                payload = active(uid=uid, location_type=location_type)
+                payload["alerts"][0]["undocumented_provider_data"] = {"must_not_affect_state": True}
+                repository = InMemoryAlertRepository([("student", scope)])
+                worker = AlertWorker(
+                    provider=adapter(
+                        Transport(response(200, payload, **{"Last-Modified": MARKER_1}))
+                    ),
+                    repository=repository,
+                    lease=InMemorySingletonLease(),
+                    monotonic=lambda: self.clock,
+                    jitter=lambda a, b: 7.0,
+                )
+
+                await worker.run_once()
+
+                self.assertEqual(
+                    AlertState.ACTIVE,
+                    (await repository.snapshot_for("student")).state,
+                )
 
     async def test_duplicate_root_alerts_after_active_never_clear(self):
         await self.worker(

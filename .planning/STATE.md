@@ -101,7 +101,8 @@ been performed.
 ## Session Continuity
 
 Last session: 2026-09-28
-Stopped at: `EXTERNALLY BLOCKED` after the exact RC9 diagnostic deployment.
+Stopped at: local RC10 compatibility candidate `REVIEW`; it is not packaged or
+deployed. The server remains on the contained RC9 `HOLD` state.
 The earlier exact RC8 packet
 `time-tl-staging-20260928-rc8-bounded-meta`, commit
 `eeca2f8fb80a2d6d8890dbd268799e470f460c82`, archive SHA-256
@@ -168,8 +169,40 @@ Fresh rollback backup
 `/home/trio/time-tl-bot/backups/pre-rc9-alert-field-diag-20260928T092016Z`
 and the RC8/RC7 images are retained. Independent review rejected raw or hashed
 unknown-field diagnostics because they could disclose or make a provider field
-re-identifiable. The release is therefore `EXTERNALLY BLOCKED` pending an
-authoritative provider schema update or a provider-supplied sanitized response
-sample. Activation, bot/workers, messages and all-clear processing remain
-blocked; G6-G9 are not advanced.
+re-identifiable.
+
+The user subsequently directed that an undocumented alert-row field must not be
+used. A narrow RC10 local candidate implements that decision without learning,
+logging or interpreting the field. It may discard at most one undocumented key
+per alert row, requires the same undocumented key wherever an extra key is
+present in the snapshot, and applies the existing bounded JSON value limits plus
+a 32,768-byte per-row serialized limit. The key and value are excluded from the
+canonical digest, alert episodes, state, diagnostics, logs and persistence.
+Documented alert fields remain strict. Invalid documented data, more than one
+extra key, inconsistent extra keys or an out-of-bounds extra value still reject
+the complete snapshot. Existing hierarchy handling and the two-successful-
+observation all-clear rule remain in force.
+
+RC10 local evidence: 58 focused tests passed; the full suite passed 514 tests
+with five opt-in destructive PostgreSQL E2E skips and one Starlette warning.
+Ruff, strict mypy for 72 source files, compileall and diff checks passed. The
+checkout source path was explicitly pinned through `PYTHONPATH` because a stale
+editable-install `.pth` entry otherwise resolved another checkout. That local
+editable entry was then corrected to `D:\Projects\Time_tl_RC8\src`, and an
+unpinned focused rerun passed 58 tests from the current checkout. Independent
+safety review passed the code-only compatibility scope. This is LOCAL evidence
+only: no exact RC10 tag, commit, archive or image has been established, and RC10
+has not been transferred, installed or run on the server.
+
+The reported public admin HTTP 403 was transient and could not be reproduced:
+the public `/login` request and the backend endpoint both returned HTTP 200 in
+the current read-only check. No proxy, access-control or application setting was
+changed, so this is current reachability evidence rather than proof of a repaired
+root cause.
+
+Current server truth remains RC9: `admin-web` is healthy; ACTIVE owner revision
+is 6 and pending revision is 10; `bot` and all workers remain stopped. Activation,
+startup, messages and another live preflight remain blocked until an exact RC10
+package, deployment scope and preflight are separately approved. G6-G9 are not
+advanced.
 Resume file: none.

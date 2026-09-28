@@ -153,7 +153,7 @@ async def test_probe_rejects_malformed_last_modified_marker() -> None:
 
 
 @pytest.mark.asyncio
-async def test_probe_reports_unknown_field_count_without_field_or_body_values() -> None:
+async def test_probe_ignores_bounded_undocumented_field_without_exposing_it() -> None:
     payload = json.loads(full_body())
     payload["alerts"][0]["private_provider_field"] = "must-not-leak"
 
@@ -165,24 +165,23 @@ async def test_probe_reports_unknown_field_count_without_field_or_body_values() 
                 json.dumps(payload).encode(),
             )
 
-    with pytest.raises(OperatorPreflightError, match="full-snapshot") as captured:
-        await probe_candidate(
-            candidate(),
-            123,
-            bot_factory=FakeBot,
-            transport_factory=DriftTransport,
-        )
+    evidence = await probe_candidate(
+        candidate(),
+        123,
+        bot_factory=FakeBot,
+        transport_factory=DriftTransport,
+    )
 
-    message = str(captured.value)
-    assert "kind=INVALID_RESPONSE code=alert_fields_unknown count=1" in message
-    assert "private_provider_field" not in message
-    assert "must-not-leak" not in message
-    assert "telegram-secret" not in message
-    assert "alerts-secret" not in message
+    summary = evidence.sanitized_summary()
+    assert "alerts=active_json_full_200" in summary
+    assert "private_provider_field" not in summary
+    assert "must-not-leak" not in summary
+    assert "telegram-secret" not in summary
+    assert "alerts-secret" not in summary
 
 
 @pytest.mark.asyncio
-async def test_probe_keeps_diagnostic_only_alert_field_fail_closed_and_redacted() -> None:
+async def test_probe_does_not_use_previously_diagnostic_only_alert_field() -> None:
     payload = json.loads(full_body())
     payload["alerts"][0]["calculated"] = "private-value-must-not-leak"
 
@@ -194,21 +193,20 @@ async def test_probe_keeps_diagnostic_only_alert_field_fail_closed_and_redacted(
                 json.dumps(payload).encode(),
             )
 
-    with pytest.raises(OperatorPreflightError, match="full-snapshot") as captured:
-        await probe_candidate(
-            candidate(),
-            123,
-            bot_factory=FakeBot,
-            transport_factory=DiagnosticCandidateTransport,
-        )
+    evidence = await probe_candidate(
+        candidate(),
+        123,
+        bot_factory=FakeBot,
+        transport_factory=DiagnosticCandidateTransport,
+    )
 
-    message = str(captured.value)
-    assert "kind=INVALID_RESPONSE code=alert_schema_probe_a_other count=1" in message
-    assert "calculated" not in message
-    assert "private-value-must-not-leak" not in message
-    assert "123" not in message
-    assert "telegram-secret" not in message
-    assert "alerts-secret" not in message
+    summary = evidence.sanitized_summary()
+    assert "alerts=active_json_full_200" in summary
+    assert "calculated" not in summary
+    assert "private-value-must-not-leak" not in summary
+    assert "123" not in summary
+    assert "telegram-secret" not in summary
+    assert "alerts-secret" not in summary
 
 
 @pytest.mark.asyncio

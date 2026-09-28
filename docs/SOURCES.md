@@ -58,10 +58,26 @@ The one authorized RC9 server preflight on 2026-09-28 received HTTP 200 from
 `active.json` but failed closed as `alert_fields_unknown / count=1`; the unknown
 field was not `calculated`. Raw-name and hash-based field discovery were rejected
 by independent safety review because provider-controlled information could be
-disclosed or made re-identifiable. Live source integration is therefore
-`EXTERNALLY BLOCKED` pending an authoritative provider schema update or a
-provider-supplied sanitized response sample. The unknown response is not accepted
-as a snapshot and cannot advance alert or all-clear state.
+disclosed or made re-identifiable. RC9 remains the deployed server version and
+did not accept that response as a snapshot or advance alert or all-clear state.
+
+The user then explicitly directed that an undocumented alert-row field must not
+be used. The independently reviewed RC10 local compatibility candidate therefore
+does not identify, interpret or retain it. A snapshot may contain at most one
+undocumented key per alert row, and every row that contains an undocumented key
+must use the same key. Its value must satisfy the existing bounded JSON structure
+rules and a 32,768-byte per-row serialized bound. The undocumented key and value
+are discarded before content digest calculation and cannot enter alert episodes,
+state, diagnostics, logs or persistence.
+
+This tolerance does not weaken the documented contract: required and optional
+documented fields, enums, UIDs, timestamps, threats and row uniqueness remain
+strictly validated. More than one undocumented key, different undocumented keys
+across rows, or an invalid or oversized undocumented value rejects the complete
+snapshot. Parent/child ACTIVE applicability and the two-successful-observation
+requirement for `CLEAR_CONFIRMED` are unchanged. RC10 currently has LOCAL
+code-and-test evidence only; it is not packaged, deployed or authorized for
+another live preflight.
 
 A validated empty `alerts` list is a complete observation. It does not bypass the
 state machine: an existing ACTIVE scope still needs two consecutive successful

@@ -1,9 +1,10 @@
-# Time TL RC8 incident and RC9 diagnostic deployment evidence — 2026-09-28
+# Time TL RC8 incident, RC9 deployment and RC10 local evidence — 2026-09-28
 
 ## Scope
 
 This record covers the RC8 provider-envelope compatibility release, its bounded
-server operation, and the later exact RC9 diagnostic-only deployment. It records
+server operation, the later exact RC9 diagnostic-only deployment, and the RC10
+local compatibility candidate. It records
 local non-destructive verification, independent safety reviews and the actual
 server outcomes, including the RC8 breach of the approved Telegram-disablement
 boundary and the contained RC9 read-only diagnostic. It is not evidence of
@@ -185,7 +186,7 @@ A fresh rollback backup is retained at
 `/home/trio/time-tl-bot/backups/pre-rc9-alert-field-diag-20260928T092016Z`.
 The RC8 and RC7 images also remain available for rollback.
 
-### Current verdict and external blocker
+### RC9 verdict before the RC10 compatibility decision
 
 The server remains in `HOLD`. Independent safety review accepted the contained
 state only while `bot` and all three workers remain stopped, and rejected both
@@ -193,10 +194,72 @@ raw-name and hash-based diagnostics for the unknown provider field because they
 could disclose or make provider-controlled information re-identifiable. Such a
 diagnostic must not be added merely to force schema discovery.
 
-RC9 is `EXTERNALLY BLOCKED` pending either an authoritative provider schema
-update that defines the live field or a provider-supplied sanitized response
-sample suitable for review. The HTTP 200 is transport evidence, not a valid
-alert snapshot and not an all-clear. Activation remains blocked. G6-G9 are not
-advanced; there was no canary, bot/worker execution or message delivery.
+At that point RC9 was `EXTERNALLY BLOCKED` pending either an authoritative
+provider schema update that defined the live field or a provider-supplied
+sanitized response sample suitable for review. The later user decision and RC10
+local candidate are recorded below; they do not retroactively make the RC9
+response valid. Its HTTP 200 was transport evidence, not a valid alert snapshot
+and not an all-clear. Activation remains blocked. G6-G9 are not advanced; there
+was no canary, bot/worker execution or message delivery.
 
 No further preflight is authorized by this record.
+
+## RC10 local compatibility candidate
+
+After RC9 established that the live extra alert-row field was not the SDK's
+`calculated` field, the user directed that an undocumented field must not be
+used. RC10 is a narrow local candidate implementing that decision. It does not
+identify, interpret or retain the provider-controlled key or value.
+
+The compatibility boundary is:
+
+- at most one undocumented key is tolerated per alert row;
+- all rows that contain an undocumented key must use the same key;
+- the value is limited by the existing bounded JSON type, depth, node, container,
+  string and numeric rules, plus a 32,768-byte per-row serialized maximum;
+- the undocumented key and value are removed before canonical digest generation
+  and cannot enter alert episodes, state, diagnostics, logs or persistence;
+- every documented field remains strictly validated, including required fields,
+  types, enums, UID/catalogue relationships, timestamps and threat rows;
+- inconsistent keys, multiple extra keys or structurally invalid extra values
+  reject the complete snapshot through the existing fail-closed path;
+- parent/child hierarchy applicability and the two-successful-observation
+  requirement before `CLEAR_CONFIRMED` are preserved.
+
+### RC10 local verification
+
+| Environment | Check | Result |
+|---|---|---|
+| LOCAL | Focused provider and preflight regressions | `58 passed` |
+| LOCAL | Full suite with this checkout explicitly pinned through `PYTHONPATH` | `514 passed, 5 skipped, 1 warning` |
+| LOCAL | Ruff | `PASS` |
+| LOCAL | strict mypy | `PASS`; 72 source files checked |
+| LOCAL | `compileall` | `PASS` |
+| LOCAL | `git diff --check` | `PASS` |
+| LOCAL REVIEW | Independent safety review of the code-only RC10 scope | `PASS` |
+
+The explicit source-path pin was necessary because a stale editable-install
+`.pth` entry otherwise resolved a different checkout. The local editable entry
+was then corrected to `D:\Projects\Time_tl_RC8\src`; an unpinned focused rerun
+resolved the current source and passed 58 tests. The warning remains the
+Starlette deprecation warning, and the five skipped tests remain opt-in
+destructive PostgreSQL E2E cases. RC10 has no exact release tag, commit, archive
+hash or immutable image yet. It has not been transferred, installed or executed
+on the server; this table must not be represented as server or staging evidence.
+
+### Current server and admin evidence
+
+The server remains on RC9 `HOLD`: owner revision 6 is ACTIVE, revision 10 is
+pending, and `bot`, `alert-worker`, `schedule-worker` and `sender-worker` remain
+stopped. No RC10 preflight, activation, bot/worker start or message delivery has
+occurred.
+
+The user-reported public admin HTTP 403 was transient and was not reproduced by
+the current read-only diagnosis: both the public `/login` route and its backend
+endpoint returned HTTP 200. No proxy, access-control or application mutation was
+made, so the cause of the screenshot's earlier 403 is not established and no
+repair claim is made.
+
+RC10 remains `REVIEW` as a LOCAL candidate. An exact package identity and
+separate deployment/preflight approval are required before any server change.
+G6-G9 remain unadvanced.

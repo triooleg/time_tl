@@ -144,6 +144,8 @@ class AlertsInUaAdapter:
     MAX_META_EXTRA_NODES = 128
     MAX_META_EXTRA_STRING_CHARS = 2_048
     MAX_META_EXTRA_SERIALIZED_BYTES = 32_768
+    MAX_ALERT_EXTRA_FIELDS = 1
+    MAX_ALERT_EXTRA_SERIALIZED_BYTES = 32_768
 
     _BARE_ROOT_FIELDS = frozenset({"alerts"})
     _ENVELOPE_ROOT_FIELDS = frozenset({"alerts", "meta", "disclaimer"})
@@ -210,7 +212,6 @@ class AlertsInUaAdapter:
             "threats",
         }
     )
-    _DIAGNOSTIC_ONLY_ALERT_FIELDS = frozenset({"calculated"})
     _REQUIRED_THREAT_FIELDS = frozenset({"threat_type", "level", "started_at"})
     _ALLOWED_THREAT_FIELDS = _REQUIRED_THREAT_FIELDS | frozenset({"source_message"})
 
@@ -419,7 +420,9 @@ class AlertsInUaAdapter:
         if not isinstance(alerts, list):
             raise SnapshotValidationError("alerts_field_type_invalid")
         parsed: list[AlertEpisode] = []
+        canonical_alerts: list[dict[str, object]] = []
         alert_ids: set[int] = set()
+        ignored_alert_extra_key: str | None = None
         for item in alerts:
             if not isinstance(item, dict):
                 raise SnapshotValidationError("alert_row_type_invalid")
@@ -431,19 +434,11 @@ class AlertsInUaAdapter:
                 )
             unknown_fields = keys - self._ALLOWED_ALERT_FIELDS
             if unknown_fields:
-                if unknown_fields == self._DIAGNOSTIC_ONLY_ALERT_FIELDS:
-                    candidate_value = item["calculated"]
-                    if candidate_value is None:
-                        diagnostic_code = "alert_schema_probe_a_null"
-                    elif isinstance(candidate_value, bool):
-                        diagnostic_code = "alert_schema_probe_a_boolean"
-                    else:
-                        diagnostic_code = "alert_schema_probe_a_other"
-                    raise SnapshotValidationError(diagnostic_code)
-                raise SnapshotValidationError(
-                    "alert_fields_unknown",
-                    len(unknown_fields),
-                )
+                extra_key = self._validate_ignored_alert_extras(item, unknown_fields)
+                if ignored_alert_extra_key is None:
+                    ignored_alert_extra_key = extra_key
+                elif extra_key != ignored_alert_extra_key:
+                    raise SnapshotValidationError("alert_extra_key_inconsistent")
 
             alert_id = item["id"]
             if (
@@ -505,15 +500,61 @@ class AlertsInUaAdapter:
             if alert_type == "air_raid":
                 # Both documented red and yellow levels represent an active air raid.
                 parsed.append(AlertEpisode(location_uid, alert_type, str(alert_id)))
+            canonical_alerts.append(
+                {key: item[key] for key in self._ALLOWED_ALERT_FIELDS if key in item}
+            )
         if len(parsed) != len(set(parsed)):
             raise SnapshotValidationError("alert_episode_duplicate")
+        canonical_root = dict(root)
+        canonical_root["alerts"] = canonical_alerts
         canonical = json.dumps(
-            root,
+            canonical_root,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
         return tuple(sorted(parsed)), sha256(canonical).hexdigest()
+
+    @classmethod
+    def _validate_ignored_alert_extras(
+        cls,
+        item: Mapping[str, object],
+        extra_keys: frozenset[str],
+    ) -> str:
+        """Bound undocumented row data, then discard it without interpretation.
+
+        These fields are deliberately excluded from the canonical digest and
+        never leave this validation frame. Only generic structural limits are
+        enforced so provider-controlled names and values cannot enter state,
+        persistence, or diagnostics.
+        """
+
+        if len(extra_keys) > cls.MAX_ALERT_EXTRA_FIELDS:
+            raise SnapshotValidationError("alert_extra_fields_limit", len(extra_keys))
+        invalid_key_count = sum(len(key) > 64 for key in extra_keys)
+        if invalid_key_count:
+            raise SnapshotValidationError("alert_extra_key_invalid", invalid_key_count)
+
+        extra_nodes = [0]
+        try:
+            for key in sorted(extra_keys):
+                cls._validate_meta_extra_value(
+                    item[key],
+                    container_depth=0,
+                    nodes=extra_nodes,
+                )
+            encoded = json.dumps(
+                {key: item[key] for key in extra_keys},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except SnapshotValidationError as error:
+            raise SnapshotValidationError("alert_extra_value_invalid") from error
+        if len(encoded) > cls.MAX_ALERT_EXTRA_SERIALIZED_BYTES:
+            raise SnapshotValidationError("alert_extra_serialized_size")
+        return next(iter(extra_keys))
 
     @staticmethod
     def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
