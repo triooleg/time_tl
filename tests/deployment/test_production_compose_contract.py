@@ -43,6 +43,9 @@ def load_compose() -> dict[str, Any]:
 
 def test_base_staging_compose_is_byte_for_byte_unchanged() -> None:
     assert hashlib.sha256(STAGING_COMPOSE.read_bytes()).hexdigest() == STAGING_COMPOSE_SHA256
+    assert "docker-compose.yml text eol=lf" in (
+        ROOT / ".gitattributes"
+    ).read_text(encoding="utf-8").splitlines()
     assert "!.env.production.example" in (ROOT / ".gitignore").read_text(
         encoding="utf-8"
     ).splitlines()
