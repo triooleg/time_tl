@@ -1,5 +1,237 @@
 # Project state
 
+## Phase13-02 LOCAL/lab PASS; RC26 candidate — 2026-10-02 21:32 UTC / Oct03 00:32 Kyiv
+
+User requested implementation then deployment. Telegram calendar management/My Day,
+private export, bounded invitations/timeouts/CAS/confirmation and indexed hourly
+expired-token maintenance implemented, defaultOFF. Root full1354PASS/23SKIP;
+RuffallPASS/mypy82PASS. Independent437focusedPASS and frozen actual14-check PG lab
+PASS, head0009/31tables. Old retainedencrypted0008 restore28tables/3305rows andnew
+syntheticencrypted0009 restore31tables/73rows PASS, originalkeys/TLBK1 unchanged.
+
+RC26 frozenarchive ae0a715a6eeddd0e54bbcf45e3bb23b0ba2277e75087eb46a0f508a4a7da9e37;
+registrydigest sha256:5d0c094d90bf8c0940f94a5ca10b357ef2322cdfc9c2f339f51a7c63dcca4728.
+Signedcandidateprovenance, NOT runtimeattestation/newGitcommit/deployauthorization.
+Installed94files match. ProductionRC25 remainsrevision14/head0008 healthy, no new
+messages, migration/activation, Gitcommit/push, password/key/SSHconfig mutation.
+Temporarylabcontainer/network cleanupverifiedempty. Release REVIEW pendingexactG8,
+localreleasecommit/provenance, backup-lock/migration/newproduction0009backup,
+oneapprovedpreflight, independentPASS andallowlistedcanary. See13-02 verification
+anddocs/operations/RC26_RELEASE_PLAN.md. Personaloverrides/sharedhomework/roleUI next.
+
+## Phase13-01 foundation LOCAL PASS — 2026-10-02 20:58 UTC (23:58 Kyiv)
+
+Rootfullsuite1264PASS/23SKIP/1existingwarning; Ruffsrc/tests/scripts/migrationsPASS,
+mypy81filesPASS; static0009singlehead, no actualDBmigration. IndependentC13-S LOCAL
+PASS after218focusedtests+runtimeopt-in test. Findingsinvitationcoexistence/FKschema/
+indexoptions/SQLliteral-defaultsemantics fixed and rechecked. See13-01-VERIFICATION.
+Durablecalendarrepository/roles/invitations/CAS/hide/leave/delete anddefaultOFF MyDay
+readbridge implemented. TelegrammanagementUI andpersonaloverrides remain nextslices.
+RELEASE REVIEW: realdisposablePG migrations/concurrency/cascades +0009backup/restore
+unverified; deployedRC25verifierpins0008. No production/staging/Telegram/server/key/
+password/Git mutations. Next13-02-NEXT.md; fullphase13 not complete.
+
+## Phase13-01 started — 2026-10-02 20:37 UTC (23:37 Kyiv)
+
+User continued: "давай продолжай дальше". ADR0013 and13-01 plan record explicit
+calendars, targeted invitation preview/confirmation, role checks/CAS and privacy
+cascades. Domain/backend non-overlapping owners; independent read-only review.
+Root owns default-OFF CALENDARS_ENABLED and read bridge; no automatic conversion
+of old profiles or notification delivery integration. Local Docker/psql/postgres
+unavailable; real disposable-PG evidence remains required for release, not inferred
+from compiled DDL/mock tests. Production/staging, RC25, passwords/keys and Telegram
+untouched. No Git commit/push authorized/performed.
+
+## Phase12 local slice accepted — 2026-10-02 20:33 UTC (23:33 Kyiv)
+
+Calendar projection + default-off My Day read bridge implemented. Root fullsuite
+1086 PASS/22 explicitly skipped Linux/disposable-PostgreSQL fixtures; Ruff src/tests/
+scripts PASS, mypy79 sourcefiles PASS. Independent C12-04 LOCAL safety PASS after
+98 new-feature tests and133 legacy safety/simulation regressions. Real routed tests
+prove disabled /today,/now do not intercept homework text; optional read failures
+are unavailable, not zero. No alert/worker/outbox/schema changes; MY_DAY_ENABLED
+defaults false. No deploy, migration, server/password/key/message or Git mutations.
+See phases/12-calendar-day-projection/12-VERIFICATION.md. Next: phase13 persistent
+calendars, explicit memberships/roles/overrides; not implemented by phase12.
+
+## RC25 owner accepted; phase12 started — 2026-10-02 20:18 UTC (23:18 Kyiv)
+
+User: "1. проверил все работает. давай дальше". Existing-owner UI acceptance PASS
+by human report (login/backups/settings); not proof of production database restore.
+Phase12 IN_PROGRESS LOCAL: additive pure calendar projection and default-off My Day
+read bridge from existing active profile. ADR0012/context/plan recorded before code
+integration; memberships persistence remains phase13 pending. Production unchanged,
+no server/password/key/Telegram mutation. Prior RC25 receipts retained.
+
+## RC25 published — 2026-10-02 18:06:50 UTC (21:06:50 Kyiv)
+
+Exact approved admin-only image2edc installed; bounded handoff run678e0a2a18f244efbe8b276fa835d7d1 PASS.
+Final transport dfdb3e4f638fe4dd117f33d3ef05311a979d878dd0c6ef8ab279fba13d036f85;
+independent CODE/SIMULATION/path delta PASS, final45LOCALtestsPASS/1Linuxskip/RuffPASS.
+Original fourRC24 bot/worker IDs/images/restarts retained; newadmin5c996f37... healthy/restarts0.
+Active/applied revision14/head0008 unchanged. Monitor root/liba1bd andbackupf420 installed;
+allcron unchanged/config600/HOLDfalse/deadmanoutcomePASS/no temporaryRC25containers.
+Unattended pulse18:07:01 and18:08:01 withexactadminpin andcatalogue18:07:07→18:08:01.
+Ordinary6hbackup18:07:01→06.996 actualisolatedrestore28tables/schema0008/constraintsPASS/3305snapshotrows;
+artifactba1bef... SHA d5c1f34523157f795a07ba06ae8a82a4aa48fd552b8272f09674d47cab3e74d9.
+ALL7dayretention/5copies/deleted0, no persistentplaintext. Independent LIVEoperationalPASS.
+Publiclogin200/backups303login/api401 confirmsanonymousaccessprotection, NOTownerE2E.
+OwnerauthenticatedUI was REVIEW/PENDING at publication; accepted by human report above.
+No key/password changes, Telegramtestsends, productionrestore,
+workerrestart, migration/preflight/activation. FutureComposeMUSTretainRC25adminoverride.
+Evidence .release/time-tl-production-20261002-rc25-backup-admin/LIVE_PUBLICATION.md andpublicreceipts.
+
+## RC25 publication approved — 2026-10-02 17:41 UTC (20:41 Kyiv)
+
+Human exactG8 approval: "Публикуй RC25 по указанному пакету" referringRC25APPROVAL.md.
+Recordedtimeabove, not claimed exactsend timestamp. Publication IN_PROGRESS;
+boundedhandoff/deadman implementation/faulttests independent REVIEW beforeexecution.
+Onlyapprovedadmin2edc overlay andmonitora1bd/backupf420pins; retain4RC24roles/rev14.
+Fresh LIVE17:40healthPASS/original5IDs/restarts0/HOLDfalse/source/HB; publicloginHTTP200.
+Newbackup17:40:22→27 actualisolatedrestore28/schema0008/constraintsPASS/3306rows,
+SHA5f0fb19f392c50c67d941bf45ab313862f873f971bcb7d6496feaeb3db13158d,
+retention7/deleted0/no plaintext. No runtime replacement has occurred yet.
+No password/key/session reset, production restore, migrations, preflight, activation,
+newTelegrammessages or workerrestart authorized by this publication.
+
+## RC25 admin-only candidate — 2026-10-02 17:37 UTC (20:37 Kyiv)
+
+User requested admin publication. Prepared exact four-file overlay, NOT deployed.
+Archive5ea1d2e2561293bc7972f8e79466858873bd26c9a3344f0fd51e8a83a3b47ec4;
+immutable admin digest2edc2a0347b565ba49834d87a289b62f0b9f83c559c61db49af67301df55c9b0;
+imageIDbdabc05448d67c2c339174e5378d7e74ad9e12aec970919fd6d7c85785ab5377.
+New signed overlay separately binds original RC24 base and exact newfourfiles;
+rawSHAe1995a0a4eeaaa7fc7bde72a394362df4fd711d6cfcb9aa5b526ae855a1d1b21,
+signatureSHA2d822fd48d62bb6d5f7f72e167c106f0c5452fdf135484e06cc1e9e9c39488ba.
+Existing external release key only; no key/password rotation/secret transfer.
+New source commit/tag NOT created, base7c4d427... honestly labelled BASE only.
+Candidate CODE/SIMULATION/signature independent PASS; exactimage35authroute tests
+PASS/networknone/RAM/FakeRepo/syntheticowner/no prodDB/UUIDcleanup; fullsuite943PASS
+21skips/RuffPASS/mypy77filesPASS/Linuxhostbackup61PASS. New localmonitor exactadmin
+pin/roleimagevector/pulsebinding reviewed, not installed. Keep4RC24roles/revision14.
+Production17:37healthPASS: original5IDs/zero restarts/rev14/freshsource/HB/HOLDfalse.
+Publication BLOCKED atG8 exactapproval and implementation review of boundedhandoff/
+deadman (transport not authored yet); actualownerLIVEcanary required afterhand off.
+Exactapproval scope .release/time-tl-production-20261002-rc25-backup-admin/APPROVAL.md.
+No productionapp/host operationalcode/config/cron/env changes, restore or Telegramsend.
+
+## Weekly backup retention LIVE checkpoint — 2026-10-02 16:56 UTC
+
+After independent operational PASS, reviewed host-only transportSHA5c8ff734... installed
+backup source fb773c075b373c418c994feff255c27dae5822cb6aa1b463294ce0e3c3c8a1d9
+and host source bebea28d20ef9fa6ed554e31f09e1782395a0f2615268f097b1d950968e801c2.
+User policy ALL rolling7days active; current3verifiedcopies/deleted0. Newencrypted
+artifact90c1c027... SHA0fa5bdde87666a67d831813b3a34efda804a96e349a5f056aab90026aa08fa00
+actualrestorePASS28tables/schema0008/constraints3306snapshotrows. Guard16:54:20snapshot.
+Backup6hcron boundedlockwait1800s, controller nonblocking0-6,8-59 minutes, two monitor
+and unrelated cron preserved. Synthetic kernel lockbarrier/exec and exactcron rollback
+reviewPASS. Autonomous catalogue advanced16:55:01→16:56:01, source0444/catalogue0444.
+Live16:56:22healthPASS: fiveoriginalRC24IDs/restarts0/rev14/freshsource/HB14/pulse,
+HOLDfalse/isolatedrestorecontainers0/dead37/retry0/open0. Independent B25 LIVE PASS
+for hostoperations. No appimage/env/revision/keys/password changes or productionrestore.
+Owner UI/settings/restore selection remain LOCAL only, require next exactapprovedrelease
+and reviewed host/monitor identitypinmigration. No automaticproductionDB replacement.
+Next ordinary6hbackup18:07UTC has not yet been observed; prior unattendedB24canary passed.
+Monitoring/backups do not depend on PC; samehost-loss/offsite/portableDR gaps remain.
+
+## Backup administration checkpoint — 2026-10-02 16:48 UTC
+
+User explicitly confirmed ALL copies for rolling7days, not one weeklycopy.
+B25 new owner UI/catalogue/CAS/retention LOCAL independent CODE/test PASS.
+Fullpytest910PASS/21skips; Linuxbackup+host57PASS0skips; actual isolatedPG
+repository51PASS/rawpersistentpsql transport1PASS. Remaining old destructivePG
+E2E were not run against production. Ruff src/tests/deployment PASS; explicit
+mypy src/time_tl77filesPASS (bare configured package lookup lacks py.typed).
+Root final UI annotation-only fix verified24admin testsPASS/typechecksPASS.
+Host operational install/tick/cron transport independent review still required.
+New admin UI NOT published. ExactRC24 digest/revision14 host/monitor pins require
+separately reviewed identity migration when the next application release deploys.
+Live16:47healthPASS: originalfivecontainers/zero restarts/rev14/sourcefresh/HOLDfalse.
+No passwords/keys/appimage/revision changes, production restore or Telegram sends.
+
+## Current backup checkpoint — 2026-10-02 16:11 UTC (19:11 Kyiv)
+
+Automatic encrypted verified backups LIVE independent PASS. One final cron
+`7 */6 * * *` UTC/separateflock preserves bothmonitor jobs. Frozen source
+SHA23beeffd75893e09fc4672969b57226873751e481e3b39648baf992bf5ccf6da;
+Linux27 backup tests PASS. Manual16:05 and unattendedcron16:09 actualrestore
+28tables/schema0008/constraints/3305rows PASS from persisted encrypted artifacts.
+Guard uses16:09:01 snapshot-time AFTER validrestore/receipt. No keys/passwords/env/
+image/revision changed. Five originalRC24 roles healthy/zero restarts/revision14,
+fresh officialsource/HB/protectedpulse, HOLDfalse, isolatedrestorecontainers0.
+PC not required. OffrepoPC originalenv DPAPI escrow + one encryptedartifactmirror:
+recoveredkey authenticateddecrypt RAM PASS. Periodic offsite copy NOT configured.
+No automatic retention deletion yet; user now requests owner admin catalogue,
+restore selection and adjustable weekly retention (semantics asked asynchronously).
+G9 homework user canary remains pending. Earlier backupdeadline warnings superseded.
+Evidence RC24 BACKUP_EVENTS.jsonl; docs/operations/AUTOMATIC-BACKUPS.md.
+
+## Current live checkpoint — 2026-10-02 15:32 UTC (18:32 Kyiv)
+
+Monitoring migration to the SAME mini-server `192.168.31.219` is LIVE,
+independent review PASS for COLOCATED operation only. Collector and watchdog
+run in two separate every-minute cron jobs with separate locks. Old signed-pulse
+cron is removed; Windows RC23/RC24 tasks are Disabled and retained for rollback.
+Unattended pulses advanced at 15:31 and 15:32 UTC AFTER PC task disable at 15:30:31;
+HOLD absent. Five RC24 application roles healthy, zero restarts, active/applied
+revision 14 unchanged, official source fresh; public admin HTTP 200/Russian.
+The workstation may now be switched off. Complete mini-server failure and external
+reachability are NOT monitored independently. No credentials or private keys moved.
+Evidence: RC24 COHOST_EVENTS.jsonl; docs/operations/COLOCATED-MONITOR.md.
+
+Backup freshness guard remains 24 hours. No automatic backup job was installed.
+Current verified backup expires 2026-10-03 14:50:07 UTC (17:50 Kyiv); a new genuinely
+verified backup is required before then, otherwise monitoring safely enters HOLD.
+G9 homework user canary remains IN_PROGRESS; this migration does not prove it.
+All checkpoints below are historical and superseded by this entry.
+
+## Historical deployment checkpoint — 2026-10-02 14:57 UTC (17:57 Kyiv)
+
+RC24 is deployed in PRODUCTION with both homework fixes: FSM data creation and
+unique subject selection without schedule modification or assignment deletion.
+Commit `7c4d42784847e621e7e31af83903170b0c7ee0f4`, immutable digest
+`sha256:060e2ec4ce1e72cfe4984b6b0e790b14f93ccf82b1498958dd5d334a7c2ae391`,
+active revision 14, schema `0008_homework_foundation` (no migration needed).
+Exact user approval, independent installation/activation review, final encrypted
+backup + isolated restore of 28 tables, exactly one preflight and one activation
+are recorded in RC24 DEPLOY_EVENTS.jsonl. Source LOCAL 728 PASS/6 skipped.
+
+All five application roles healthy, zero restarts, four fresh worker heartbeats
+applied revision 14, official source fresh, singleton poller; STAGING remains off.
+Public admin login HTTP 200/Russian text. Sanitized bot log exception summary empty.
+Temporary Windows RC24 task has successful repeated runs; old RC23 task disabled.
+New signed-pulse watchdog PASS, HOLD false; independent startup stop timer safely
+cancelled only after new handoff passed. Passwords/tokens/signing keys unchanged.
+
+G9 IN_PROGRESS: real homework canary requested from existing operator account;
+user confirmation of no duplicates and successful save/edit/complete/delete is
+still pending. Do not equate healthy deployment with completed product E2E.
+Temporary monitoring requires this workstation awake and the operator logged in;
+loss of signed pulse causes server sender-first HOLD, never an all-clear.
+All checkpoints below are historical and superseded by this entry.
+
+## Superseding live checkpoint — 2026-10-02 14:24 UTC
+
+RC23 is deployed in PRODUCTION: digest
+`sha256:5661566f8d9c1536a4a950c8e521c88a6ea0e47b98996eeb27d443c0e8390238`,
+active revision 13, schema `0008_homework_foundation`. Final quiesced encrypted
+backup, migration, exactly one preflight and one activation are recorded in
+`.release/time-tl-production-20261002-rc23-homework-menu/DEPLOY_EVENTS.jsonl`.
+Independent review passed those stages, not full user acceptance.
+All five application roles are healthy with zero restarts; STAGING poller remains
+stopped. Public admin login returns HTTP 200 with Russian text. Temporary Windows
+monitor has a fresh 14:24 UTC successful run; server signed-pulse watchdog passes
+and HOLD is not latched. Passwords, tokens and signing keys were not changed.
+
+G9 remains BLOCKED: user confirmed /start/new menu, then reported homework text
+receives no response. Sanitized live logs show KeyError in receive_text, four
+failures. LOCAL assembled-dispatcher reproduction identifies missing subject_id
+after BoundedMemoryStorage.update_data before set_state. Fix is verified LOCAL:
+714 tests passed (6 destructive PostgreSQL cases skipped), independent CODE PASS
+with 75 rerun tests. No patched application image is deployed; new immutable
+release identity and real homework canary remain required.
+Earlier checkpoint sections below are historical and superseded by this entry.
+
 Baseline gate/state snapshot: 2026-09-23. Session continuity updated: 2026-09-28.
 This document separates verified local and server simulation evidence from
 Telegram staging and production evidence.
@@ -19,9 +251,39 @@ Telegram staging and production evidence.
   bot capability to a literal Compose value, and rejects runtime capability drift.
 - Local verification for that preparation: 99 focused tests and 682 full-suite tests
   passed; 6 destructive PostgreSQL cases remain environment-gated. Ruff, strict mypy
-  for 76 source files, compileall and diff-check passed. Independent safety review is
-  pending. No RC23 commit, tag, archive, image, attestation, production revision,
-  migration, preflight or deployment exists yet.
+  for 76 source files, compileall and diff-check passed. Independent source review
+  passed. RC23 source candidate is committed at `7206246abd84bd8dad4dd8e2afccafdf1dc790d3`
+  with tag `time-tl-production-20261002-rc23-homework-menu`; archive SHA-256 is
+  `baf4a4be401c46a470c3c545d5c2f5609d4301cc66731edb8d48b6a45e70087e`.
+- RC23 archive was transferred and checked on the server. Image was built and
+  pushed to the existing local registry, digest
+  `sha256:5661566f8d9c1536a4a950c8e521c88a6ea0e47b98996eeb27d443c0e8390238`.
+  Network-none image contract and dependency checks passed.
+- User approved RC23 deployment. The inspected mount still contains only the RC19
+  signed manifest (revision 12/head 0007); isolated RC23 validation rejects it as
+  `production release attestation has unexpected fields`. No external signer was
+  found in either user-specified project directory initially. The original external
+  release and monitoring keys have now been located and their public keys match
+  the compiled trust anchors. Fresh RC23 release signature is verified locally,
+  independently and in the exact network-none server image; monitoring signature
+  and continuous collector/HOLD path remain outstanding. Do not
+  rotate keys or bypass attestation. Key ACL inheritance remains enabled and key
+  recovery has not been independently verified.
+- A fresh DPAPI-encrypted production backup is retained off-host and as an encrypted
+  server copy with matching SHA-256. Isolated restore of 24 tables, upgrade
+  `0007→0008` and downgrade `0008→0007` passed with unchanged existing row counts.
+  Production remained writable, so take a final maintenance-point backup before a
+  real migration. Backup requires the same Windows account/workstation for recovery.
+- Sixteen development agent roles are registered in `.codex/config.toml` and
+  `.agents/team.toml`, with one primary orchestrator, bounded ownership and independent
+  review; independent team-configuration review and its validator passed. No production migration, preflight, activation or RC23 container replacement
+  has occurred. OCR and Moiashkola remain deferred.
+- Production pending revision 13 is now prepared with unchanged encrypted
+  credentials; active revision remains 12. Exact RC23 standalone Compose is
+  prepared but not installed. One direct monitoring-route message was delivered
+  only to the existing one-account operator allowlist. This does not prove the
+  threshold-triggered HOLD/notification path. Independent installation review is
+  BLOCKED until continuous off-host monitoring and that path are demonstrated.
 
 ## Implemented
 
@@ -150,11 +412,14 @@ services or sent a message. No production or canary deployment has occurred.
 ## Session Continuity
 
 Last session: 2026-10-02
-Stopped at: Local RC23 production-homework contract implemented and fully tested;
-independent safety review pending. Production remains unchanged on the older menu,
-and all STAGING application roles remain stopped after the shared-token conflict.
-Next action: resolve review findings, then create an exact RC23 commit/tag/archive
-packet for separate production deployment approval.
+Stopped at: RC23 image prepared; isolated encrypted backup/restore and migration
+rehearsal passed; development team expanded. Production remains on RC19/RC20/schema
+0007 and STAGING application roles stay stopped. Deployment is already authorized.
+Next action: establish the actual always-on off-host collector and prove its
+threshold → HOLD → sender-first stop → operator notification path. Release signing
+is complete and pending production revision is 13; active stays 12. Complete
+independent monitoring review before final maintenance backup, production migration,
+one preflight, activation and canary. Do not repeat the completed direct route test.
 
 Last session: 2026-09-28
 Stopped at: RC17 remains active in a bounded one-chat allowlisted STAGING launch.

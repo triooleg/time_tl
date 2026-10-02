@@ -26,6 +26,7 @@ from time_tl.entrypoints.operator_preflight import (
     OperatorPreflightEvidence,
     probe_candidate,
 )
+from time_tl.infrastructure.db.admin import BackupControlConflict
 
 from .app import (
     _CSS,
@@ -37,6 +38,7 @@ from .app import (
     _dashboard_html,
     _login_html,
 )
+from .backups import BackupCatalogue, BackupCatalogueUnavailable, backups_html, public_control
 from .metrics import HostMetricsCollector
 from .security import (
     PasswordPolicyError,
@@ -91,6 +93,28 @@ class AsyncAdminRepository(Protocol):
     async def set_settings(self, values: dict[str, Any], owner: str, action: str) -> None: ...
 
     async def dashboard_aggregates(self) -> dict[str, Any]: ...
+
+    async def get_backup_control(self) -> dict[str, Any]: ...
+
+    async def set_backup_policy(
+        self, retention_days: int, expected_version: int, actor: str
+    ) -> dict[str, Any]: ...
+
+    async def request_backup_operation(
+        self,
+        kind: str,
+        artifact_id: str,
+        catalogue_version: str,
+        expected_active_revision: int,
+        expected_image: str,
+        expected_version: int,
+        actor: str,
+        now: datetime,
+    ) -> dict[str, Any]: ...
+
+    async def cancel_backup_operation(
+        self, request_id: str, expected_version: int, actor: str, now: datetime
+    ) -> dict[str, Any]: ...
 
 
 class MetricsCollector(Protocol):
@@ -280,6 +304,7 @@ def create_async_admin_app(
     docs_root: str | Path = "docs",
     activation_preflight: Callable[[ActivationCandidate], Awaitable[OperatorPreflightEvidence]]
     | None = None,
+    backup_catalogue: BackupCatalogue | None = None,
 ) -> FastAPI:
     """Build the async app; persistence is mandatory and never downgraded."""
 
@@ -289,6 +314,7 @@ def create_async_admin_app(
     proxies = proxy_policy or ProxyPolicy()
     bootstrap_artifact = BootstrapArtifactCleaner(bootstrap_artifact_path)
     help_root = Path(docs_root).resolve()
+    backups = backup_catalogue or BackupCatalogue()
 
     async def default_activation_preflight(
         candidate: ActivationCandidate,
@@ -525,7 +551,9 @@ def create_async_admin_app(
                 "дождитесь совпадения применённой версии у всех воркеров."
             )
         elif request.query_params.get("setup") == "rolled-back":
-            saved_message = "Предыдущая активная версия восстановлена. Дождитесь совпадения heartbeat."
+            saved_message = (
+                "Предыдущая активная версия восстановлена. Дождитесь совпадения heartbeat."
+            )
         page = _dashboard_html(
             session.csrf_token,
             settings.environment.value,
@@ -538,12 +566,133 @@ def create_async_admin_app(
                 else ""
             ),
             owner_view,
+            show_backups=True,
         )
         page = page.replace(
             "Агрегированные данные PostgreSQL ещё не подключены.",
             "Ожидаем локальные агрегаты.",
         )
         return HTMLResponse(page)
+
+    @app.get("/backups", response_class=HTMLResponse)
+    async def backup_page(request: Request) -> Response:
+        session, _ = await session_for(request)
+        if not session:
+            return redirect_login(True)
+        if session.must_change_password:
+            return RedirectResponse("/change-password", 303)
+        try:
+            catalogue = await asyncio.to_thread(backups.read, utcnow())
+            control = public_control(await repository.get_backup_control())
+        except (BackupCatalogueUnavailable, AttributeError):
+            return HTMLResponse(
+                "Каталог копий недоступен или устарел. Изменения не выполнены.", 503
+            )
+        return HTMLResponse(
+            backups_html(
+                session.csrf_token,
+                catalogue,
+                control,
+                "Запрос сохранён. Восстановление требует оператора."
+                if request.query_params.get("saved")
+                else "",
+            )
+        )
+
+    @app.get("/api/backups")
+    async def backup_api(request: Request) -> Response:
+        session, _ = await session_for(request)
+        if not session or session.must_change_password:
+            return JSONResponse({"detail": "unauthorized"}, 401)
+        try:
+            catalogue = await asyncio.to_thread(backups.read, utcnow())
+            control = public_control(await repository.get_backup_control())
+        except (BackupCatalogueUnavailable, AttributeError):
+            return JSONResponse({"detail": "backup_catalogue_unavailable"}, 503)
+        return JSONResponse({"catalogue": catalogue, "control": control})
+
+    @app.post("/settings/backups")
+    @app.post("/backups/verify")
+    @app.post("/backups/restore-request")
+    @app.post("/backups/cancel")
+    async def backup_mutation(request: Request) -> Response:
+        session, _ = await session_for(request, False)
+        if not session or session.must_change_password:
+            return redirect_login(True)
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 8192:
+                return Response(status_code=413)
+            body.extend(chunk)
+        try:
+            parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True, max_num_fields=16)
+            if any(len(values) != 1 for values in parsed.values()):
+                return Response(status_code=422)
+            data = {key: values[0] for key, values in parsed.items()}
+        except (UnicodeDecodeError, ValueError):
+            return Response(status_code=422)
+        if not compare_digest(session.csrf_token, data.get("csrf", "")):
+            return Response(status_code=403)
+        authenticated, remaining = await owner_reauthenticated(
+            request, session, data.get("current_password", "")
+        )
+        if not authenticated:
+            return HTMLResponse(
+                f"Слишком много попыток. Повторите через {_duration(remaining)}"
+                if remaining
+                else GENERIC_LOGIN_ERROR,
+                429 if remaining else 401,
+            )
+        try:
+            expected = int(data.get("expected_version", "-1"))
+            if expected < 0:
+                raise ValueError()
+            if request.url.path == "/settings/backups":
+                days = int(data.get("retention_days", "0"))
+                if not 1 <= days <= 90 or data.get("cleanup_ack") != "yes":
+                    raise ValueError()
+                await repository.set_backup_policy(
+                    retention_days=days, expected_version=expected, actor=session.username
+                )
+            elif request.url.path == "/backups/cancel":
+                await repository.cancel_backup_operation(
+                    request_id=data.get("request_id", ""),
+                    expected_version=expected,
+                    actor=session.username,
+                    now=utcnow(),
+                )
+            else:
+                catalogue = await asyncio.to_thread(backups.read, utcnow())
+                identifier = data.get("artifact_id", "")
+                if identifier not in {entry["id"] for entry in catalogue["entries"]}:
+                    raise ValueError()
+                if data.get("catalogue_version") != catalogue["version"]:
+                    return HTMLResponse("Каталог изменён. Обновите страницу.", 409)
+                kind = "restore" if request.url.path == "/backups/restore-request" else "verify"
+                if kind == "restore" and (
+                    data.get("restore_ack") != f"ВОССТАНОВИТЬ {identifier}"
+                    or data.get("data_loss_ack") != "yes"
+                ):
+                    raise ValueError()
+                await repository.request_backup_operation(
+                    kind=kind,
+                    artifact_id=identifier,
+                    catalogue_version=catalogue["version"],
+                    expected_active_revision=catalogue["active_revision"],
+                    expected_image=catalogue["application_image"],
+                    expected_version=expected,
+                    actor=session.username,
+                    now=utcnow(),
+                )
+        except BackupControlConflict:
+            return HTMLResponse("Настройки или запрос изменены. Обновите страницу.", 409)
+        except BackupCatalogueUnavailable:
+            return HTMLResponse("Каталог копий недоступен или устарел. Запрос не создан.", 503)
+        except ValueError:
+            return HTMLResponse("Проверьте копию, срок хранения и точное подтверждение.", 422)
+        except AttributeError:
+            return HTMLResponse("Управление копиями недоступно.", 503)
+        return RedirectResponse("/backups?saved=1", 303)
 
     @app.get("/api/dashboard")
     async def dashboard_api(request: Request) -> JSONResponse:
@@ -632,7 +781,9 @@ def create_async_admin_app(
         )
         if not authenticated:
             if remaining:
-                return HTMLResponse(f"Слишком много попыток. Повторите через {_duration(remaining)}", 429)
+                return HTMLResponse(
+                    f"Слишком много попыток. Повторите через {_duration(remaining)}", 429
+                )
             return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
 
         async def validation_response(message: str) -> HTMLResponse:
@@ -720,7 +871,9 @@ def create_async_admin_app(
         )
         if not authenticated:
             if remaining:
-                return HTMLResponse(f"Слишком много попыток. Повторите через {_duration(remaining)}", 429)
+                return HTMLResponse(
+                    f"Слишком много попыток. Повторите через {_duration(remaining)}", 429
+                )
             return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
         pending_created = False
         revision = 0
@@ -761,7 +914,9 @@ def create_async_admin_app(
                 await owner_settings.record_preflight_failure(
                     revision, session.username, failure_code
                 )
-            return HTMLResponse("Read-only предварительная проверка не пройдена. Активная версия не изменена.", 502)
+            return HTMLResponse(
+                "Read-only предварительная проверка не пройдена. Активная версия не изменена.", 502
+            )
         except (ValueError, OwnerSettingsValidationError):
             return HTMLResponse("Конфигурация ещё не готова к активации.", 422)
         except OwnerSettingsConflictError:
@@ -785,7 +940,9 @@ def create_async_admin_app(
         )
         if not authenticated:
             if remaining:
-                return HTMLResponse(f"Слишком много попыток. Повторите через {_duration(remaining)}", 429)
+                return HTMLResponse(
+                    f"Слишком много попыток. Повторите через {_duration(remaining)}", 429
+                )
             return HTMLResponse(GENERIC_LOGIN_ERROR, 401)
         try:
             expected_active = int(data.get("expected_active_revision", "0"))
@@ -836,7 +993,7 @@ def create_async_admin_app(
             return HTMLResponse("Инструкция ещё не создана.", 404)
         content = await asyncio.to_thread(path.read_text, encoding="utf-8")
         return HTMLResponse(
-            "<html lang=\"ru\"><body><main><h1>Справка</h1><pre>"
+            '<html lang="ru"><body><main><h1>Справка</h1><pre>'
             + html.escape(content)
             + "</pre></main></body></html>"
         )

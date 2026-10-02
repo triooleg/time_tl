@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -49,7 +51,143 @@ class AdminAccountRecord:
     bootstrap_expires_at: datetime | None
 
 
+class BackupControlConflict(ValueError):
+    """Invalid or stale backup intent; no mutation has been committed."""
+
+
+def _backup_integer(value: Any, minimum: int, maximum: int = 2**63 - 1) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise BackupControlConflict("Недопустимое значение параметра копий.")
+    return value
+
+
+def _backup_text(value: Any, pattern: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+        raise BackupControlConflict("Недопустимый идентификатор копии.")
+    return value
+
+
+def _backup_time(value: Any) -> datetime:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            raise BackupControlConflict("Недопустимое время операции.") from None
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise BackupControlConflict("Недопустимое время операции.")
+    return value
+
+
+def _backup_result(value: Any) -> dict[str, Any]:
+    """Keep a small typed allowlist, never persist arbitrary host error text."""
+    if not isinstance(value, dict):
+        raise BackupControlConflict("Недопустимый результат проверки.")
+    safe: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "artifact_sha256":
+            safe[key] = _backup_text(item, r"[0-9a-f]{64}")
+        elif key == "verified_at":
+            safe[key] = _backup_time(item).isoformat()
+        elif key == "schema":
+            safe[key] = _backup_text(item, r"[0-9]{4}_[a-z0-9_]{1,80}")
+        elif key in {"size_bytes", "table_count"}:
+            safe[key] = _backup_integer(item, 0, 2**63 - 1 if key == "size_bytes" else 10000)
+        elif key == "reason_code":
+            if not isinstance(item, str) or item not in {
+                "VERIFY_PASSED",
+                "VERIFY_REJECTED",
+                "RESTORE_REQUIRES_OPERATOR",
+                "EXPIRED",
+                "CANCELLED",
+                "IDENTITY_CHANGED",
+                "CATALOGUE_CHANGED",
+                "ARTIFACT_INVALID",
+                "INTERNAL_ERROR",
+            }:
+                raise BackupControlConflict("Недопустимый код результата.")
+            safe[key] = item
+    return safe
+
+
+def _backup_control(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"version": 0, "retention_days": 7, "request": None}
+    if not isinstance(value, dict):
+        raise BackupControlConflict("Настройки копий повреждены.")
+    control: dict[str, Any] = {
+        "version": _backup_integer(value.get("version"), 0),
+        "retention_days": _backup_integer(value.get("retention_days"), 1, 90),
+        "request": None,
+    }
+    request = value.get("request")
+    if request is None:
+        return control
+    if (
+        not isinstance(request, dict)
+        or not isinstance(request.get("kind"), str)
+        or request.get("kind") not in {"verify", "restore"}
+    ):
+        raise BackupControlConflict("Запрос копии повреждён.")
+    status = request.get("status")
+    if not isinstance(status, str) or status not in {
+        "PENDING",
+        "CLAIMED",
+        "PASS",
+        "REJECTED",
+        "REQUIRES_OPERATOR",
+    }:
+        raise BackupControlConflict("Статус копии повреждён.")
+    if request["kind"] == "restore" and status == "PASS":
+        raise BackupControlConflict("Восстановление требует оператора.")
+    requested_at = _backup_time(request.get("requested_at"))
+    expires_at = _backup_time(request.get("expires_at"))
+    if expires_at - requested_at != timedelta(minutes=15):
+        raise BackupControlConflict("Срок запроса копии повреждён.")
+    safe_request = {
+        "request_id": _backup_text(request.get("request_id"), r"[0-9a-f]{32}"),
+        "kind": request["kind"],
+        "artifact_id": _backup_text(request.get("artifact_id"), r"[0-9a-f]{32}"),
+        "catalogue_version": _backup_text(request.get("catalogue_version"), r"[0-9a-f]{64}"),
+        "expected_active_revision": _backup_integer(request.get("expected_active_revision"), 1),
+        "expected_image": _backup_text(
+            request.get("expected_image"),
+            r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}@sha256:[0-9a-f]{64}",
+        ),
+        "requested_at": requested_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
+        "status": status,
+        "result": _backup_result(request.get("result", {})),
+        "claimed_at": None,
+        "finished_at": None,
+    }
+    for key in ("claimed_at", "finished_at"):
+        if request.get(key) is not None:
+            stamp = _backup_time(request[key])
+            if stamp < requested_at:
+                raise BackupControlConflict("Время запроса копии повреждено.")
+            safe_request[key] = stamp.isoformat()
+    claimed = safe_request["claimed_at"]
+    finished = safe_request["finished_at"]
+    if (
+        (status == "PENDING" and (claimed is not None or finished is not None))
+        or (status == "CLAIMED" and (claimed is None or finished is not None))
+        or (status in {"PASS", "REQUIRES_OPERATOR"} and claimed is None)
+        or (status in {"PASS", "REJECTED", "REQUIRES_OPERATOR"} and finished is None)
+        or (status == "REQUIRES_OPERATOR" and request["kind"] != "restore")
+        or (claimed is not None and _backup_time(claimed) >= expires_at)
+        or (
+            claimed is not None
+            and finished is not None
+            and _backup_time(finished) < _backup_time(claimed)
+        )
+    ):
+        raise BackupControlConflict("Состояние запроса копии повреждено.")
+    control["request"] = safe_request
+    return control
+
+
 class AsyncPostgresAdminRepository:
+    _BACKUP_CONTROL_KEY = "backup_control"
     _OWNER_LOCK_KEY = 0x54494D45544C4346
     _OWNER_STATE_KEY = "owner_configuration_state"
     _OWNER_DRAFT_KEY = "owner_configuration_draft"
@@ -246,6 +384,8 @@ class AsyncPostgresAdminRepository:
             return row.value if row else default
 
     async def set_settings(self, values: dict[str, Any], owner: str, action: str) -> None:
+        if self._BACKUP_CONTROL_KEY in values:
+            raise BackupControlConflict("Используйте версионные настройки копий.")
         reject_sensitive_generic_settings(values)
         async with self._factory() as session:
             async with session.begin():
@@ -273,6 +413,209 @@ class AsyncPostgresAdminRepository:
                         redacted_details={key: "changed" for key in values},
                     )
                 )
+
+    async def get_backup_control(self) -> dict[str, Any]:
+        async with self._factory() as session:
+            row = await session.get(RuntimeSetting, self._BACKUP_CONTROL_KEY)
+            return _backup_control(row.value if row is not None else None)
+
+    async def _locked_backup_control(self, session: AsyncSession) -> dict[str, Any]:
+        # Row locks alone cannot serialize the first write to an absent JSONB key.
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext('time_tl:backup_control')::bigint)")
+        )
+        row = await session.get(RuntimeSetting, self._BACKUP_CONTROL_KEY)
+        return _backup_control(row.value if row is not None else None)
+
+    async def _save_backup_control(
+        self, session: AsyncSession, control: dict[str, Any], actor: str, action: str
+    ) -> dict[str, Any]:
+        control["version"] += 1
+        await self._upsert_runtime_setting(session, self._BACKUP_CONTROL_KEY, control, actor)
+        request = control["request"]
+        details = {"version": control["version"], "retention_days": control["retention_days"]}
+        if request is not None:
+            details.update({"kind": request["kind"], "status": request["status"]})
+        session.add(
+            AuditLog(
+                actor=actor,
+                action=action,
+                result="success",
+                target_type="backup_control",
+                redacted_details=details,
+            )
+        )
+        return control
+
+    @staticmethod
+    def _backup_actor(actor: str) -> str:
+        return _backup_text(actor, r"[A-Za-z0-9_.@-]{1,80}")
+
+    @staticmethod
+    def _backup_cas(control: dict[str, Any], expected_version: int) -> None:
+        if control["version"] != _backup_integer(expected_version, 0):
+            raise BackupControlConflict("Настройки копий изменились. Обновите страницу.")
+
+    async def set_backup_policy(
+        self, retention_days: int, expected_version: int, actor: str
+    ) -> dict[str, Any]:
+        days = _backup_integer(retention_days, 1, 90)
+        _backup_integer(expected_version, 0)
+        actor = self._backup_actor(actor)
+        async with self._factory() as session:
+            async with session.begin():
+                control = await self._locked_backup_control(session)
+                self._backup_cas(control, expected_version)
+                control["retention_days"] = days
+                return await self._save_backup_control(
+                    session, control, actor, "backup_policy_saved"
+                )
+
+    async def request_backup_operation(
+        self,
+        kind: str,
+        artifact_id: str,
+        catalogue_version: str,
+        expected_active_revision: int,
+        expected_image: str,
+        expected_version: int,
+        actor: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        if not isinstance(kind, str) or kind not in {"verify", "restore"}:
+            raise BackupControlConflict("Неизвестная операция копии.")
+        now = _backup_time(now)
+        actor = self._backup_actor(actor)
+        _backup_integer(expected_version, 0)
+        request = _backup_control(
+            {
+                "version": 0,
+                "retention_days": 7,
+                "request": {
+                    "request_id": uuid.uuid4().hex,
+                    "kind": kind,
+                    "artifact_id": artifact_id,
+                    "catalogue_version": catalogue_version,
+                    "expected_active_revision": expected_active_revision,
+                    "expected_image": expected_image,
+                    "requested_at": now.isoformat(),
+                    "expires_at": (now + timedelta(minutes=15)).isoformat(),
+                    "status": "PENDING",
+                },
+            }
+        )["request"]
+        async with self._factory() as session:
+            async with session.begin():
+                await self._lock_owner_settings(session)
+                control = await self._locked_backup_control(session)
+                self._backup_cas(control, expected_version)
+                current = control["request"]
+                if current is not None and current["status"] in {
+                    "PENDING",
+                    "CLAIMED",
+                    "REQUIRES_OPERATOR",
+                }:
+                    raise BackupControlConflict("Завершите или отмените предыдущий запрос копии.")
+                await self._backup_active_revision(session, expected_active_revision)
+                control["request"] = request
+                return await self._save_backup_control(session, control, actor, "backup_requested")
+
+    async def _backup_active_revision(self, session: AsyncSession, revision: int) -> None:
+        state = await session.get(RuntimeSetting, self._OWNER_STATE_KEY)
+        active = await session.get(RuntimeSetting, self._OWNER_ACTIVE_KEY)
+        if (
+            state is None
+            or active is None
+            or not isinstance(state.value, dict)
+            or not isinstance(active.value, dict)
+            or state.value.get("active_revision") != revision
+            or active.value.get("revision") != revision
+        ):
+            raise BackupControlConflict("Активная конфигурация изменилась.")
+
+    async def claim_backup_operation(self, request_id: str, now: datetime) -> dict[str, Any]:
+        request_id = _backup_text(request_id, r"[0-9a-f]{32}")
+        now = _backup_time(now)
+        async with self._factory() as session:
+            async with session.begin():
+                await self._lock_owner_settings(session)
+                control = await self._locked_backup_control(session)
+                request = control["request"]
+                if request is None or request["request_id"] != request_id:
+                    raise BackupControlConflict("Запрос копии не найден.")
+                if (
+                    request["status"] != "PENDING"
+                    or now < _backup_time(request["requested_at"])
+                    or now >= _backup_time(request["expires_at"])
+                ):
+                    raise BackupControlConflict("Запрос уже принят или срок запроса истёк.")
+                await self._backup_active_revision(session, request["expected_active_revision"])
+                request["status"] = "CLAIMED"
+                request["claimed_at"] = now.isoformat()
+                await self._save_backup_control(session, control, "backup-host", "backup_claimed")
+                return cast(dict[str, Any], request)
+
+    async def finish_backup_operation(
+        self, request_id: str, status: str, result: dict[str, Any], now: datetime
+    ) -> dict[str, Any]:
+        request_id = _backup_text(request_id, r"[0-9a-f]{32}")
+        now = _backup_time(now)
+        if not isinstance(status, str) or status not in {"PASS", "REJECTED", "REQUIRES_OPERATOR"}:
+            raise BackupControlConflict("Недопустимый итог операции копии.")
+        safe_result = _backup_result(result)
+        async with self._factory() as session:
+            async with session.begin():
+                control = await self._locked_backup_control(session)
+                request = control["request"]
+                if request is None or request["request_id"] != request_id:
+                    raise BackupControlConflict("Запрос копии не найден.")
+                if request["status"] != "CLAIMED" and not (
+                    request["status"] == "PENDING" and status == "REJECTED"
+                ):
+                    raise BackupControlConflict("Операция копии не принята или уже завершена.")
+                if (
+                    (request["kind"] == "restore" and status == "PASS")
+                    or (request["kind"] == "verify" and status == "REQUIRES_OPERATOR")
+                    or now < _backup_time(request["claimed_at"] or request["requested_at"])
+                ):
+                    raise BackupControlConflict("Недопустимый переход операции копии.")
+                request.update(status=status, result=safe_result, finished_at=now.isoformat())
+                return await self._save_backup_control(
+                    session, control, "backup-host", "backup_finished"
+                )
+
+    async def cancel_backup_operation(
+        self, request_id: str, expected_version: int, actor: str, now: datetime
+    ) -> dict[str, Any]:
+        request_id = _backup_text(request_id, r"[0-9a-f]{32}")
+        _backup_integer(expected_version, 0)
+        actor = self._backup_actor(actor)
+        now = _backup_time(now)
+        async with self._factory() as session:
+            async with session.begin():
+                control = await self._locked_backup_control(session)
+                self._backup_cas(control, expected_version)
+                request = control["request"]
+                if (
+                    request is None
+                    or request["request_id"] != request_id
+                    or request["status"]
+                    not in {
+                        "PENDING",
+                        "REQUIRES_OPERATOR",
+                    }
+                ):
+                    raise BackupControlConflict(
+                        "Принятую или завершённую операцию отменить нельзя."
+                    )
+                if now < _backup_time(request["requested_at"]):
+                    raise BackupControlConflict("Недопустимое время отмены.")
+                request.update(
+                    status="REJECTED",
+                    result={"reason_code": "CANCELLED"},
+                    finished_at=now.isoformat(),
+                )
+                return await self._save_backup_control(session, control, actor, "backup_cancelled")
 
     async def owner_settings_bundle(self) -> OwnerSettingsBundle:
         async with self._factory() as session:

@@ -201,6 +201,8 @@ class TelegramApplication:
         allow_in_memory_import_sessions: bool = True,
         coordinate_suggestions_enabled: bool = False,
         homework_enabled: bool = False,
+        my_day_enabled: bool = False,
+        calendars_enabled: bool = False,
         process_state_max_users: int = 256,
         process_state_ttl_seconds: float = 900.0,
         process_state_clock: Callable[[], float] = monotonic,
@@ -210,6 +212,8 @@ class TelegramApplication:
         self.resolver = resolver
         self.coordinate_suggestions_enabled = coordinate_suggestions_enabled
         self.homework_enabled = homework_enabled
+        self.my_day_enabled = my_day_enabled
+        self.calendars_enabled = calendars_enabled
         self.repository = repository or InMemoryAccountRepository()
         if import_sessions is not None:
             selected_import_sessions = import_sessions
@@ -366,6 +370,10 @@ class TelegramApplication:
         )
         text = f"{prefix}\n\n{summary}" if prefix else summary
         rows = [(Button("📚 Розклад", "menu:schedules"),)]
+        if self.my_day_enabled:
+            rows.insert(0, (Button("🕐 Мій день", "menu:myday"),))
+        if self.calendars_enabled:
+            rows.append((Button("📅 Мої календарі", "menu:calendars"),))
         if self.homework_enabled:
             rows.append((Button("📝 Домашні завдання", "menu:homework"),))
         rows.extend(

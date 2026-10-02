@@ -622,3 +622,78 @@ class DailyAggregateStat(Base):
     metric: Mapped[str] = mapped_column(String(80), primary_key=True)
     value: Mapped[int] = mapped_column(BigInteger, server_default="0")
     __table_args__ = (CheckConstraint("value >= 0", name="value_nonnegative"),)
+
+
+class Calendar(TimestampMixin, Base):
+    """One independently created, link-free shared schedule snapshot."""
+
+    __tablename__ = "calendars"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    owner_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    snapshot_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    owner_visible: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    snapshot_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    __table_args__ = (
+        CheckConstraint("kind IN ('SCHOOL','PERSONAL','ACTIVITY')", name="kind_allowed"),
+        CheckConstraint("char_length(btrim(name)) BETWEEN 1 AND 120", name="name_length"),
+        CheckConstraint("version >= 1", name="version_positive"),
+        CheckConstraint("snapshot_version >= 1", name="snapshot_version_positive"),
+        CheckConstraint("jsonb_typeof(snapshot_payload) = 'object'", name="snapshot_object"),
+    )
+
+
+class CalendarMembership(TimestampMixin, Base):
+    __tablename__ = "calendar_memberships"
+    calendar_id: Mapped[UUID] = mapped_column(
+        ForeignKey("calendars.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False, server_default="MEMBER")
+    visible: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    __table_args__ = (
+        CheckConstraint("role IN ('MEMBER','EDITOR','ADMIN')", name="role_allowed"),
+    )
+
+
+class CalendarInvitation(Base):
+    """Targeted token hash, never a raw token or message delivery instruction."""
+
+    __tablename__ = "calendar_invitations"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    calendar_id: Mapped[UUID] = mapped_column(
+        ForeignKey("calendars.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    issuer_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    calendar_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        Index("ix_calendar_invitations_expiry_token", "expires_at", "token_hash"),
+        CheckConstraint("token_hash ~ '^[0-9a-f]{64}$'", name="token_hash_shape"),
+        CheckConstraint("calendar_version >= 1", name="version_positive"),
+        CheckConstraint(
+            "expires_at > created_at AND expires_at <= created_at + interval '24 hours'",
+            name="expiry_bounded",
+        ),
+        CheckConstraint(
+            "NOT (consumed_at IS NOT NULL AND revoked_at IS NOT NULL)", name="terminal"
+        ),
+    )

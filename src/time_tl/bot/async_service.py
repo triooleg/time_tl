@@ -1,24 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from datetime import date, time
+from datetime import UTC, date, datetime, time
 from time import monotonic
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from time_tl.application.schedule_editor import (
     StaleLessonSelection,
     recurring_lesson_fingerprint,
 )
+from time_tl.domain.calendar_memberships import MAX_PERSISTENT_CALENDARS, AsyncCalendarPort
 from time_tl.domain.schedule import (
     ImportSessionRepository,
     Lesson,
     Parity,
     ScheduleProfile,
 )
+from time_tl.domain.schedule.resolver import ResolutionConflict
 
 from .homework_router import AsyncHomeworkPort, HomeworkUx
 from .models import Button, NotificationMode, View
@@ -200,13 +203,23 @@ class AsyncTelegramApplication:
         onboarding_text: str = "",
         homework_enabled: bool = False,
         homework_port: AsyncHomeworkPort | None = None,
+        my_day_enabled: bool = False,
+        calendars_enabled: bool = False,
+        calendar_port: AsyncCalendarPort | None = None,
+        my_day_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         process_state_max_users: int = 256,
         process_state_ttl_seconds: float = 900.0,
         process_state_clock: Callable[[], float] = monotonic,
     ) -> None:
         if process_state_max_users < 1 or process_state_ttl_seconds <= 0:
             raise ValueError("invalid process-state limits")
+        if calendars_enabled and (not my_day_enabled or calendar_port is None):
+            raise ValueError("persistent calendars require My Day and a durable calendar port")
         self.repository = repository
+        self.my_day_enabled = my_day_enabled
+        self.calendars_enabled = calendars_enabled
+        self.calendar_port = calendar_port if calendars_enabled else None
+        self._my_day_clock = my_day_clock
         self.homework_enabled = homework_enabled and homework_port is not None
         self.homework_ux = (
             HomeworkUx(homework_port) if self.homework_enabled and homework_port else None
@@ -229,6 +242,8 @@ class AsyncTelegramApplication:
             allow_in_memory_import_sessions=allow_process_local_imports,
             coordinate_suggestions_enabled=coordinate_suggestions_enabled,
             homework_enabled=self.homework_enabled,
+            my_day_enabled=my_day_enabled,
+            calendars_enabled=calendars_enabled,
             process_state_max_users=process_state_max_users,
             process_state_ttl_seconds=process_state_ttl_seconds,
             process_state_clock=process_state_clock,
@@ -342,7 +357,19 @@ class AsyncTelegramApplication:
         return self._app.settings_menu()
 
     def privacy(self) -> View:
-        return self._app.privacy()
+        view = self._app.privacy()
+        if not self.calendars_enabled:
+            return view
+        return replace(
+            view,
+            text=view.text
+            + (
+                "\n\n📅 Також зберігаються створені календарі, ваші підписки, ролі й "
+                "параметри видимості та запрошення. Спільні календарі не містять посилань "
+                "на уроки. Видалення вашого облікового запису видалить створені вами "
+                "календарі для всіх учасників; з інших календарів буде видалено лише вас."
+            ),
+        )
 
     async def choose_mode(self, user_id: int, mode: NotificationMode) -> View:
         async with self._user_lock(user_id):
@@ -571,6 +598,104 @@ class AsyncTelegramApplication:
             for row in view.rows
         )
         return replace(view, rows=rows)
+
+    async def my_day_view(self, user_id: int, *, page: int = 0) -> View:
+        """Read-only legacy bridge; never activates profiles or drives delivery."""
+        rows = (
+            (Button("🔄 Оновити", "menu:myday"),),
+            (Button("📚 Розклад", "menu:schedules"),),
+            (Button("🏠 Головне меню", "menu:home"),),
+        )
+        if not self.my_day_enabled:
+            return View("Мій день ще не ввімкнено. Ваш розклад не змінено.", rows[1:])
+        # Imports stay local to this optional capability: flag-off behavior is unchanged.
+        from time_tl.domain.calendars import (
+            Calendar,
+            CalendarKind,
+            CalendarMembership,
+            CalendarSource,
+            build_my_day,
+        )
+
+        from .my_day import SAFETY_NOTE, projection_unavailable_view, render_my_day
+
+        try:
+            account = await self._hydrate(user_id)
+        except AccountDataMissing:
+            raise
+        except Exception:
+            return projection_unavailable_view(homework_enabled=self.homework_ux is not None)
+        if account.user_id != user_id:
+            return projection_unavailable_view(homework_enabled=self.homework_ux is not None)
+        active = tuple(profile for profile in account.profiles.values() if profile.active)
+        sources: list[CalendarSource] = []
+        if self.calendar_port is not None:
+            try:
+                persisted = await asyncio.wait_for(self.calendar_port.list_sources(user_id), 2)
+                if not isinstance(persisted, tuple) or len(persisted) > MAX_PERSISTENT_CALENDARS:
+                    raise ValueError("persistent source list exceeds bounded contract")
+                if any(
+                    not isinstance(source, CalendarSource)
+                    or source.membership.user_id != user_id
+                    or not source.membership.visible
+                    for source in persisted
+                ):
+                    raise ValueError("persistent source ownership contract mismatch")
+                sources.extend(persisted)
+            except Exception:
+                # A missing source is never silently omitted from the user's day.
+                return projection_unavailable_view(homework_enabled=self.homework_ux is not None)
+        if not active and not sources:
+            return View(
+                "🕐 Мій день\n\nАктивний розклад ще не налаштовано. "
+                "Створіть або оберіть його в розділі «Розклад».\n\n" + SAFETY_NOTE,
+                rows,
+            )
+        if len(active) > 1:
+            return View(
+                "⚠️ Не вдалося однозначно визначити активний розклад. "
+                "Мій день тимчасово недоступний.\n\n" + SAFETY_NOTE,
+                rows,
+            )
+        try:
+            at = self._my_day_clock()
+            if active:
+                profile = active[0]
+                legacy_id = "legacy:" + hashlib.sha256(profile.profile_id.encode()).hexdigest()
+                sources.insert(
+                    0,
+                    CalendarSource(
+                        Calendar(legacy_id, profile.name, CalendarKind.PERSONAL, profile),
+                        CalendarMembership(user_id, legacy_id),
+                    ),
+                )
+            timeline = build_my_day(user_id, sources, at)
+        except (ResolutionConflict, ValueError):
+            return View(
+                "⚠️ Не вдалося безпечно визначити заняття на цей день. "
+                "Перевірте правила та час розкладу. Дані не змінено.\n\n" + SAFETY_NOTE,
+                rows,
+            )
+        pending_count: int | None = None
+        if self.homework_ux is not None:
+            try:
+                # Existing bounded, owner-scoped preview. Not a complete-history count.
+                items = await asyncio.wait_for(
+                    self.homework_ux.port.list_homework(user_id, include_past=False), timeout=2
+                )
+                if len(items) > 100:
+                    raise ValueError("homework preview exceeds its bounded contract")
+                pending_count = sum(not item.completed for item in items)
+            except Exception:
+                # Unavailability is explicit in the renderer, never "nothing assigned".
+                pass
+        return render_my_day(
+            timeline,
+            at=at,
+            homework_count=pending_count,
+            homework_enabled=self.homework_ux is not None,
+            page=page,
+        )
 
     async def profile_editor_view(
         self,
@@ -1052,11 +1177,23 @@ class AsyncTelegramApplication:
     async def request_data_deletion(self, user_id: int) -> View:
         async with self._user_lock(user_id):
             await self._hydrate(user_id)
-            return self._app.request_data_deletion(user_id)
+            return self._calendar_deletion_warning(self._app.request_data_deletion(user_id))
 
     async def review_data_deletion(self, user_id: int, token: str) -> View:
         async with self._user_lock(user_id):
-            return self._app.review_data_deletion(user_id, token)
+            return self._calendar_deletion_warning(self._app.review_data_deletion(user_id, token))
+
+    def _calendar_deletion_warning(self, view: View) -> View:
+        if not self.calendars_enabled:
+            return view
+        return replace(
+            view,
+            text=view.text
+            + (
+                "\n\n⚠️ Створені вами календарі буде видалено для всіх учасників. "
+                "Інші спільні календарі залишаться; буде видалено лише вашу участь."
+            ),
+        )
 
     async def cancel_data_deletion(self, user_id: int) -> View:
         async with self._user_lock(user_id):
@@ -1093,14 +1230,62 @@ class ExistingAccountMiddleware:
 
     async def __call__(self, handler: Any, event: Any, data: dict[str, Any]) -> Any:
         if self._is_start_message(event):
+            raw_state = data.get("raw_state")
+            if (
+                self.application.calendars_enabled
+                and isinstance(raw_state, str)
+                and raw_state.startswith("CalendarFlow:")
+                and data.get("state") is not None
+            ):
+                await data["state"].clear()
+                data["raw_state"] = None
             return await handler(event, data)
         actor = getattr(event, "from_user", None)
         user_id = getattr(actor, "id", None)
         if user_id is None:
             return None
-        if not await self.application.account_exists(int(user_id)):
+        calendar_event = self.application.calendars_enabled and self._is_calendar_event(event, data)
+        try:
+            if calendar_event:
+                async with asyncio.timeout(5):
+                    exists = await self.application.account_exists(int(user_id))
+            else:
+                exists = await self.application.account_exists(int(user_id))
+        except Exception:
+            if not calendar_event and (
+                not self.application.my_day_enabled or not self._is_my_day_event(event)
+            ):
+                raise
+            await self._respond_missing(
+                event,
+                text=(
+                    "Календарі тимчасово недоступні. Спробуйте пізніше."
+                    if calendar_event
+                    else "Мій день тимчасово недоступний. Дані не змінено. Спробуйте пізніше."
+                ),
+            )
+            return None
+        if not exists:
             await self._respond_missing(event)
             return None
+        if self.application.calendars_enabled:
+            raw_state = data.get("raw_state")
+            state = data.get("state")
+            if (
+                isinstance(raw_state, str)
+                and raw_state.startswith("CalendarFlow:")
+                and state is not None
+                and not self._is_calendar_event(event, {})
+            ):
+                # Non-calendar navigation must not leave the invite ID prompt
+                # capturing later schedule/homework text. Ordinary prompt text
+                # remains owned by CalendarFlow until explicitly cancelled.
+                raw_text = getattr(event, "text", None)
+                if event.__class__.__name__ == "CallbackQuery" or (
+                    isinstance(raw_text, str) and raw_text.strip().startswith("/")
+                ):
+                    await state.clear()
+                    data["raw_state"] = None
         try:
             return await handler(event, data)
         except AccountDataMissing:
@@ -1118,19 +1303,38 @@ class ExistingAccountMiddleware:
         return command == "/start"
 
     @staticmethod
-    async def _respond_missing(event: Any) -> None:
+    def _is_calendar_event(event: Any, data: dict[str, Any]) -> bool:
+        if event.__class__.__name__ == "CallbackQuery":
+            raw = getattr(event, "data", None)
+            return isinstance(raw, str) and (raw == "menu:calendars" or raw.startswith("cal:"))
+        state = data.get("raw_state")
+        return isinstance(state, str) and state.startswith("CalendarFlow:")
+
+    @staticmethod
+    def _is_my_day_event(event: Any) -> bool:
+        if event.__class__.__name__ == "CallbackQuery":
+            raw = getattr(event, "data", None)
+            return isinstance(raw, str) and (raw == "menu:myday" or raw.startswith("myday:page:"))
+        if event.__class__.__name__ == "Message":
+            raw = getattr(event, "text", None)
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip().split(maxsplit=1)[0].split("@", 1)[0] in {"/today", "/now"}
+        return False
+
+    @staticmethod
+    async def _respond_missing(event: Any, *, text: str = _DELETED_ACCOUNT_TEXT) -> None:
         if event.__class__.__name__ == "CallbackQuery":
             message = getattr(event, "message", None)
             edit_text = getattr(message, "edit_text", None)
             if callable(edit_text):
-                await edit_text(_DELETED_ACCOUNT_TEXT)
+                await edit_text(text)
             answer = getattr(event, "answer", None)
             if callable(answer):
                 await answer()
             return
         answer = getattr(event, "answer", None)
         if callable(answer):
-            await answer(_DELETED_ACCOUNT_TEXT)
+            await answer(text)
 
 
 def build_async_router(
@@ -1171,6 +1375,18 @@ def build_async_router(
     router.message.outer_middleware(existing_account)
     router.callback_query.outer_middleware(existing_account)
 
+    if application.calendars_enabled:
+        from .calendar_router import CalendarManagementPort, CalendarUx, build_calendar_router
+
+        build_calendar_router(
+            CalendarUx(
+                cast(CalendarManagementPort, application.calendar_port),
+                application.repository,
+            ),
+            enabled=True,
+            router=router,
+        )
+
     @router.message(CommandStart())
     async def start(message: Message) -> None:
         for view in await application.start_sequence(_message_user_id(message)):
@@ -1179,6 +1395,32 @@ def build_async_router(
     @router.message(Command("menu"))
     async def menu(message: Message) -> None:
         await _answer(message, await application.menu(_message_user_id(message)))
+
+    async def my_day_command(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await _answer(message, await application.my_day_view(_message_user_id(message)))
+
+    async def my_day(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        await _edit(callback, await application.my_day_view(_callback_user_id(callback)))
+
+    async def my_day_page(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        raw = _callback_data(callback).removeprefix("myday:page:")
+        if not (raw.isascii() and raw.isdecimal() and len(raw) <= 3):
+            view = View(
+                "Сторінка застаріла. Оновіть Мій день.",
+                ((Button("🔄 Оновити", "menu:myday"),),),
+            )
+        else:
+            view = await application.my_day_view(_callback_user_id(callback), page=int(raw))
+        await _edit(callback, view)
+
+    if application.my_day_enabled:
+        # Flag-off must preserve FSM text handling, including homework drafts.
+        router.message.register(my_day_command, Command("today", "now"))
+        router.callback_query.register(my_day, F.data == "menu:myday")
+        router.callback_query.register(my_day_page, F.data.startswith("myday:page:"))
 
     @router.message(F.location)
     async def location(message: Message) -> None:

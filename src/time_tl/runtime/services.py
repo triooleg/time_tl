@@ -571,7 +571,7 @@ class PostgresRegionConfirmationService:
 @asynccontextmanager
 async def postgres_bot_dependencies(
     settings: Settings,
-) -> AsyncIterator[tuple[Any, Any, Any, Any, Any, Any, Any, Any]]:
+) -> AsyncIterator[tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any]]:
     """Construct ready persistence plus a fail-safe resolver without connecting to Telegram."""
     from time_tl.infrastructure.db.accounts import AsyncPostgresAccountRepository
     from time_tl.infrastructure.db.codec import FernetLessonLinkCodec
@@ -593,6 +593,11 @@ async def postgres_bot_dependencies(
         from time_tl.infrastructure.db.homework import AsyncPostgresHomeworkRepository
 
         homework_repository = AsyncPostgresHomeworkRepository(factory)
+    calendar_repository: Any | None = None
+    if settings.calendars_enabled:
+        from time_tl.infrastructure.db.calendars import AsyncPostgresCalendarRepository
+
+        calendar_repository = AsyncPostgresCalendarRepository(factory)
     from time_tl.infrastructure.db.territories import PostgresTerritoryCatalogRepository
 
     await _assert_territory_runtime_ready(factory)
@@ -619,6 +624,7 @@ async def postgres_bot_dependencies(
             territory_catalog,
             PostgresWorkerHeartbeatRepository(factory),
             homework_repository,
+            calendar_repository,
         )
     finally:
         await engine.dispose()
@@ -648,6 +654,7 @@ async def run_bot(settings: Settings) -> None:
         territory_catalog,
         heartbeat_repository,
         homework_repository,
+        calendar_repository,
     ):
         from time_tl.runtime.imports import (
             DurableAsyncTelegramApplication,
@@ -668,6 +675,9 @@ async def run_bot(settings: Settings) -> None:
             onboarding_text=settings.bot_onboarding_text,
             homework_enabled=settings.homework_enabled,
             homework_port=homework_repository,
+            my_day_enabled=settings.my_day_enabled,
+            calendars_enabled=settings.calendars_enabled,
+            calendar_port=calendar_repository,
         )
         bot = Bot(token=settings.telegram_bot_token.get_secret_value())
         from time_tl.bot.safety import (
@@ -693,6 +703,8 @@ async def run_bot(settings: Settings) -> None:
                 tasks.create_task(
                     _heartbeat_loop(heartbeat_repository, "bot", settings.owner_config_revision)
                 )
+                if settings.calendars_enabled and calendar_repository is not None:
+                    tasks.create_task(_calendar_invitation_retention_loop(calendar_repository))
         finally:
             await bot.session.close()
 
@@ -700,6 +712,23 @@ async def run_bot(settings: Settings) -> None:
 async def _polling_must_not_exit(dispatcher: Any, bot: Any) -> None:
     await dispatcher.start_polling(bot)
     raise RuntimeError("Telegram polling stopped unexpectedly")
+
+
+async def _calendar_invitation_retention_loop(repository: Any) -> None:
+    """Bounded expired-token maintenance, only in the explicitly enabled bot.
+
+    No active invitation deletion or automatic retries of user mutations. Failed
+    maintenance reports a fixed reason and cannot leak database/user contents.
+    """
+    from datetime import UTC, datetime
+
+    while True:
+        try:
+            async with asyncio.timeout(10):
+                await repository.cleanup_invitations(datetime.now(UTC), limit=200)
+        except Exception:
+            LOGGER.warning("Calendar invitation retention unavailable")
+        await asyncio.sleep(3600)
 
 
 def _postgres_admin_repository(settings: Settings) -> tuple[Any, Any]:

@@ -28,7 +28,7 @@ PRODUCTION_RELEASE_MANIFEST = {
     "provider": "alerts.in.ua/full-territory",
     "territory_selection": "manual-oblast-raion-hromada",
     "catalog_sha256": EXPECTED_SHA256,
-    "migration_head": "0008_homework_foundation",
+    "migration_head": "0009_calendar_foundation",
     "homework_enabled": True,
     "replicas": 1,
 }

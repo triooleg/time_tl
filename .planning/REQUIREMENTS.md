@@ -75,6 +75,31 @@
 
 ## v2 Requirements
 
+### Approved calendar concept: incremental LOCAL implementation
+
+The user's new-concept document and continuation approvals supersede future product
+scope, not historical v1 delivery rules. Existing personal profiles/snapshot imports
+remain compatible. These rows are not deployment or public messaging approvals.
+
+- **CAL-01**: Combine explicit visible calendars in read-only My Day; retain repeated
+  and simultaneous events and show conflicts, with no implicit join decision.
+- **CAL-02**: Persist independently created calendars and memberships; never convert
+  inactive old profiles into subscriptions or change legacy delivery input silently.
+- **CAL-03**: Enter shared calendars only after targeted invitation preview and
+  confirmation; expiry/revocation/consumption and quota gates are atomic.
+- **CAL-04**: Enforce OWNER/ADMIN/EDITOR/MEMBER permissions and CAS conflicts;
+  non-owners cannot grant roles or ownership. Hide/leave affects the actor only.
+- **CAL-05**: Preserve owner/member isolation and deletion cascades; no join links,
+  coordinates, secrets or other members' completion state in shared payloads.
+- **CAL-06**: Personal event overrides must not change the shared schedule;
+  shared homework and per-user completion are separate future slices.
+
+CAL-01 has phase12/13 LOCAL evidence. CAL-02..05 have phase13-01 foundation and
+phase13-02 Telegram management/actor-only export, with independent LOCAL and actual
+disposable PostgreSQL migration/concurrency/cascade evidence. Production deployment
+and allowlisted canary remain separate gates; role-management/editing UI is a later
+slice. CAL-06 remains planned, not implemented.
+
 - **IMP-01**: Import a timetable from free-form text or an image with mandatory user confirmation.
 - **MINI-01**: Optional Telegram Mini App schedule editor.
 - **SYNC-01**: Optional subscription to future versions of a trusted shared class template with explicit update review.

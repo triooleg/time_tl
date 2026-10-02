@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
     bot_onboarding_text: str = Field(default="", alias="BOT_ONBOARDING_TEXT")
     homework_enabled: bool = Field(default=False, alias="HOMEWORK_ENABLED")
+    my_day_enabled: bool = Field(default=False, alias="MY_DAY_ENABLED")
+    calendars_enabled: bool = Field(default=False, alias="CALENDARS_ENABLED")
     lesson_link_fernet_key: SecretStr | None = Field(default=None, alias="LESSON_LINK_FERNET_KEY")
     test_chat_allowlist_raw: str = Field(default="", alias="TEST_CHAT_ALLOWLIST")
     database_url: SecretStr = Field(alias="DATABASE_URL")
@@ -183,6 +185,13 @@ class Settings(BaseSettings):
         database_managed = self.owner_config_source is OwnerConfigSource.DATABASE
         if self.homework_enabled and self.service_role not in {"bot", "unspecified"}:
             raise ValueError("manual homework capability is restricted to the bot role")
+        if self.my_day_enabled and self.service_role not in {"bot", "unspecified"}:
+            raise ValueError("My Day read view is restricted to the bot role")
+        if self.calendars_enabled:
+            if self.service_role not in {"bot", "unspecified"}:
+                raise ValueError("persistent calendars are restricted to the bot role")
+            if not self.my_day_enabled:
+                raise ValueError("persistent calendars require MY_DAY_ENABLED")
         if (
             self.alert_provider is AlertProvider.FAKE
             and not local

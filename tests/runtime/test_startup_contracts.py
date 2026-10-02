@@ -120,7 +120,7 @@ def production_release_manifest() -> ProductionReleaseManifest:
         config_revision=5,
         provider="alerts.in.ua/full-territory",
         catalog_sha256=region_registry_full.EXPECTED_SHA256,
-        migration_head="0008_homework_foundation",
+        migration_head="0009_calendar_foundation",
         homework_enabled=True,
         replicas=1,
         territory_selection="manual-oblast-raion-hromada",
@@ -498,6 +498,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 territory_catalog,
                 heartbeat_repository,
                 homework_repository,
+                calendar_repository,
             ):
                 self.assertEqual("AsyncPostgresAccountRepository", type(repository).__name__)
                 self.assertIsNone(await resolver.resolve(50.45, 30.52))
@@ -523,6 +524,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                     type(heartbeat_repository).__name__,
                 )
                 self.assertIsNone(homework_repository)
+                self.assertIsNone(calendar_repository)
 
     async def test_staging_homework_dependency_is_built_only_when_enabled(self) -> None:
         settings = settings_for(
@@ -535,11 +537,33 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value="reviewed-v1"),
         ):
             async with postgres_bot_dependencies(settings) as dependencies:
-                homework_repository = dependencies[-1]
+                homework_repository = dependencies[-2]
                 self.assertEqual(
                     "AsyncPostgresHomeworkRepository",
                     type(homework_repository).__name__,
                 )
+
+    async def test_calendar_dependency_is_constructed_only_when_opted_in(self) -> None:
+        settings = settings_for(
+            "bot", environment=Environment.STAGING, telegram=TelegramTransport.LIVE
+        )
+        marker = object()
+        with (
+            patch("time_tl.runtime.services._assert_territory_runtime_ready", AsyncMock()),
+            patch(
+                "time_tl.infrastructure.db.calendars.AsyncPostgresCalendarRepository",
+                return_value=marker,
+            ) as constructor,
+        ):
+            async with postgres_bot_dependencies(settings) as dependencies:
+                self.assertIsNone(dependencies[-1])
+                constructor.assert_not_called()
+            enabled = settings.model_copy(
+                update={"my_day_enabled": True, "calendars_enabled": True}
+            )
+            async with postgres_bot_dependencies(enabled) as dependencies:
+                self.assertIs(marker, dependencies[-1])
+                constructor.assert_called_once()
 
     async def test_released_workers_cannot_fall_back_to_inert_production_adapters(self) -> None:
         for role in ("schedule-worker", "sender-worker"):
@@ -547,8 +571,9 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 TelegramTransport.LIVE if role == "sender-worker" else TelegramTransport.DISABLED
             )
             settings = settings_for(role, environment=Environment.PRODUCTION, telegram=telegram)
-            with self.subTest(role=role), self.assertRaisesRegex(
-                RuntimeError, "has no production adapter"
+            with (
+                self.subTest(role=role),
+                self.assertRaisesRegex(RuntimeError, "has no production adapter"),
             ):
                 await run_inert_worker(settings, role)
 
@@ -639,7 +664,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             PRODUCTION_RELEASE_MANIFEST["catalog_sha256"],
         )
         self.assertEqual(
-            "0008_homework_foundation",
+            "0009_calendar_foundation",
             PRODUCTION_RELEASE_MANIFEST["migration_head"],
         )
         self.assertIs(True, PRODUCTION_RELEASE_MANIFEST["homework_enabled"])
@@ -656,10 +681,14 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         manifest = production_release_manifest()
         payload = json.dumps(asdict(manifest), sort_keys=True, separators=(",", ":")).encode()
         private_key = Ed25519PrivateKey.generate()
-        public_key_hex = private_key.public_key().public_bytes(
-            serialization.Encoding.Raw,
-            serialization.PublicFormat.Raw,
-        ).hex()
+        public_key_hex = (
+            private_key.public_key()
+            .public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw,
+            )
+            .hex()
+        )
         signature = base64.b64encode(private_key.sign(payload))
         with patch(
             "time_tl.runtime.production_release.PRODUCTION_RELEASE_PUBLIC_KEY_HEX",
@@ -719,7 +748,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 "time_tl.runtime.production_release._read_atomic_runtime_facts",
                 AsyncMock(
                     return_value=(
-                        ["0008_homework_foundation"],
+                        ["0009_calendar_foundation"],
                         {"active_revision": 5},
                         active,
                     )
@@ -958,9 +987,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         manifest = production_release_manifest()
         engine = AsyncMock()
         service = AsyncMock()
-        service.mark_production_active.side_effect = OwnerSettingsConflictError(
-            "receipt mismatch"
-        )
+        service.mark_production_active.side_effect = OwnerSettingsConflictError("receipt mismatch")
         with (
             patch(
                 "time_tl.runtime.production_release.load_verified_release_attestation",
@@ -994,8 +1021,9 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         for candidate_manifest, revision, message in samples:
-            with self.subTest(message=message), self.assertRaisesRegex(
-                RuntimeContractError, message
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(RuntimeContractError, message),
             ):
                 validate_production_release_manifest(
                     candidate_manifest,
