@@ -22,6 +22,54 @@ def test_subject_normalization_is_stable_for_schedule_titles() -> None:
     assert normalize_subject_name("Українська   мова") == "українська мова"
 
 
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("  Математика.  ", "математика"),
+        ("Українська література...", "українська література"),
+        ("Англійська.", "англійська мова"),
+        ("АНГЛІЙСЬКА МОВА", "англійська мова"),
+        ("Українська", "українська мова"),
+        ("Французька", "французька мова"),
+        ("Німецька", "німецька мова"),
+        ("ＡＢＣ．", "abc"),
+        ("...", "..."),
+    ],
+)
+def test_subject_normalization_groups_only_conservative_variants(title: str, expected: str) -> None:
+    assert normalize_subject_name(title) == expected
+    assert normalize_subject_name(expected) == expected
+
+
+def test_subject_normalization_keeps_distinct_courses_separate() -> None:
+    names = ("Українська мова", "Українська література", "Англійська мова", "Англійська література")
+    assert len({normalize_subject_name(name) for name in names}) == len(names)
+    assert normalize_subject_name("Математика (поглиблена)") != normalize_subject_name("Математика")
+
+
+def test_next_lesson_resolves_variants_without_removing_repeated_lessons() -> None:
+    profile = ScheduleProfile(
+        profile_id="school",
+        name="5-А",
+        active=True,
+        rules=(
+            ScheduleRule(
+                weekday=0,
+                lessons=(
+                    Lesson(time(9), time(9, 45), "Англійська"),
+                    Lesson(time(10), time(10, 45), "Англійська мова."),
+                ),
+            ),
+        ),
+    )
+    result = find_next_subject_lesson(
+        profile, "Англійська мова", datetime(2026, 9, 28, 6, 30, tzinfo=UTC)
+    )
+    assert result is not None
+    assert result.hour == 10
+    assert len(profile.rules[0].lessons) == 2
+
+
 def test_homework_text_is_bounded_and_nonempty() -> None:
     with pytest.raises(HomeworkValidationError, match="empty"):
         validate_homework_text(" \n ")

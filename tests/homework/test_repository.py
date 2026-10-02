@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -36,6 +36,9 @@ class ScalarResult:
         return self.value
 
     def scalar_one(self) -> object:
+        return self.value
+
+    def scalars(self) -> object:
         return self.value
 
 
@@ -106,6 +109,108 @@ def test_source_type_accepts_manual_enum_or_literal_only() -> None:
     assert normalize_homework_source("MANUAL") is HomeworkSourceType.MANUAL
     with pytest.raises(HomeworkValidationError, match="unsupported homework source"):
         normalize_homework_source("OCR")
+
+
+@pytest.mark.asyncio
+async def test_subject_picker_groups_legacy_rows_without_rewriting_keys_or_references() -> None:
+    user, subject, draft = rows()
+    subject.name = "Математика."
+    subject.normalized_name = "математика."
+    canonical = ScheduleSubject(
+        id=uuid4(), profile_id=subject.profile_id, name="Математика", normalized_name="математика"
+    )
+    language = ScheduleSubject(
+        id=uuid4(), profile_id=subject.profile_id, name="Англійська", normalized_name="англійська"
+    )
+    language_variant = ScheduleSubject(
+        id=uuid4(),
+        profile_id=subject.profile_id,
+        name="Англійська мова.",
+        normalized_name="англійська мова.",
+    )
+    legacy_rows = [subject, canonical, language, language_variant]
+    before = [(item.id, item.normalized_name) for item in legacy_rows]
+    assignment = HomeworkAssignment(
+        id=uuid4(),
+        owner_user_id=user.id,
+        profile_id=subject.profile_id,
+        subject_id=subject.id,
+        text="existing homework",
+        due_at=datetime.now(UTC),
+        source_type="MANUAL",
+        version=1,
+    )
+    session = FakeSession([legacy_rows])
+    repo = AsyncPostgresHomeworkRepository(FakeFactory(session))  # type: ignore[arg-type]
+    repo._locked_user = AsyncMock(return_value=user)  # type: ignore[method-assign]
+    repo._active_profile = AsyncMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(id=subject.profile_id)
+    )
+    repo._current_subject_titles = AsyncMock(  # type: ignore[method-assign]
+        return_value=("Математика.", "Математика", "Математика", "Англійська", "Англійська мова.")
+    )
+    selected = await repo.list_subjects(17)
+    assert len(selected) == 2
+    assert next(item for item in selected if item.name == "Математика").id == canonical.id
+    assert [(item.id, item.normalized_name) for item in legacy_rows] == before
+    assert session.added == []
+    assert draft.subject_id == subject.id  # Existing foreign keys remain valid.
+    assert assignment.subject_id == subject.id
+    assert assignment.text == "existing homework"
+    for old in legacy_rows:
+        await repo._require_current_subject(session, subject.profile_id, old)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_subject_picker_creates_one_row_per_subject_not_per_lesson() -> None:
+    user, subject, _draft = rows()
+    session = FakeSession([[]])
+    repo = AsyncPostgresHomeworkRepository(FakeFactory(session))  # type: ignore[arg-type]
+    repo._locked_user = AsyncMock(return_value=user)  # type: ignore[method-assign]
+    repo._active_profile = AsyncMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(id=subject.profile_id)
+    )
+    titles = ("Математика.", "Математика", "Англійська", "Англійська мова", "Українська література")
+    repo._current_subject_titles = AsyncMock(return_value=titles)  # type: ignore[method-assign]
+    selected = await repo.list_subjects(17)
+    assert {item.name for item in selected} == {
+        "Математика",
+        "Англійська мова",
+        "Українська література",
+    }
+    assert len(session.added) == 3
+    assert {
+        item.normalized_name for item in session.added if isinstance(item, ScheduleSubject)
+    } == {"математика", "англійська мова", "українська література"}
+    assert len(titles) == 5
+
+
+@pytest.mark.asyncio
+async def test_subject_picker_without_canonical_key_reuses_deterministic_old_id() -> None:
+    user, subject, _draft = rows()
+    subject.id = UUID(int=2)
+    subject.name = "Математика."
+    subject.normalized_name = "математика."
+    other = ScheduleSubject(
+        id=UUID(int=1),
+        profile_id=subject.profile_id,
+        name="МАТЕМАТИКА..",
+        normalized_name="математика..",
+    )
+    session = FakeSession([[subject, other]])
+    repo = AsyncPostgresHomeworkRepository(FakeFactory(session))  # type: ignore[arg-type]
+    repo._locked_user = AsyncMock(return_value=user)  # type: ignore[method-assign]
+    repo._active_profile = AsyncMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(id=subject.profile_id)
+    )
+    repo._current_subject_titles = AsyncMock(return_value=("Математика.",))  # type: ignore[method-assign]
+    selected = await repo.list_subjects(17)
+    assert len(selected) == 1
+    assert selected[0].id == other.id
+    assert selected[0].name == "Математика"
+    assert other.normalized_name == "математика.."
+    assert subject.name == "Математика."
+    assert session.added == []
 
 
 @pytest.mark.asyncio

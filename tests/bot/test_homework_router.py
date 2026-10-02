@@ -3,9 +3,15 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 from uuid import UUID
 
-from time_tl.bot.homework_router import HomeworkUx, _due_on_date, _parse_date
+from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.types import CallbackQuery, Chat, Message, Update, User
+
+from time_tl.bot.homework_router import HomeworkUx, _due_on_date, _parse_date, build_homework_router
+from time_tl.bot.safety import BoundedMemoryStorage
 from time_tl.domain.homework import HomeworkSourceType
 
 
@@ -76,9 +82,7 @@ class FakeHomeworkPort:
         self.calls.append(("draft", telegram_user_id, token))
         return draft
 
-    async def discard_draft(
-        self, telegram_user_id: int, token: str, now: datetime
-    ) -> bool:
+    async def discard_draft(self, telegram_user_id: int, token: str, now: datetime) -> bool:
         self.calls.append(("discard", telegram_user_id, token, now))
         self.drafts.pop(token)
         return True
@@ -273,3 +277,84 @@ class HomeworkUxTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("2026-10-01T12:00:00+03:00", due.isoformat())
         self.assertIsNone(_parse_date("01.10.2026"))
+
+
+class HomeworkDispatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_first_data_update_is_retained_and_ttl_and_capacity_stay_bounded(self) -> None:
+        clock = [0.0]
+        storage = BoundedMemoryStorage(
+            max_records=1, idle_ttl_seconds=10, monotonic=lambda: clock[0]
+        )
+        first = StorageKey(bot_id=1, chat_id=41, user_id=41)
+        second = StorageKey(bot_id=1, chat_id=42, user_id=42)
+        self.assertEqual(
+            {"subject_id": "first"}, await storage.update_data(first, {"subject_id": "first"})
+        )
+        await storage.update_data(second, {"subject_id": "second"})
+        self.assertEqual({}, await storage.get_data(first))
+        self.assertEqual(1, storage.tracked_records)
+        clock[0] = 11.0
+        self.assertEqual({}, await storage.get_data(second))
+        self.assertEqual(0, storage.tracked_records)
+        self.assertEqual({}, await storage.update_data(first, {}))
+        self.assertEqual(0, storage.tracked_records)
+        await storage.close()
+
+    async def test_subject_callback_then_text_keeps_subject_in_bounded_storage(self) -> None:
+        port = FakeHomeworkPort()
+        storage = BoundedMemoryStorage()
+        dispatcher = Dispatcher(storage=storage)
+        dispatcher.include_router(build_homework_router(HomeworkUx(port)))
+        session = AsyncMock(return_value=True)
+        bot = Bot("123456:LOCAL_TEST_ONLY_NOT_A_REAL_TOKEN", session=session)
+        actor = User(id=41, is_bot=False, first_name="Test")
+        message = Message(
+            message_id=1,
+            date=datetime.now(UTC),
+            chat=Chat(id=41, type="private"),
+            from_user=actor,
+            text="menu",
+        )
+        callback = CallbackQuery(
+            id="local-callback",
+            from_user=actor,
+            chat_instance="local",
+            message=message,
+            data=f"hw:s:{port.subject.id}",
+        )
+        await dispatcher.feed_update(bot, Update(update_id=1, callback_query=callback))
+        key = StorageKey(bot_id=bot.id, chat_id=41, user_id=41)
+        self.assertEqual(str(port.subject.id), (await storage.get_data(key)).get("subject_id"))
+        await dispatcher.feed_update(
+            bot,
+            Update(
+                update_id=2,
+                message=message.model_copy(update={"message_id": 2, "text": "Test homework"}),
+            ),
+        )
+        self.assertTrue(any(call[0] == "suggest" for call in port.calls))
+        self.assertEqual("Test homework", (await storage.get_data(key))["text"])
+        responses = [getattr(call.args[1], "text", "") or "" for call in session.await_args_list]
+        self.assertTrue(any("Запропонована дата" in text for text in responses))
+        await dispatcher.feed_update(
+            bot,
+            Update(
+                update_id=3,
+                callback_query=callback.model_copy(update={"id": "due", "data": "hw:due:use"}),
+            ),
+        )
+        self.assertEqual(1, len(port.drafts))
+        token = next(iter(port.drafts))
+        await dispatcher.feed_update(
+            bot,
+            Update(
+                update_id=4,
+                callback_query=callback.model_copy(
+                    update={"id": "confirm", "data": f"hw:new:ok:{token}"}
+                ),
+            ),
+        )
+        self.assertEqual(1, len(port.items))
+        self.assertEqual("Test homework", next(iter(port.items.values())).text)
+        self.assertIsNone(await storage.get_state(key))
+        await storage.close()

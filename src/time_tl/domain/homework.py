@@ -97,7 +97,17 @@ def validate_subject_name(value: str) -> str:
 def normalize_subject_name(value: str) -> str:
     display_name = validate_subject_name(value)
     normalized = unicodedata.normalize("NFKC", display_name).casefold()
-    return re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    # Terminal dots are an import/display variation, not a different subject.
+    # Retain punctuation-only names rather than collapsing them to an empty key.
+    normalized = normalized.rstrip(". ") or normalized
+    language_aliases = {
+        "англійська": "англійська мова",
+        "українська": "українська мова",
+        "французька": "французька мова",
+        "німецька": "німецька мова",
+    }
+    return language_aliases.get(normalized, normalized)
 
 
 def validate_homework_text(value: str) -> str:

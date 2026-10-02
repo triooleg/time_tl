@@ -78,27 +78,42 @@ class AsyncPostgresHomeworkRepository:
                 profile = await self._active_profile(session, user.id)
                 current_titles = await self._current_subject_titles(session, profile.id)
                 current_by_normalized: dict[str, str] = {}
-                for raw_title in sorted(current_titles, key=str.casefold):
-                    display_name = validate_subject_name(raw_title)
+                for raw_title in sorted(
+                    current_titles,
+                    key=lambda title: (
+                        normalize_subject_name(title),
+                        validate_subject_name(title).casefold() != normalize_subject_name(title),
+                        title.casefold(),
+                        title,
+                    ),
+                ):
+                    original_name = validate_subject_name(raw_title)
+                    display_name = original_name.rstrip(". ") or original_name
                     current_by_normalized.setdefault(
                         normalize_subject_name(display_name), display_name
                     )
                 if not current_by_normalized:
                     return ()
 
-                existing = {
-                    item.normalized_name: item
-                    for item in (
-                        await session.execute(
-                            select(ScheduleSubject)
-                            .where(ScheduleSubject.profile_id == profile.id)
-                            .with_for_update()
-                        )
-                    ).scalars()
-                }
+                existing: defaultdict[str, list[ScheduleSubject]] = defaultdict(list)
+                for item in (
+                    await session.execute(
+                        select(ScheduleSubject)
+                        .where(ScheduleSubject.profile_id == profile.id)
+                        .with_for_update()
+                    )
+                ).scalars():
+                    # Older rows may have keys created before alias/dot normalization.
+                    # Keep every row and its foreign keys; group by its current name.
+                    existing[normalize_subject_name(item.name)].append(item)
                 selected: list[ScheduleSubject] = []
                 for normalized, name in current_by_normalized.items():
-                    row = existing.get(normalized)
+                    candidates = existing.get(normalized, [])
+                    row = min(
+                        candidates,
+                        key=lambda item: (item.normalized_name != normalized, item.id.int),
+                        default=None,
+                    )
                     if row is None:
                         row = ScheduleSubject(
                             id=uuid4(),
@@ -594,7 +609,7 @@ class AsyncPostgresHomeworkRepository:
             normalize_subject_name(title)
             for title in await self._current_subject_titles(session, profile_id)
         }
-        if subject.normalized_name not in current:
+        if normalize_subject_name(subject.name) not in current:
             raise HomeworkConflict("homework subject is no longer enabled in the schedule")
 
     async def _load_profile(self, session: AsyncSession, profile: ProfileRow) -> ScheduleProfile:

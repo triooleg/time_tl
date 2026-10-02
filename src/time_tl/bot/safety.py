@@ -10,7 +10,7 @@ from typing import Any
 
 from aiogram.exceptions import DataNotDictLikeError
 from aiogram.fsm.storage.base import StateType, StorageKey
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.memory import MemoryStorage, MemoryStorageRecord
 
 
 @dataclass(frozen=True)
@@ -161,6 +161,7 @@ class BoundedMemoryStorage(MemoryStorage):
             while len(self.storage) >= self._max_records and self._last_access:
                 oldest, _ = self._last_access.popitem(last=False)
                 self.storage.pop(oldest, None)
+            self.storage[key] = MemoryStorageRecord()
         elif key not in self.storage:
             return
         self._last_access[key] = now
