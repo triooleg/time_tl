@@ -4,6 +4,25 @@ Baseline gate/state snapshot: 2026-09-23. Session continuity updated: 2026-09-28
 This document separates verified local and server simulation evidence from
 Telegram staging and production evidence.
 
+## Current checkpoint — 2026-10-02
+
+- The public production stack remains on the RC19 application image with the RC20
+  admin-egress Compose patch. It is healthy but serves the pre-homework menu.
+- RC22 manual-homework code and migration `0008_homework_foundation` were installed
+  only in STAGING. Revision 13 was activated there, but the interactive canary found
+  that STAGING and production used the same Telegram Bot Token. Competing long-polling
+  processes produced `TelegramConflictError` and made the older production menu appear.
+- All STAGING application roles are stopped. Production was not changed and returned
+  to stable polling. Passwords, keys and tokens were not changed.
+- The current local RC23 preparation binds `homework_enabled=true` and migration head
+  `0008_homework_foundation` into the signed production manifest, fixes the production
+  bot capability to a literal Compose value, and rejects runtime capability drift.
+- Local verification for that preparation: 99 focused tests and 682 full-suite tests
+  passed; 6 destructive PostgreSQL cases remain environment-gated. Ruff, strict mypy
+  for 76 source files, compileall and diff-check passed. Independent safety review is
+  pending. No RC23 commit, tag, archive, image, attestation, production revision,
+  migration, preflight or deployment exists yet.
+
 ## Implemented
 
 - Flexible weekly schedules: odd/even dates and weeks, weekdays including working
@@ -129,6 +148,13 @@ produced an accepted snapshot, activated a revision, started delivery-capable
 services or sent a message. No production or canary deployment has occurred.
 
 ## Session Continuity
+
+Last session: 2026-10-02
+Stopped at: Local RC23 production-homework contract implemented and fully tested;
+independent safety review pending. Production remains unchanged on the older menu,
+and all STAGING application roles remain stopped after the shared-token conflict.
+Next action: resolve review findings, then create an exact RC23 commit/tag/archive
+packet for separate production deployment approval.
 
 Last session: 2026-09-28
 Stopped at: RC17 remains active in a bounded one-chat allowlisted STAGING launch.

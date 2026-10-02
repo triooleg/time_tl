@@ -1,1 +1,2 @@
 docker-compose.yml text eol=lf
+docker-compose.production.yml text eol=lf

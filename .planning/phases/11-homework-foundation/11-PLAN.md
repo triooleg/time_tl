@@ -1,7 +1,7 @@
 ---
 phase: 11-homework-foundation
-status: code_gate_pass_release_packaging_pending
-scope: local_only
+status: production_candidate_contract_in_progress
+scope: local_and_release_preparation
 ---
 
 # Phase 11: Manual personal homework
@@ -9,7 +9,9 @@ scope: local_only
 ## Goal
 
 Add a disabled-by-default, additive homework vertical slice without changing the alert state
-machine, alert provider, alert worker, sender worker, public runtime state, or production stack.
+machine, alert provider, alert worker, sender worker or existing public runtime state. The
+implementation phase keeps production closed; a later exact RC23 promotion updates the signed
+production contract only after the local and STAGING gates pass.
 
 OCR/image digitization and the Moiashkola integration are explicitly out of scope for this
 phase. Shared schedules and homework notifications are also deferred.

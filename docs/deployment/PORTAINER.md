@@ -25,8 +25,10 @@ The mandatory order for an approved production candidate is:
    its registry digest. Pin PostgreSQL and node-exporter by digest as well.
 2. Create the manifest from the final tag, commit, tree, source-archive SHA-256,
    application image digest, configuration revision, catalogue SHA-256, Alembic
-   head, provider, territory mode and singleton count. Do not rewrite or normalize
-   the manifest after signing.
+   head, provider, territory mode, singleton count and the exact boolean
+   `homework_enabled` capability. For the homework production candidate the signed
+   values must be `migration_head=0008_homework_foundation` and
+   `homework_enabled=true`. Do not rewrite or normalize the manifest after signing.
 3. Have the external signing system sign those exact manifest bytes with the
    protected Ed25519 private key. Transfer only the fixed manifest and base64
    detached signature into a root/operator-owned directory. Make files read-only
@@ -63,7 +65,9 @@ The mandatory order for an approved production candidate is:
    the gate. Separately inspect its structure in the protected operator session.
    Reject missing read-only attestation mounts, excess per-role secrets/networks, a
    non-empty staging allowlist, public PostgreSQL/node-exporter ports, or more than
-   one replica for bot/alert/schedule/sender.
+   one replica for bot/alert/schedule/sender. `HOMEWORK_ENABLED` must be the literal
+   `true` only on `bot`; it must not be an operator-overridable environment input or
+   appear on another role.
    The published admin port also requires `admin-web` to retain the non-internal
    `egress` network; Docker does not install that host binding when every attached
    network is internal. The host bind address and reverse proxy remain the access
@@ -78,7 +82,9 @@ The mandatory order for an approved production candidate is:
    PostgreSQL instance. The encrypted copy must also exist on storage independent
    from the server filesystem. Verify integrity, row counts and the rollback
    artifact; a checksum of an unencrypted same-disk dump is not restore evidence.
-   Start only PostgreSQL and internal node-exporter, then run the one migration job:
+   Start only PostgreSQL and internal node-exporter. Verify the source head is
+   `0007_outbox_indeterminate`, then run the one migration job and require the exact
+   target `0008_homework_foundation` before preflight:
 
    ```bash
    docker compose --env-file /protected/time-tl-production.env \

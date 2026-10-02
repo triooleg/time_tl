@@ -76,18 +76,21 @@ def _parse_manifest(payload: bytes) -> ProductionReleaseManifest:
         "provider",
         "catalog_sha256",
         "migration_head",
+        "homework_enabled",
         "replicas",
         "territory_selection",
     }
     if not isinstance(value, dict) or set(value) != fields:
         raise RuntimeContractError("production release attestation has unexpected fields")
-    string_fields = fields - {"config_revision", "replicas"}
+    string_fields = fields - {"config_revision", "replicas", "homework_enabled"}
     if any(not isinstance(value[field], str) for field in string_fields):
         raise RuntimeContractError("production release attestation has invalid field types")
     if any(
         not isinstance(value[field], int) or isinstance(value[field], bool)
         for field in {"config_revision", "replicas"}
     ):
+        raise RuntimeContractError("production release attestation has invalid field types")
+    if not isinstance(value["homework_enabled"], bool):
         raise RuntimeContractError("production release attestation has invalid field types")
     return ProductionReleaseManifest(**value)
 
@@ -250,6 +253,11 @@ async def validate_production_runtime_release(
     manifest, fingerprint = load_verified_release_attestation(
         expected_config_revision=settings.owner_config_revision
     )
+    if settings.service_role == "bot":
+        if settings.homework_enabled is not manifest.homework_enabled:
+            raise RuntimeContractError("production homework capability does not match release")
+    elif settings.homework_enabled:
+        raise RuntimeContractError("production homework capability is bot-only")
     heads, state, active = await _read_atomic_runtime_facts(settings)
     state_revision = state.get("active_revision")
     active_revision = active.get("revision")

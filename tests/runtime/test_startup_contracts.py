@@ -120,7 +120,8 @@ def production_release_manifest() -> ProductionReleaseManifest:
         config_revision=5,
         provider="alerts.in.ua/full-territory",
         catalog_sha256=region_registry_full.EXPECTED_SHA256,
-        migration_head="0007_outbox_indeterminate",
+        migration_head="0008_homework_foundation",
+        homework_enabled=True,
         replicas=1,
         territory_selection="manual-oblast-raion-hromada",
     )
@@ -135,12 +136,18 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(settings.homework_enabled)
 
-    def test_unreleased_homework_cannot_start_in_production(self) -> None:
-        with self.assertRaisesRegex(ValueError, "not approved for production"):
+    def test_homework_is_bot_only_and_production_bot_may_reach_signed_gate(self) -> None:
+        bot = settings_for(
+            "bot",
+            environment=Environment.PRODUCTION,
+            telegram=TelegramTransport.LIVE,
+        ).model_copy(update={"homework_enabled": True})
+        self.assertIs(bot, bot.validate_safety_boundaries())
+
+        with self.assertRaisesRegex(ValueError, "restricted to the bot role"):
             settings_for(
-                "bot",
+                "schedule-worker",
                 environment=Environment.PRODUCTION,
-                telegram=TelegramTransport.LIVE,
             ).model_copy(update={"homework_enabled": True}).validate_safety_boundaries()
 
     def test_sender_transport_timeout_is_capped_at_ten_seconds(self) -> None:
@@ -632,9 +639,10 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             PRODUCTION_RELEASE_MANIFEST["catalog_sha256"],
         )
         self.assertEqual(
-            "0007_outbox_indeterminate",
+            "0008_homework_foundation",
             PRODUCTION_RELEASE_MANIFEST["migration_head"],
         )
+        self.assertIs(True, PRODUCTION_RELEASE_MANIFEST["homework_enabled"])
         self.assertEqual(
             "65439f2f53e1a08e9dd15b80d07bbdb39c32f83ba482dbebe9c83311991e7772",
             production_release.PRODUCTION_RELEASE_PUBLIC_KEY_HEX,
@@ -691,6 +699,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             update={
                 "owner_config_source": OwnerConfigSource.DATABASE,
                 "owner_config_revision": None,
+                "homework_enabled": True,
             }
         )
         manifest = production_release_manifest()
@@ -710,7 +719,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 "time_tl.runtime.production_release._read_atomic_runtime_facts",
                 AsyncMock(
                     return_value=(
-                        ["0007_outbox_indeterminate"],
+                        ["0008_homework_foundation"],
                         {"active_revision": 5},
                         active,
                     )
@@ -773,6 +782,27 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("time_tl.runtime.production_release._read_atomic_runtime_facts", facts),
             self.assertRaisesRegex(RuntimeContractError, "database-managed owner config"),
+        ):
+            await validate_production_runtime_release(settings)
+        facts.assert_not_awaited()
+
+    async def test_production_runtime_rejects_homework_capability_drift_before_db_io(self) -> None:
+        settings = settings_for("bot", environment=Environment.PRODUCTION).model_copy(
+            update={
+                "owner_config_source": OwnerConfigSource.DATABASE,
+                "owner_config_revision": 5,
+                "homework_enabled": False,
+            }
+        )
+        manifest = production_release_manifest()
+        facts = AsyncMock()
+        with (
+            patch(
+                "time_tl.runtime.production_release.load_verified_release_attestation",
+                return_value=(manifest, manifest.fingerprint()),
+            ),
+            patch("time_tl.runtime.production_release._read_atomic_runtime_facts", facts),
+            self.assertRaisesRegex(RuntimeContractError, "homework capability"),
         ):
             await validate_production_runtime_release(settings)
         facts.assert_not_awaited()
@@ -955,6 +985,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             (replace(manifest, provider="fake"), 5, "provider mismatch"),
             (replace(manifest, catalog_sha256="e" * 64), 5, "catalogue mismatch"),
             (replace(manifest, migration_head="0005"), 5, "migration head mismatch"),
+            (replace(manifest, homework_enabled=False), 5, "homework capability mismatch"),
             (replace(manifest, replicas=2), 5, "exactly one replica"),
             (
                 replace(manifest, territory_selection="oblast-only"),

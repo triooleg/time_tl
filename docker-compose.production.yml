@@ -59,6 +59,9 @@ services:
       TELEGRAM_TRANSPORT: live
       OWNER_TELEGRAM_FERNET_KEY: ${OWNER_TELEGRAM_FERNET_KEY:?set in protected secrets}
       LESSON_LINK_FERNET_KEY: ${LESSON_LINK_FERNET_KEY:?set in protected secrets}
+      # This literal is additionally bound to the signed release manifest and
+      # cannot be enabled independently through Portainer environment values.
+      HOMEWORK_ENABLED: "true"
     networks: [egress, database]
     deploy: {replicas: 1}
 

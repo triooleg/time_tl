@@ -181,10 +181,8 @@ class Settings(BaseSettings):
     def validate_safety_boundaries(self) -> Settings:
         local = self.environment in {Environment.LOCAL, Environment.SIMULATION}
         database_managed = self.owner_config_source is OwnerConfigSource.DATABASE
-        if self.homework_enabled and self.environment is Environment.PRODUCTION:
-            raise ValueError(
-                "manual homework is not approved for production until its release gate passes"
-            )
+        if self.homework_enabled and self.service_role not in {"bot", "unspecified"}:
+            raise ValueError("manual homework capability is restricted to the bot role")
         if (
             self.alert_provider is AlertProvider.FAKE
             and not local

@@ -28,7 +28,8 @@ PRODUCTION_RELEASE_MANIFEST = {
     "provider": "alerts.in.ua/full-territory",
     "territory_selection": "manual-oblast-raion-hromada",
     "catalog_sha256": EXPECTED_SHA256,
-    "migration_head": "0007_outbox_indeterminate",
+    "migration_head": "0008_homework_foundation",
+    "homework_enabled": True,
     "replicas": 1,
 }
 
@@ -48,6 +49,7 @@ class ProductionReleaseManifest:
     provider: str
     catalog_sha256: str
     migration_head: str
+    homework_enabled: bool
     replicas: int
     territory_selection: str
 
@@ -87,6 +89,11 @@ def validate_production_release_manifest(
         raise RuntimeContractError("production release catalogue mismatch")
     if manifest.migration_head != PRODUCTION_RELEASE_MANIFEST["migration_head"]:
         raise RuntimeContractError("production release migration head mismatch")
+    if (
+        not isinstance(manifest.homework_enabled, bool)
+        or manifest.homework_enabled != PRODUCTION_RELEASE_MANIFEST["homework_enabled"]
+    ):
+        raise RuntimeContractError("production release homework capability mismatch")
     if isinstance(manifest.replicas, bool) or manifest.replicas != 1:
         raise RuntimeContractError("production release requires exactly one replica")
     if manifest.territory_selection != PRODUCTION_RELEASE_MANIFEST["territory_selection"]:

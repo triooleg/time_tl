@@ -43,9 +43,9 @@ def load_compose() -> dict[str, Any]:
 
 def test_base_staging_compose_is_byte_for_byte_unchanged() -> None:
     assert hashlib.sha256(STAGING_COMPOSE.read_bytes()).hexdigest() == STAGING_COMPOSE_SHA256
-    assert "docker-compose.yml text eol=lf" in (
-        ROOT / ".gitattributes"
-    ).read_text(encoding="utf-8").splitlines()
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    assert "docker-compose.yml text eol=lf" in attributes
+    assert "docker-compose.production.yml text eol=lf" in attributes
     assert "!.env.production.example" in (ROOT / ".gitignore").read_text(
         encoding="utf-8"
     ).splitlines()
@@ -62,6 +62,17 @@ def test_staging_homework_flag_is_bot_only_and_disabled_by_default() -> None:
         for name, service in services.items()
         if name != "bot"
     )
+
+
+def test_production_homework_is_literal_true_for_bot_only() -> None:
+    services = load_compose()["services"]
+    assert services["bot"]["environment"]["HOMEWORK_ENABLED"] == "true"
+    assert all(
+        "HOMEWORK_ENABLED" not in service.get("environment", {})
+        for name, service in services.items()
+        if name != "bot"
+    )
+    assert "${HOMEWORK_ENABLED" not in PRODUCTION_COMPOSE.read_text(encoding="utf-8")
 
 
 def test_all_images_are_required_inputs_to_the_external_verifier() -> None:
