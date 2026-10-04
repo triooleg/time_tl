@@ -275,7 +275,10 @@ class TelegramApplication:
         )
 
     def mode_prompt(self) -> View:
-        return View("Оберіть режим сповіщень:", self._mode_rows())
+        return View(
+            "Оберіть режим сповіщень:",
+            self._mode_rows() + ((Button("⬅️ До налаштувань", "menu:settings"),),),
+        )
 
     def choose_mode(self, user_id: int, mode: NotificationMode) -> View:
         account = self.repository.get_or_create(user_id)
@@ -363,7 +366,7 @@ class TelegramApplication:
         account = self.repository.get_or_create(user_id)
         active = next((profile for profile in account.profiles.values() if profile.active), None)
         summary = (
-            "⚙️ Ваші налаштування\n\n"
+            "🏠 Головне меню\n\n"
             f"🔔 Сповіщення: {account.mode.label if account.mode else 'не обрано'}\n"
             f"📍 Територія: {_friendly_territory_name(account.region_name)}\n"
             f"📚 Розклад: {active.name if active else 'ще немає'}"
@@ -378,8 +381,6 @@ class TelegramApplication:
             rows.append((Button("📝 Домашні завдання", "menu:homework"),))
         rows.extend(
             (
-                (Button("🔔 Сповіщення", "menu:notifications"),),
-                (Button("📍 Моя територія", "menu:region"),),
                 (Button("⚙️ Налаштування", "menu:settings"),),
                 (Button("ℹ️ Допомога", "menu:info"),),
             )
@@ -390,11 +391,11 @@ class TelegramApplication:
     def notifications_menu() -> View:
         return View(
             "🔔 Сповіщення\n\n"
-            "Оберіть, що потрібно налаштувати. Режим тривог і уроків "
-            "змінюється окремо від часу нагадування до уроку.",
+            "Оберіть режим тривог і уроків. Час нагадування "
+            "можна змінити в налаштуваннях.",
             (
                 (Button("🔔 Режим сповіщень", "menu:mode"),),
-                (Button("⏰ Час нагадування", "menu:reminder"),),
+                (Button("⬅️ До налаштувань", "menu:settings"),),
                 (Button("🏠 Головне меню", "menu:home"),),
             ),
         )
@@ -405,6 +406,7 @@ class TelegramApplication:
             "⚙️ Налаштування",
             (
                 (Button("🔔 Сповіщення", "menu:notifications"),),
+                (Button("📍 Моя територія", "menu:region"),),
                 (Button("⏰ Час нагадування", "menu:reminder"),),
                 (Button("🔐 Конфіденційність", "settings:privacy"),),
                 (Button("🏠 Головне меню", "menu:home"),),
@@ -608,7 +610,8 @@ class TelegramApplication:
         values = (0, 5, 10, 15, 30)
         return View(
             "За скільки хвилин нагадати про урок?",
-            tuple((Button(f"{value} хв", f"reminder:{value}"),) for value in values),
+            tuple((Button(f"{value} хв", f"reminder:{value}"),) for value in values)
+            + ((Button("⬅️ До налаштувань", "menu:settings"),),),
         )
 
     def set_reminder_lead(self, user_id: int, minutes: int) -> View:

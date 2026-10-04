@@ -79,13 +79,19 @@ class TelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
     def test_settings_privacy_and_notification_hubs_use_existing_controls(self) -> None:
         notifications = self.app.notifications_menu()
         self.assertEqual(
-            ["menu:mode", "menu:reminder", "menu:home"],
+            ["menu:mode", "menu:settings", "menu:home"],
             [button.callback_data for row in notifications.rows for button in row],
         )
 
         settings = self.app.settings_menu()
         self.assertEqual(
-            ["menu:notifications", "menu:reminder", "settings:privacy", "menu:home"],
+            [
+                "menu:notifications",
+                "menu:region",
+                "menu:reminder",
+                "settings:privacy",
+                "menu:home",
+            ],
             [button.callback_data for row in settings.rows for button in row],
         )
 

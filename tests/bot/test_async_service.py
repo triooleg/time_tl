@@ -279,15 +279,13 @@ class AsyncTelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         menu = await self.app.menu(303)
         labels = [button.label for row in menu.rows for button in row]
-        self.assertIn("⚙️ Ваші налаштування", menu.text)
+        self.assertIn("🏠 Головне меню", menu.text)
         self.assertIn("🔔 Сповіщення: Уроки + тривоги", menu.text)
         self.assertIn("📍 Територія: Кам’янська громада", menu.text)
         self.assertIn("📚 Розклад: ще немає", menu.text)
         self.assertEqual(
             [
                 "📚 Розклад",
-                "🔔 Сповіщення",
-                "📍 Моя територія",
                 "⚙️ Налаштування",
                 "ℹ️ Допомога",
             ],
@@ -301,9 +299,11 @@ class AsyncTelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         notifications = self.app.notifications_menu()
         self.assertEqual("menu:mode", notifications.rows[0][0].callback_data)
-        self.assertEqual("menu:reminder", notifications.rows[1][0].callback_data)
+        self.assertEqual("menu:settings", notifications.rows[1][0].callback_data)
         settings = self.app.settings_menu()
-        self.assertEqual("settings:privacy", settings.rows[2][0].callback_data)
+        self.assertEqual("menu:region", settings.rows[1][0].callback_data)
+        self.assertEqual("menu:reminder", settings.rows[2][0].callback_data)
+        self.assertEqual("settings:privacy", settings.rows[3][0].callback_data)
         privacy = self.app.privacy()
         self.assertIn("Telegram ID", privacy.text)
         self.assertIn("не зберігаються", privacy.text)
