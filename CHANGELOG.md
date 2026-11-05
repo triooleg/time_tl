@@ -11,6 +11,8 @@ deployments and their verification.
 - Compact Telegram weather cards with rounded temperatures, local precipitation times,
   significant wind gusts, and brief recommendations.
 - Bind scheduled lesson reminders to the confirmed alert territory in combined mode.
+- Retain the full operator schedule needed to validate opted-in electricity reminders.
+- Send opted-in weather bulletins at 07:00, 12:00, and 18:00 Kyiv time.
 
 ## 0.2.2 - 2026-11-05
 

@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
@@ -9,7 +10,10 @@ from tests.application.test_power_map_worker import NOW, setup_worker
 from tests.infrastructure.test_power_map_repository import region
 from time_tl.application.power_coverage import demanded_areas, retain_demanded_groups
 from time_tl.domain.power_outages.map import MapArea, RegionMap
+from time_tl.domain.power_outages.models import GROUPS as OPERATOR_GROUPS
 from time_tl.domain.power_outages.models import PowerProvider
+from time_tl.infrastructure.db.power_coverage import locked_power_groups
+from time_tl.infrastructure.db.power_map_preferences import preference_key
 
 AREA = MapArea("dnipropetrovska-oblast", "UA12000000000090473", "Область")
 GROUPS = frozenset({(PowerProvider.DTEK, "1.1")})
@@ -29,6 +33,29 @@ def test_filter_retains_only_exact_operator_group_not_air_region_or_names():
         replace(snapshot, area=MapArea("other-oblast", "UA32000000000030281", "Область")), GROUPS
     ).rows
     assert demanded_areas(GROUPS) == {AREA.slug}
+
+
+@pytest.mark.asyncio
+async def test_notifications_retain_full_operator_without_expanding_area_demand():
+    actor = uuid4()
+    row = SimpleNamespace(
+        key=preference_key(str(actor)),
+        value={
+            "version": 2, "provider": PowerProvider.DTEK.value, "group": "1.1",
+            "revision": 1, "enabled": True, "outage_enabled": True,
+            "restoration_enabled": True, "outage_lead": 10, "restoration_lead": 10,
+        },
+    )
+    for enabled in (True, False):
+        row.value["enabled"] = enabled
+        session = SimpleNamespace(execute=AsyncMock(side_effect=[
+            SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [actor])),
+            SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [row])),
+        ]))
+        demand = await locked_power_groups(session)
+        expected = OPERATOR_GROUPS if enabled else ("1.1",)
+        assert demand == {(PowerProvider.DTEK, group) for group in expected}
+        assert demanded_areas(demand) == {AREA.slug}
 
 
 @pytest.mark.asyncio

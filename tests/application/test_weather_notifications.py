@@ -137,23 +137,32 @@ def test_event_dispatch_tolerates_unrelated_future_hash_update_only() -> None:
     assert not event_supported(changed, event, WeatherThresholds(), NOW)
 
 
-def test_daily_tomorrow_window_and_restart_dedupe() -> None:
-    now = datetime(2026, 11, 5, 5, tzinfo=UTC)  # 07:00 Kyiv
-    tomorrow = now + timedelta(days=1)
+@pytest.mark.parametrize(("utc_hour", "title", "expected"), [
+    (5, "Прогноз на день", (4, 10)),
+    (10, "Прогноз на обід", (10, 10)),
+    (16, "Прогноз на вечір", (7, 7)),
+])
+def test_daily_bulletin_window_and_restart_dedupe(utc_hour, title, expected) -> None:
+    morning = datetime(2026, 11, 5, 5, tzinfo=UTC)
+    now = morning.replace(hour=utc_hour)
     snapshot = replace(
         snap(),
         fetched_at=now,
         provider_updated_at=now,
         expires_at=now + timedelta(hours=8),
         hours=(
-            ForecastHour(tomorrow, temperature_c=4),
-            ForecastHour(tomorrow + timedelta(hours=1), temperature_c=7),
+            ForecastHour(morning, temperature_c=4),
+            ForecastHour(morning.replace(hour=10), temperature_c=10),
+            ForecastHour(morning.replace(hour=16), temperature_c=7),
         ),
     )
     prefs = replace(PREFS, daily_forecast_enabled=True, daily_forecast_time=time(7))
     items = plan(snapshot, prefs=prefs, now=now)
     assert len(items) == 1 and items[0].kind == "WEATHER_DAILY"
-    assert items[0].payload["summary"]["forecast_date"] == "2026-11-06"
+    summary = items[0].payload["summary"]
+    assert summary["forecast_date"] == "2026-11-05"
+    assert (summary["temperature_min_c"], summary["temperature_max_c"]) == expected
+    assert title in render_weather_notification(items[0].payload)
     assert plan(snapshot, prefs=prefs, now=now, known=frozenset({items[0].key})) == ()
     assert plan(snapshot, prefs=prefs, now=now + timedelta(minutes=10)) == ()
 
@@ -241,17 +250,16 @@ def test_immutable_keys_bind_preference_and_configuration_generations() -> None:
     assert plan(events=events, delivered=frozenset(e.event_key for e in events)) == ()
 
 
-def test_daily_relevant_date_summary_ignores_day_plus_two_but_changes_for_selected_day() -> None:
+def test_daily_slot_identity_survives_summary_changes_and_reconfiguration() -> None:
     now = datetime(2026, 11, 5, 5, tzinfo=UTC)
-    tomorrow = now + timedelta(days=1)
     snapshot = replace(
         snap(),
         fetched_at=now,
         provider_updated_at=now,
         expires_at=now + timedelta(hours=8),
         hours=(
-            ForecastHour(tomorrow, temperature_c=4),
-            ForecastHour(tomorrow + timedelta(hours=1), temperature_c=7),
+            ForecastHour(now, temperature_c=4),
+            ForecastHour(now + timedelta(hours=1), temperature_c=7),
         ),
     )
     prefs = replace(PREFS, daily_forecast_enabled=True)
@@ -260,17 +268,17 @@ def test_daily_relevant_date_summary_ignores_day_plus_two_but_changes_for_select
         snapshot, hours=snapshot.hours + (ForecastHour(now + timedelta(days=2), temperature_c=25),)
     )
     assert snapshot.forecast_hash != unrelated.forecast_hash
-    assert daily_summary(snapshot, "2026-11-06") == daily_summary(unrelated, "2026-11-06")
+    assert daily_summary(snapshot, "2026-11-05") == daily_summary(unrelated, "2026-11-05")
     assert plan(unrelated, prefs=prefs, now=now)[0].key == first.key
     changed = replace(
         snapshot,
         hours=(
-            ForecastHour(tomorrow, temperature_c=1),
-            ForecastHour(tomorrow + timedelta(hours=1), temperature_c=7),
+            ForecastHour(now, temperature_c=1),
+            ForecastHour(now + timedelta(hours=1), temperature_c=7),
         ),
     )
-    assert daily_summary(snapshot, "2026-11-06") != daily_summary(changed, "2026-11-06")
-    assert plan(changed, prefs=prefs, now=now)[0].key != first.key
+    assert daily_summary(snapshot, "2026-11-05") != daily_summary(changed, "2026-11-05")
+    assert plan(changed, prefs=prefs, now=now)[0].key == first.key
     assert (
         WeatherNotificationPlanner().plan(
             user_id=USER,
@@ -282,7 +290,27 @@ def test_daily_relevant_date_summary_ignores_day_plus_two_but_changes_for_select
             delivered_event_keys=frozenset(),
             known_notification_keys=frozenset(),
             now=now,
-            delivered_forecast_dates=frozenset({"2026-11-06"}),
+            delivered_forecast_dates=frozenset({"2026-11-05:07"}),
         )
         == ()
     )
+    noon = now.replace(hour=10)
+    updated = replace(
+        changed,
+        expires_at=noon + timedelta(hours=8),
+        hours=changed.hours + (ForecastHour(noon, temperature_c=12),),
+    )
+    [midday] = WeatherNotificationPlanner().plan(
+        user_id=USER,
+        region_id="123",
+        locality="Locality",
+        snapshot=updated,
+        events=(),
+        preferences=prefs,
+        delivered_event_keys=frozenset(),
+        known_notification_keys=frozenset({first.key}),
+        now=noon,
+        delivered_forecast_dates=frozenset({"2026-11-05:07"}),
+    )
+    assert midday.key != first.key
+    assert "Прогноз на обід" in render_weather_notification(midday.payload)

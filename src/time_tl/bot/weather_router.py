@@ -193,24 +193,17 @@ class WeatherUx:
             lines.append("Усі типи вимкнено. Погодні повідомлення не надходитимуть.")
         elif not prefs.forecast_requested:
             lines.append("Для отримання повідомлень спочатку увімкніть отримання прогнозу.")
-        time_label = " (місцевий час)" if context.has_precise_point else ""
         lines.extend((
             "",
             *selected_types,
             "",
-            f"Час щоденного прогнозу: {prefs.daily_forecast_time:%H:%M}{time_label}",
+            "Щоденні випуски: 07:00, 12:00 і 18:00 (за Києвом)",
             f"Попередження за {prefs.notification_lead_minutes} хв",
         ))
         rows.append(
             tuple(
                 Button(f"{lead} хв", f"wt:lead:{lead}:{prefs.revision}")
                 for lead in (30, 60, 120, 180)
-            )
-        )
-        rows.append(
-            tuple(
-                Button(f"{hour:02d}:00", f"wt:time:{hour:02d}00:{prefs.revision}")
-                for hour in (7, 8, 18)
             )
         )
         rows.append(
@@ -296,9 +289,8 @@ def build_weather_router(ux: WeatherUx, *, router: Any) -> None:
                     elif len(parts) == 4 and parts[1] == "time":
                         if parts[2] not in ("0700", "0800", "1800"):
                             raise ValueError("invalid_weather_time")
-                        await ux.port.save_settings(
-                            actor, int(parts[3]), daily_forecast_time=time(int(parts[2][:2]))
-                        )
+                        # Old inline keyboards open the new schedule on refresh.
+                        pass
                     elif len(parts) == 3 and parts[1] == "disable":
                         await ux.port.disable_weather(actor, int(parts[2]))
                     else:

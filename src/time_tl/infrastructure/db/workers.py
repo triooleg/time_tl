@@ -112,6 +112,10 @@ def _scope_binding_matches(payload: dict[str, object], scope: AlertScope) -> boo
     return expected is not None and isinstance(binding, dict) and binding == expected
 
 
+def _scope_matches_confirmed_region(scope: AlertScope, user: User) -> bool:
+    return bool(user.confirmed_region_id) and scope.selected_region_id == user.confirmed_region_id
+
+
 def _delivery_deadline(row: OutboxMessage) -> datetime | None:
     key = {
         "CALENDAR_REMINDER": "starts_at",
@@ -178,8 +182,15 @@ class PostgresScheduleWorkerRepository:
             result = []
             for user, profile, state, scope in rows:
                 alert_state = AlertState(state) if state else AlertState.UNKNOWN
+                binding = (
+                    _schedule_scope_binding(scope)
+                    if scope is not None and _scope_matches_confirmed_region(scope, user)
+                    else None
+                )
                 if user.mode == "LESSONS_AND_ALERTS" and not provider_fresh:
                     alert_state = AlertState.STALE
+                elif user.mode == "LESSONS_AND_ALERTS" and binding is None:
+                    alert_state = AlertState.UNKNOWN
                 result.append(
                     ScheduleTarget(
                         user_id=str(user.id),
@@ -189,7 +200,7 @@ class PostgresScheduleWorkerRepository:
                         reminder_lead_minutes=user.reminder_lead_minutes,
                         alert_state=alert_state,
                         profile_revision=profile.version,
-                        scope_binding=_schedule_scope_binding(scope),
+                        scope_binding=binding,
                     )
                 )
             return tuple(result)
@@ -235,8 +246,15 @@ class PostgresScheduleWorkerRepository:
             result = []
             for user, profile, state, scope in rows:
                 alert_state = AlertState(state) if state else AlertState.UNKNOWN
+                binding = (
+                    _schedule_scope_binding(scope)
+                    if scope is not None and _scope_matches_confirmed_region(scope, user)
+                    else None
+                )
                 if user.mode == "LESSONS_AND_ALERTS" and not provider_fresh:
                     alert_state = AlertState.STALE
+                elif user.mode == "LESSONS_AND_ALERTS" and binding is None:
+                    alert_state = AlertState.UNKNOWN
                 result.append(
                     ScheduleTarget(
                         user_id=str(user.id),
@@ -246,7 +264,7 @@ class PostgresScheduleWorkerRepository:
                         reminder_lead_minutes=user.reminder_lead_minutes,
                         alert_state=alert_state,
                         profile_revision=profile.version,
-                        scope_binding=_schedule_scope_binding(scope),
+                        scope_binding=binding,
                     )
                 )
             return tuple(result)
@@ -1246,6 +1264,10 @@ class PostgresSenderRepository:
                 ):
                     return False
                 if not _scope_binding_matches(row.payload, scope):
+                    return False
+                if row.event_type == "LESSON_REMINDER" and not _scope_matches_confirmed_region(
+                    scope, user
+                ):
                     return False
                 if row.event_type == "RETURN_TO_ACTIVE_LESSON" and not _transition_matches(
                     row, snapshot

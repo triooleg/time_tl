@@ -50,6 +50,13 @@ EVENT_FIELDS = {
     "initial",
 }
 SUMMARY_FIELDS = {"forecast_date", "temperature_min_c", "temperature_max_c", "interval_count"}
+DAILY_FORECAST_HOURS = (7, 12, 18)
+DAILY_FORECAST_WINDOW = timedelta(minutes=10)
+DAILY_FORECAST_TITLES = {
+    7: "🌅 Прогноз на день",
+    12: "☀️ Прогноз на обід",
+    18: "🌆 Прогноз на вечір",
+}
 
 
 @dataclass(frozen=True)
@@ -220,10 +227,12 @@ def render_weather_notification(payload: Mapping[str, Any]) -> str:
     lines = ["🌤 Прогноз погоди", f"📍 {escape(value['locality'])}"]
     if value["kind"] == "WEATHER_DAILY":
         summary = value["summary"]
+        slot = forecast_slot(summary["forecast_date"], value["expires_at"])
+        if slot is not None:
+            lines[0] = DAILY_FORECAST_TITLES[slot]
         lines += [
-            f"На {summary['forecast_date']}",
+            date.fromisoformat(summary["forecast_date"]).strftime("%d.%m.%Y"),
             f"🌡 {summary['temperature_min_c']:+g}…{summary['temperature_max_c']:+g}°C",
-            f"За {summary['interval_count']} доступними інтервалами прогнозу.",
         ]
     else:
         labels = {
@@ -261,15 +270,39 @@ def render_weather_notification(payload: Mapping[str, Any]) -> str:
     return text
 
 
-def daily_summary(snapshot: ForecastSnapshot, date_iso: str) -> dict[str, object] | None:
+def due_forecast_slot(now: datetime) -> datetime | None:
+    local = now.astimezone(KYIV)
+    if local.hour not in DAILY_FORECAST_HOURS:
+        return None
+    due = local.replace(minute=0, second=0, microsecond=0)
+    return due if local < due + DAILY_FORECAST_WINDOW else None
+
+
+def forecast_slot(date_iso: str, expiry: object) -> int | None:
+    # Same-day bulletins expire within their slot. Legacy messages cover the
+    # next day, so the existing outbox shape remains readable during rollback.
+    due = due_forecast_slot(_instant(expiry) - timedelta(microseconds=1))
+    return due.hour if due is not None and due.date().isoformat() == date_iso else None
+
+
+def forecast_delivery_key(date_iso: str, expiry: object) -> str:
+    slot = forecast_slot(date_iso, expiry)
+    return f"{date_iso}:{slot:02d}" if slot is not None else date_iso
+
+
+def daily_summary(
+    snapshot: ForecastSnapshot, date_iso: str, *, slot: int | None = None
+) -> dict[str, object] | None:
     target = date.fromisoformat(date_iso)
     if target.isoformat() != date_iso:
         raise ValueError("invalid_weather_forecast_date")
-    temperatures = [
-        hour.temperature_c
-        for hour in snapshot.hours
-        if hour.forecast_at.astimezone(KYIV).date() == target and hour.temperature_c is not None
-    ]
+    end_hour = 18 if slot == 12 else 24
+    temperatures = []
+    for hour in snapshot.hours:
+        local = hour.forecast_at.astimezone(KYIV)
+        if local.date() == target and (slot is None or slot <= local.hour < end_hour):
+            if hour.temperature_c is not None:
+                temperatures.append(hour.temperature_c)
     if not temperatures:
         return None
     return {
@@ -419,21 +452,13 @@ class WeatherNotificationPlanner:
                 now + timedelta(minutes=10),
             )
             emit("WEATHER_EVENTS", keys, None, unique, expiry, keys)
-        if prefs.daily_forecast_enabled:
-            local = now.astimezone(KYIV)
-            due = datetime.combine(local.date(), prefs.daily_forecast_time, tzinfo=KYIV)
-            if due <= local < due + timedelta(minutes=10):
-                tomorrow = local.date() + timedelta(days=1)
-                if tomorrow.isoformat() in delivered_forecast_dates:
-                    return tuple(result)
-                summary = daily_summary(snapshot, tomorrow.isoformat())
+        forecast_due = due_forecast_slot(now)
+        if prefs.daily_forecast_enabled and forecast_due is not None:
+            today = forecast_due.date().isoformat()
+            expiry = min(snapshot.expires_at, forecast_due + DAILY_FORECAST_WINDOW)
+            key = forecast_delivery_key(today, expiry.isoformat())
+            if key not in delivered_forecast_dates:
+                summary = daily_summary(snapshot, today, slot=forecast_due.hour)
                 if summary is not None:
-                    emit(
-                        "WEATHER_DAILY",
-                        (),
-                        summary,
-                        [],
-                        min(snapshot.expires_at, now + timedelta(minutes=10)),
-                        (tomorrow.isoformat(), tuple(sorted(summary.items()))),
-                    )
+                    emit("WEATHER_DAILY", (), summary, [], expiry, key)
         return tuple(result)

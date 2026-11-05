@@ -531,8 +531,8 @@ def daily_claim(store):
     store.snapshot = replace(
         store.snapshot,
         hours=(
-            ForecastHour(NOW + timedelta(days=1), temperature_c=4),
-            ForecastHour(NOW + timedelta(days=1, hours=1), temperature_c=7),
+            ForecastHour(NOW, temperature_c=4),
+            ForecastHour(NOW + timedelta(hours=1), temperature_c=7),
         ),
     )
     plan = WeatherNotificationPlanner().plan(
@@ -571,8 +571,8 @@ async def test_daily_final_policy_rejects_changed_selected_date_summary(store):
     store.snapshot = replace(
         store.snapshot,
         hours=(
-            ForecastHour(NOW + timedelta(days=1), temperature_c=1),
-            ForecastHour(NOW + timedelta(days=1, hours=1), temperature_c=7),
+            ForecastHour(NOW, temperature_c=1),
+            ForecastHour(NOW + timedelta(hours=1), temperature_c=7),
         ),
     )
     assert not await db.weather_delivery_policy(Session(store), store.row, NOW)

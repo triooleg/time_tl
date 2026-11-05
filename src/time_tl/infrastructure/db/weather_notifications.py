@@ -12,7 +12,6 @@ from dataclasses import dataclass, fields
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import DateTime, and_, func, literal, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
@@ -22,7 +21,10 @@ from time_tl.application.weather_notifications import (
     WeatherNotificationPlanner,
     WeatherNotificationPreferences,
     daily_summary,
+    due_forecast_slot,
     event_supported,
+    forecast_delivery_key,
+    forecast_slot,
     validate_weather_notification_payload,
 )
 from time_tl.domain.weather import ForecastSnapshot, WeatherThresholds
@@ -84,7 +86,9 @@ def semantic_delivery_history(
             continue
         payload = validate_weather_notification_payload(row.payload)
         if row.event_type == "WEATHER_DAILY":
-            target = str(payload["summary"]["forecast_date"])
+            target = forecast_delivery_key(
+                payload["summary"]["forecast_date"], payload["expires_at"]
+            )
             if ambiguous:
                 ambiguous_dates.add(target)
             else:
@@ -298,11 +302,19 @@ async def weather_delivery_policy(
             list(receipts), list(history_rows), excluding=row.id, now=now
         )
         if row.event_type == "WEATHER_DAILY":
+            summary = payload["summary"]
+            forecast_date = summary["forecast_date"]
+            expiry = payload["expires_at"]
+            slot = forecast_slot(forecast_date, expiry)
+            due = due_forecast_slot(now)
             if (
                 not pref.daily_forecast_enabled
-                or daily_summary(snapshot, payload["summary"]["forecast_date"])
-                != payload["summary"]
-                or payload["summary"]["forecast_date"] in ambiguous_dates | delivered_dates
+                or slot is None  # Legacy next-day rows remain readable for history and rollback.
+                or due is None
+                or due.hour != slot
+                or due.date().isoformat() != forecast_date
+                or daily_summary(snapshot, forecast_date, slot=slot) != summary
+                or forecast_delivery_key(forecast_date, expiry) in ambiguous_dates | delivered_dates
                 or "*" in ambiguous_dates
             ):
                 return False
@@ -450,14 +462,10 @@ def due_weather_targets(now: datetime, *, after: UUID | None = None, limit: int 
         .correlate(User, UserWeatherPreference)
         .exists()
     )
-    local = now.astimezone(ZoneInfo("Europe/Kyiv"))
-    lower = local - timedelta(minutes=10)
     daily = and_(
         UserWeatherPreference.daily_forecast_enabled,
-        UserWeatherPreference.daily_forecast_time <= local.time(),
+        literal(due_forecast_slot(now) is not None),
     )
-    if local.date() == lower.date():
-        daily = and_(daily, UserWeatherPreference.daily_forecast_time > lower.time())
     query = (
         select(UserWeatherPreference.user_id)
         .join(User, User.id == UserWeatherPreference.user_id)
@@ -551,7 +559,9 @@ class PostgresWeatherNotificationPlanner:
                 if plan.kind == "WEATHER_DAILY":
                     summary = plan.payload["summary"]
                     assert isinstance(summary, dict)
-                    if "*" in ambiguous_dates or summary["forecast_date"] in ambiguous_dates:
+                    if "*" in ambiguous_dates or forecast_delivery_key(
+                        summary["forecast_date"], plan.payload["expires_at"]
+                    ) in ambiguous_dates:
                         continue
                 elif any(key[:32] in ambiguous_events for key in plan.event_keys):
                     continue

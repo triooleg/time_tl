@@ -399,7 +399,6 @@ async def test_full_independent_preferences_controls_visible_without_auto_enable
         "wt:flag:temp:0",
         "wt:flag:frost:0",
         "wt:lead:120:0",
-        "wt:time:0700:0",
     } <= actions
     assert port.writes == 0 and not port.prefs.weather_enabled
 
@@ -416,7 +415,8 @@ async def test_settings_describe_every_type_and_use_the_confirmed_locality() -> 
     assert "Загальний перемикач: увімкнено." in view.text
     assert "Усі типи вимкнено. Погодні повідомлення не надходитимуть." in view.text
     assert "📍 Кам'янське" in view.text
-    assert "07:00 (місцевий час)" in view.text and "Київ" not in view.text
+    assert "07:00, 12:00 і 18:00 (за Києвом)" in view.text
+    assert not any((action or "").startswith("wt:time:") for action in callbacks(view))
     for _, _, label in SETTING_FLAGS:
         assert f"{label} — вимкнено" in view.text
     port.ctx = replace(port.ctx, locality="м. Львів")

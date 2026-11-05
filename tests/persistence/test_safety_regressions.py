@@ -1616,6 +1616,48 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(sent)
             self.assertEqual(message.last_error_code, "final_delivery_policy_changed")
 
+    async def test_combined_lesson_reminder_requires_the_current_confirmed_scope(self):
+        now = AUTHORIZATION_AT
+        user = User(id=uuid4(), telegram_user_id=42, mode="LESSONS_AND_ALERTS")
+        scope = AlertScope(
+            id=uuid4(), user_id=user.id, selected_region_id="31", applicable_region_ids=["31"]
+        )
+        snapshot = AlertSnapshot(scope_id=scope.id, state=AlertState.CLEAR_CONFIRMED.value)
+        profile = ProfileRow(id=uuid4(), user_id=user.id, is_active=True, version=1)
+        poll = PollRow(singleton_id=1, last_success_at=now)
+        message = OutboxMessage(
+            id=uuid4(),
+            aggregate_type="schedule",
+            aggregate_id=str(user.id),
+            event_key="lesson-reminder:confirmed-scope",
+            event_type="LESSON_REMINDER",
+            payload={
+                "telegram_chat_id": 42,
+                "profile_revision": 1,
+                "starts_at": (now + timedelta(minutes=5)).isoformat(),
+                "scope_binding": bind_scope(scope),
+            },
+        )
+        session = FinalDeliverySession({
+            OutboxMessage: message,
+            User: user,
+            AlertScope: scope,
+            AlertSnapshot: snapshot,
+            ProfileRow: profile,
+            PollRow: poll,
+        })
+        for confirmed, expected in (("31", True), ("32", False), (None, False)):
+            user.confirmed_region_id = confirmed
+            allowed = await PostgresSenderRepository._is_currently_deliverable(
+                session,  # type: ignore[arg-type]
+                message,
+                authorization_at=now,
+                stale_after=STALE_AFTER,
+                lock_policy_rows=True,
+                expected_recipient=RECIPIENT,
+            )
+            self.assertEqual(allowed, expected)
+
     async def test_final_authorization_blocks_profile_revision_change_after_claim(self):
         now = datetime(2026, 9, 21, 6, tzinfo=UTC)
         user = User(id=uuid4(), telegram_user_id=42, mode="LESSONS_ONLY")
