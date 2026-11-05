@@ -30,6 +30,12 @@ ONE_HOUR = timedelta(hours=1)
 PRECIPITATION_CODE = re.compile(r"(light|heavy)?(rain|snow|sleet)(showers)?(andthunder)?")
 PRECIPITATION_LABELS = {"rain": "🌧 Дощ", "snow": "❄️ Сніг", "sleet": "🌨 Мокрий сніг"}
 SKY_ICONS = {"clearsky": "☀️", "fair": "🌤", "partlycloudy": "⛅", "cloudy": "☁️", "fog": "🌫"}
+DAY_PERIODS = (
+    (0, 6, "🌙 Ніч"),
+    (6, 12, "🌅 Ранок"),
+    (12, 18, "☀️ Обід"),
+    (18, 24, "🌆 Вечір"),
+)
 
 
 def short_weather_locality(name: str) -> str:
@@ -85,6 +91,42 @@ def _daily_range(hours: list[ForecastHour], day: date) -> tuple[float, float] | 
     return min(values), max(values)
 
 
+def _temperature_range(low: float, high: float) -> str:
+    value = f"{low:+g}" if low == high else f"{low:+g}…{high:+g}"
+    return f"{value}°C"
+
+
+def _precipitation_labels(hours: list[ForecastHour]) -> list[str]:
+    kinds = {
+        match[2] for hour in hours
+        if (match := PRECIPITATION_CODE.fullmatch(_weather_code(hour))) is not None
+    }
+    if any((hour.snowfall_cm or 0) > 0 for hour in hours):
+        kinds.add("snow")
+    labels = [label for kind, label in PRECIPITATION_LABELS.items() if kind in kinds]
+    if not labels and any((hour.precipitation_mm or 0) > 0 for hour in hours):
+        labels.append("💧 Опади")
+    return labels
+
+
+def _period_lines(hours: list[ForecastHour], day: date, now: datetime) -> list[str]:
+    if not hours:
+        return []
+    local_now = now.astimezone(KYIV)
+    by_hour = [(hour.forecast_at.astimezone(KYIV).hour, hour) for hour in hours]
+    lines = []
+    for start, end, label in DAY_PERIODS:
+        if day == local_now.date() and local_now.hour >= end:
+            continue
+        period = [hour for local_hour, hour in by_hour if start <= local_hour < end]
+        values = [hour.temperature_c for hour in period if hour.temperature_c is not None]
+        temperature = (
+            f"🌡 {_temperature_range(min(values), max(values))}" if values else TEMPERATURE_PENDING
+        )
+        lines.append(" · ".join((f"<b>{label}</b>", temperature, *_precipitation_labels(period))))
+    return lines
+
+
 def render_forecast(snapshot: ForecastSnapshot, locality: str, now: datetime, mode: str) -> str:
     today = now.astimezone(KYIV).date()
     tomorrow = today + timedelta(days=1)
@@ -126,10 +168,8 @@ def render_forecast(snapshot: ForecastSnapshot, locality: str, now: datetime, mo
                 prefix = "Зараз: " if mode != "now" else ""
                 temperatures.append(f"🌡 {prefix}{current.temperature_c:+g}°C")
         if mode != "now" and (bounds := ranges[day]) is not None:
-            low, high = bounds
-            value = f"{low:+g}" if low == high else f"{low:+g}…{high:+g}"
             prefix = "За добу: " if day == today else ""
-            temperatures.append(f"🌡 {prefix}{value}°C")
+            temperatures.append(f"🌡 {prefix}{_temperature_range(*bounds)}")
         if not temperatures:
             temperatures.append(TEMPERATURE_PENDING)
         icons = Counter(_condition(hour) for hour in visible)
@@ -138,14 +178,11 @@ def render_forecast(snapshot: ForecastSnapshot, locality: str, now: datetime, mo
             icons.most_common(1)[0][0] if icons else "🌡"
         )
         lines = [f"{icon} <b>{label}, {day.day} {MONTHS[day.month - 1]}</b>", *temperatures]
-        precipitation = {
-            match[2] for hour in visible
-            if (match := PRECIPITATION_CODE.fullmatch(_weather_code(hour))) is not None
-        }
-        if precipitation:
-            lines.append(" · ".join(
-                label for kind, label in PRECIPITATION_LABELS.items() if kind in precipitation
-            ))
+        if mode == "now":
+            if precipitation := _precipitation_labels(visible):
+                lines.append(" · ".join(precipitation))
+        else:
+            lines.extend(_period_lines(visible, day, now))
         blocks.append("\n".join(lines))
         upcoming.extend(visible)
 

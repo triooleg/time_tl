@@ -116,6 +116,7 @@ class WeatherUx:
             f"🌤 Погода\n📍 {locality}",
             (
                 (Button("🌡 Прогноз на зараз", "wt:now"),),
+                (Button("📅 Прогноз на сьогодні", "wt:today"),),
                 (Button("🌤 Прогноз на завтра", "wt:tomorrow"),),
                 (Button("📅 Прогноз на 3 дні", "wt:three"),),
                 (Button("⚠️ Погодні попередження", "wt:warnings"),),
@@ -126,7 +127,7 @@ class WeatherUx:
         )
 
     async def forecast(self, actor: int, mode: str) -> View:
-        if mode not in {"now", "tomorrow", "three"}:
+        if mode not in {"now", "today", "tomorrow", "three"}:
             raise ValueError("unknown_weather_view")
         context = await self.port.context(actor)
         prefs = await self.port.preferences(actor)
@@ -249,7 +250,7 @@ def build_weather_router(ux: WeatherUx, *, router: Any) -> None:
                         raise ValueError("weather_point_missing")
                     await ux.port.request_forecast(actor)
                     view = await ux.home(actor)
-                elif raw in {"wt:now", "wt:tomorrow", "wt:three"}:
+                elif raw in {"wt:now", "wt:today", "wt:tomorrow", "wt:three"}:
                     view = await ux.forecast(actor, raw.split(":")[1])
                 elif raw == "wt:settings":
                     view = await ux.settings(actor)

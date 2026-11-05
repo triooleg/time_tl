@@ -88,7 +88,7 @@ async def test_opening_menu_no_implicit_consent_or_notifications() -> None:
     assert port.writes == 0 and not port.prefs.weather_enabled
     await port.request_forecast(1)
     assert not port.prefs.weather_enabled
-    assert "wt:tomorrow" in callbacks(await WeatherUx(port).home(1))
+    assert {"wt:today", "wt:tomorrow"} <= callbacks(await WeatherUx(port).home(1))
 
 
 async def test_oblast_or_unverified_point_requires_finer_selection() -> None:
@@ -189,6 +189,34 @@ async def test_multiday_card_labels_precipitation_on_its_own_local_date() -> Non
     assert "☁️ <b>Завтра, 6 листопада" in tomorrow and "🌧 Дощ" in tomorrow
     assert "7 листопада" in next_day and "❄️ Сніг · 🌨 Мокрий сніг" in next_day
     assert "🌧 Дощ" not in next_day and "❄️ Сніг" not in tomorrow
+
+
+async def test_day_parts_use_local_hours_and_only_show_expected_precipitation() -> None:
+    port = Port()
+    await port.request_forecast(1)
+    tomorrow = TODAY_START + timedelta(days=1)
+    port.value = snapshot(
+        ForecastHour(NOW - timedelta(hours=1), temperature_c=-12, weather_code="snow"),
+        ForecastHour(NOW, temperature_c=6, weather_code="cloudy"),
+        ForecastHour(NOW + timedelta(hours=1), temperature_c=8, weather_code="rain"),
+        ForecastHour(NOW + timedelta(hours=6), precipitation_mm=0.4),
+        ForecastHour(tomorrow, temperature_c=-2, weather_code="sleet"),
+        ForecastHour(tomorrow + timedelta(hours=6), temperature_c=1, weather_code="snow"),
+        ForecastHour(tomorrow + timedelta(hours=12), temperature_c=7, weather_code="fair_day"),
+        ForecastHour(tomorrow + timedelta(hours=18), temperature_c=2, weather_code="lightrain"),
+    )
+    ux = WeatherUx(port, clock=lambda: NOW)
+    today = await ux.forecast(1, "today")
+    assert "☀️ Обід</b> · 🌡 +6…+8°C · 🌧 Дощ" in today.text
+    assert "🌆 Вечір</b> · 🌡 Прогноз температури уточнюється · 💧 Опади" in today.text
+    assert all(text not in today.text for text in ("Ніч", "Ранок", "-12°C", "❄️ Сніг"))
+    next_day = await ux.forecast(1, "tomorrow")
+    assert "🌙 Ніч</b> · 🌡 -2°C · 🌨 Мокрий сніг" in next_day.text
+    assert "🌅 Ранок</b> · 🌡 +1°C · ❄️ Сніг" in next_day.text
+    assert "<b>☀️ Обід</b> · 🌡 +7°C" in next_day.text.splitlines()
+    assert "🌆 Вечір</b> · 🌡 +2°C · 🌧 Дощ" in next_day.text
+    current = await ux.forecast(1, "now")
+    assert "+6°C" in current.text and "Обід" not in current.text
 
 
 @pytest.mark.parametrize(
