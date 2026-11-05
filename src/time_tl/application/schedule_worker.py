@@ -27,6 +27,7 @@ class ScheduleTarget:
     reminder_lead_minutes: int = 5
     alert_state: AlertState = AlertState.UNKNOWN
     profile_revision: int = 1
+    scope_binding: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.reminder_lead_minutes <= 120:
@@ -186,6 +187,12 @@ class ScheduleWorker:
                         "starts_at": starts_at.isoformat(),
                         "join_link_ref": _join_link_ref(lesson),
                         "profile_revision": target.profile_revision,
+                        **(
+                            {"scope_binding": dict(target.scope_binding)}
+                            if target.mode is NotificationMode.LESSONS_AND_ALERTS
+                            and target.scope_binding is not None
+                            else {}
+                        ),
                     },
                     available_at=due_at,
                 )

@@ -10,6 +10,7 @@ deployments and their verification.
 
 - Compact Telegram weather cards with rounded temperatures, local precipitation times,
   significant wind gusts, and brief recommendations.
+- Bind scheduled lesson reminders to the confirmed alert territory in combined mode.
 
 ## 0.2.2 - 2026-11-05
 

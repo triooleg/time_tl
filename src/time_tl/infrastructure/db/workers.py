@@ -91,19 +91,25 @@ def _provider_is_fresh(
     return timedelta(0) <= age <= stale_after
 
 
-def _scope_binding_matches(payload: dict[str, object], scope: AlertScope) -> bool:
-    binding = payload.get("scope_binding")
+def _schedule_scope_binding(scope: AlertScope | None) -> dict[str, object] | None:
+    if scope is None:
+        return None
     provider = (scope.territory_provider or "").strip()
     catalog_version = (scope.territory_catalog_version or "").strip()
-    if not provider or not catalog_version or not isinstance(binding, dict):
-        return False
-    expected: dict[str, object] = {
+    if not provider or not catalog_version:
+        return None
+    return {
         "provider": provider,
         "catalog_version": catalog_version,
         "selected_region_id": scope.selected_region_id,
         "applicable_region_ids": sorted(set(scope.applicable_region_ids)),
     }
-    return binding == expected
+
+
+def _scope_binding_matches(payload: dict[str, object], scope: AlertScope) -> bool:
+    binding = payload.get("scope_binding")
+    expected = _schedule_scope_binding(scope)
+    return expected is not None and isinstance(binding, dict) and binding == expected
 
 
 def _delivery_deadline(row: OutboxMessage) -> datetime | None:
@@ -158,7 +164,7 @@ class PostgresScheduleWorkerRepository:
                 self._stale_after,
             )
             statement = (
-                select(User, ScheduleProfile, AlertSnapshot.state)
+                select(User, ScheduleProfile, AlertSnapshot.state, AlertScope)
                 .join(ScheduleProfile, ScheduleProfile.user_id == User.id)
                 .outerjoin(AlertScope, AlertScope.user_id == User.id)
                 .outerjoin(AlertSnapshot, AlertSnapshot.scope_id == AlertScope.id)
@@ -170,7 +176,7 @@ class PostgresScheduleWorkerRepository:
             )
             rows = (await session.execute(statement)).all()
             result = []
-            for user, profile, state in rows:
+            for user, profile, state, scope in rows:
                 alert_state = AlertState(state) if state else AlertState.UNKNOWN
                 if user.mode == "LESSONS_AND_ALERTS" and not provider_fresh:
                     alert_state = AlertState.STALE
@@ -183,6 +189,7 @@ class PostgresScheduleWorkerRepository:
                         reminder_lead_minutes=user.reminder_lead_minutes,
                         alert_state=alert_state,
                         profile_revision=profile.version,
+                        scope_binding=_schedule_scope_binding(scope),
                     )
                 )
             return tuple(result)
@@ -211,7 +218,7 @@ class PostgresScheduleWorkerRepository:
                 self._stale_after,
             )
             statement = (
-                select(User, ScheduleProfile, AlertSnapshot.state)
+                select(User, ScheduleProfile, AlertSnapshot.state, AlertScope)
                 .join(ScheduleProfile, ScheduleProfile.user_id == User.id)
                 .outerjoin(AlertScope, AlertScope.user_id == User.id)
                 .outerjoin(AlertSnapshot, AlertSnapshot.scope_id == AlertScope.id)
@@ -226,7 +233,7 @@ class PostgresScheduleWorkerRepository:
                 statement = statement.where(User.id > cursor)
             rows = (await session.execute(statement)).all()
             result = []
-            for user, profile, state in rows:
+            for user, profile, state, scope in rows:
                 alert_state = AlertState(state) if state else AlertState.UNKNOWN
                 if user.mode == "LESSONS_AND_ALERTS" and not provider_fresh:
                     alert_state = AlertState.STALE
@@ -239,6 +246,7 @@ class PostgresScheduleWorkerRepository:
                         reminder_lead_minutes=user.reminder_lead_minutes,
                         alert_state=alert_state,
                         profile_revision=profile.version,
+                        scope_binding=_schedule_scope_binding(scope),
                     )
                 )
             return tuple(result)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 
 from time_tl.application.schedule_worker import (
@@ -75,6 +76,23 @@ class ScheduleWorkerTests(unittest.IsolatedAsyncioTestCase):
         for state in (AlertState.ACTIVE, AlertState.STALE, AlertState.UNKNOWN):
             repo = MemoryRepo((target(state=state),))
             self.assertEqual(await ScheduleWorker(repo).run_once(self.NOW), 0)
+
+    async def test_combined_reminder_carries_confirmed_scope_for_final_authorization(self):
+        scope = {
+            "provider": "alerts.in.ua",
+            "catalog_version": "2026-09-24",
+            "selected_region_id": "31",
+            "applicable_region_ids": ["31", "32"],
+        }
+        combined = replace(target(), scope_binding=scope)
+        repo = MemoryRepo((combined,))
+        self.assertEqual(await ScheduleWorker(repo).run_once(self.NOW), 1)
+        self.assertEqual(next(iter(repo.events.values())).payload["scope_binding"], scope)
+
+        lessons_only = replace(combined, mode=NotificationMode.LESSONS_ONLY)
+        repo = MemoryRepo((lessons_only,))
+        self.assertEqual(await ScheduleWorker(repo).run_once(self.NOW), 1)
+        self.assertNotIn("scope_binding", next(iter(repo.events.values())).payload)
 
     async def test_lessons_only_does_not_require_alert_state(self):
         repo = MemoryRepo((target(state=AlertState.STALE, mode=NotificationMode.LESSONS_ONLY),))
