@@ -379,6 +379,7 @@ class AsyncPostgresAdminRepository:
                 )
 
     async def get_setting(self, key: str, default: Any = None) -> Any:
+        reject_sensitive_generic_settings((key,))
         async with self._factory() as session:
             row = await session.get(RuntimeSetting, key)
             return row.value if row else default

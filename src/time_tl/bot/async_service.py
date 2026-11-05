@@ -15,6 +15,7 @@ from time_tl.application.schedule_editor import (
     recurring_lesson_fingerprint,
 )
 from time_tl.domain.calendar_memberships import MAX_PERSISTENT_CALENDARS, AsyncCalendarPort
+from time_tl.domain.power_outages.models import PowerProvider
 from time_tl.domain.schedule import (
     ImportSessionRepository,
     Lesson,
@@ -25,7 +26,11 @@ from time_tl.domain.schedule.resolver import ResolutionConflict
 
 from .homework_router import AsyncHomeworkPort, HomeworkUx
 from .models import Button, NotificationMode, View
+from .personal_calendar_router import NOTICE, PersonalCalendarPort
+from .power_address_service import PowerAddressPort, PowerAddressUx
+from .power_service import PowerPort, PowerUx
 from .service import (
+    HOME_NAVIGATION,
     InMemoryAccountRepository,
     Region,
     TelegramApplication,
@@ -180,6 +185,12 @@ class _UserLockEntry:
     borrowers: int = 0
 
 
+class CalendarReminderPort(Protocol):
+    async def preferences(self, actor: int) -> bool: ...
+
+    async def set_enabled(self, actor: int, enabled: bool) -> bool: ...
+
+
 class AsyncTelegramApplication:
     """Async facade for the pure Telegram application and async persistence.
 
@@ -206,6 +217,21 @@ class AsyncTelegramApplication:
         my_day_enabled: bool = False,
         calendars_enabled: bool = False,
         calendar_port: AsyncCalendarPort | None = None,
+        calendar_reminder_port: CalendarReminderPort | None = None,
+        personal_calendar_changes_enabled: bool = False,
+        personal_calendar_port: PersonalCalendarPort | None = None,
+        power_outages_enabled: bool = False,
+        weather_enabled: bool = False,
+        weather_port: Any | None = None,
+        weather_notifications_available: bool = False,
+        power_port: PowerPort | None = None,
+        power_address_port: PowerAddressPort | None = None,
+        power_default_outage_lead: int = 10,
+        power_default_restore_lead: int = 10,
+        power_stale_after_seconds: int = 1800,
+        power_supported_providers: tuple[PowerProvider, ...] = tuple(PowerProvider),
+        power_notifications_available: bool = True,
+        power_forecast_available: bool = True,
         my_day_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         process_state_max_users: int = 256,
         process_state_ttl_seconds: float = 900.0,
@@ -215,12 +241,57 @@ class AsyncTelegramApplication:
             raise ValueError("invalid process-state limits")
         if calendars_enabled and (not my_day_enabled or calendar_port is None):
             raise ValueError("persistent calendars require My Day and a durable calendar port")
+        if personal_calendar_changes_enabled and (
+            not calendars_enabled or personal_calendar_port is None
+        ):
+            raise ValueError("personal changes require durable calendars and a personal port")
         self.repository = repository
         self.my_day_enabled = my_day_enabled
         self.calendars_enabled = calendars_enabled
         self.calendar_port = calendar_port if calendars_enabled else None
+        self.calendar_reminder_port = calendar_reminder_port if calendars_enabled else None
+        self.personal_calendar_changes_enabled = personal_calendar_changes_enabled
+        self.personal_calendar_port = (
+            personal_calendar_port if personal_calendar_changes_enabled else None
+        )
         self._my_day_clock = my_day_clock
         self.homework_enabled = homework_enabled and homework_port is not None
+        self.power_outages_enabled = power_outages_enabled and power_port is not None
+        self.weather_enabled = weather_enabled and weather_port is not None
+        self.weather_ux = None
+        if self.weather_enabled and weather_port is not None:
+            from .weather_router import WeatherUx
+
+            self.weather_ux = WeatherUx(
+                weather_port, notifications_available=weather_notifications_available
+            )
+        self.power_address_ux = (
+            PowerAddressUx(
+                power_address_port,
+                power_port,
+                default_outage_lead=power_default_outage_lead,
+                default_restore_lead=power_default_restore_lead,
+                notifications_available=power_notifications_available,
+            )
+            if self.power_outages_enabled
+            and power_port is not None
+            and power_address_port is not None
+            else None
+        )
+        self.power_ux = (
+            PowerUx(
+                power_port,
+                default_outage_lead=power_default_outage_lead,
+                address_lookup_enabled=self.power_address_ux is not None,
+                default_restore_lead=power_default_restore_lead,
+                stale_after_seconds=power_stale_after_seconds,
+                supported_providers=power_supported_providers,
+                notifications_available=power_notifications_available,
+                forecast_available=power_forecast_available,
+            )
+            if self.power_outages_enabled and power_port
+            else None
+        )
         self.homework_ux = (
             HomeworkUx(homework_port) if self.homework_enabled and homework_port else None
         )
@@ -244,6 +315,8 @@ class AsyncTelegramApplication:
             homework_enabled=self.homework_enabled,
             my_day_enabled=my_day_enabled,
             calendars_enabled=calendars_enabled,
+            power_outages_enabled=self.power_outages_enabled,
+            weather_enabled=self.weather_enabled,
             process_state_max_users=process_state_max_users,
             process_state_ttl_seconds=process_state_ttl_seconds,
             process_state_clock=process_state_clock,
@@ -329,7 +402,7 @@ class AsyncTelegramApplication:
     async def start(self, user_id: int) -> View:
         account = await self.repository.get_or_create(user_id)
         self._memory.accounts[user_id] = account
-        return self._app.start(user_id)
+        return await self._with_notification_status(user_id, self._app.start(user_id))
 
     def onboarding(self) -> View:
         text = (
@@ -340,18 +413,76 @@ class AsyncTelegramApplication:
         return View(text)
 
     async def start_sequence(self, user_id: int) -> tuple[View, ...]:
-        onboarding = self.onboarding()
         menu = await self.start(user_id)
-        return (onboarding, menu)
+        if self._memory.accounts[user_id].onboarding_complete:
+            return (menu,)
+        return (self.onboarding(), menu)
 
     def mode_prompt(self) -> View:
-        return self._app.mode_prompt()
+        view = self._app.mode_prompt()
+        return replace(
+            view,
+            rows=(
+                *view.rows[:-1],
+                (Button("🔕 Вимкнути тривоги й уроки", "mode:off"),),
+                (Button("⬅️ Сповіщення", "menu:notifications"),),
+            ),
+        )
 
     def info(self) -> View:
         return self._app.info()
 
     def notifications_menu(self) -> View:
-        return self._app.notifications_menu()
+        view = self._app.notifications_menu()
+        rows = [(Button("🚨 Тривоги та 🎓 уроки", "menu:mode"),)]
+        notes = ["Оберіть, які сповіщення отримувати. Тривоги й уроки мають спільний режим."]
+        if self.power_ux is not None:
+            if self.power_ux.notifications_available:
+                rows.append((Button("⚡ Графіки відключень", "menu:power"),))
+                notes.append("⚡ Доставка нагадувань залежить від перевірки графіка.")
+            else:
+                notes.append("⚡ Сповіщення про відключення зараз недоступні.")
+        if self.weather_ux is not None:
+            if self.weather_ux.notifications_available:
+                rows.append((Button("🌤 Погода", "wt:settings"),))
+            else:
+                notes.append("🌤 Погодні сповіщення зараз недоступні.")
+        if self.calendar_reminder_port is not None:
+            rows.append((Button("📅 Нагадування календаря", "calendar-reminders:settings"),))
+        elif self.calendars_enabled:
+            notes.append("📅 Для подій календаря окремих сповіщень поки немає.")
+        return replace(view, text="🔔 Сповіщення\n\n" + "\n".join(notes),
+                       rows=(*rows, *view.rows[1:]))
+
+    async def calendar_reminder_settings(
+        self, user_id: int, *, enabled: bool | None = None
+    ) -> View:
+        back = (Button("⬅️ Сповіщення", "menu:notifications"),)
+        port = self.calendar_reminder_port
+        if port is None:
+            return View("📅 Нагадування календаря зараз недоступні.", (back,))
+        try:
+            if enabled is None:
+                current = await asyncio.wait_for(port.preferences(user_id), timeout=1)
+            else:
+                async with self._user_lock(user_id):
+                    current = await port.set_enabled(user_id, enabled)
+        except Exception:
+            return View(
+                "📅 Не вдалося перевірити налаштування календаря. Спробуйте ще раз.",
+                ((Button("🔄 Оновити", "calendar-reminders:settings"),), back),
+            )
+        status = "увімкнено" if current else "вимкнено"
+        toggle = (
+            Button("🔕 Вимкнути", "calendar-reminders:off")
+            if current
+            else Button("🔔 Увімкнути", "calendar-reminders:on")
+        )
+        return View(
+            f"📅 Нагадування календаря — {status}.\n\n"
+            "Лише для власних особистих подій із зазначеним часом, за 10 хв до початку.",
+            ((toggle,), back),
+        )
 
     def settings_menu(self) -> View:
         return self._app.settings_menu()
@@ -371,12 +502,12 @@ class AsyncTelegramApplication:
             ),
         )
 
-    async def choose_mode(self, user_id: int, mode: NotificationMode) -> View:
+    async def choose_mode(self, user_id: int, mode: NotificationMode | None) -> View:
         async with self._user_lock(user_id):
             await self._hydrate(user_id)
             view = self._app.choose_mode(user_id, mode)
             await self._persist(user_id)
-            return view
+            return await self._with_notification_status(user_id, view)
 
     def region_prompt(self) -> View:
         return self._app.region_prompt()
@@ -572,11 +703,71 @@ class AsyncTelegramApplication:
                     await self.region_confirmation.confirm_region(account)
                 else:
                     await self._persist(user_id)
+            return await self._with_notification_status(user_id, view)
+
+    async def _power_notifications_active(self, user_id: int) -> bool:
+        power = self.power_ux
+        if power is None or not power.notifications_available:
+            return False
+        subscription = await power.port.subscription(user_id)
+        # Schedule change messages are enabled by the master switch.
+        return bool(
+            subscription
+            and subscription.enabled
+            and subscription.provider in power.supported_providers
+        )
+
+    async def _weather_notifications_active(self, user_id: int) -> bool:
+        weather = self.weather_ux
+        if weather is None or not weather.notifications_available:
+            return False
+        prefs = await weather.port.preferences(user_id)
+        if not (
+            prefs.weather_enabled
+            and prefs.forecast_requested
+            and any(
+                (
+                    prefs.daily_forecast_enabled,
+                    prefs.rain_alert_enabled,
+                    prefs.snow_alert_enabled,
+                    prefs.wind_alert_enabled,
+                    prefs.temperature_alert_enabled,
+                    prefs.frost_alert_enabled,
+                )
+            )
+        ):
+            return False
+        # Forecast corrections only apply to eligible weather event categories.
+        context = await weather.port.context(user_id)
+        return context.collection_enabled and context.has_precise_point
+
+    async def _calendar_notifications_active(self, user_id: int) -> bool:
+        port = self.calendar_reminder_port
+        return port is not None and await port.preferences(user_id)
+
+    async def _with_notification_status(self, user_id: int, view: View) -> View:
+        if not view.rows or view.rows[-1] != HOME_NAVIGATION:
             return view
+        # A failed optional preference read never blocks the core menu or
+        # implies that the corresponding notifications are active.
+        power, weather, calendar = await asyncio.gather(
+            asyncio.wait_for(self._power_notifications_active(user_id), timeout=1),
+            asyncio.wait_for(self._weather_notifications_active(user_id), timeout=1),
+            asyncio.wait_for(self._calendar_notifications_active(user_id), timeout=1),
+            return_exceptions=True,
+        )
+        lines = []
+        if power is True:
+            lines.append("⚡ Сповіщення про графіки відключень — увімкнено")
+        if weather is True:
+            lines.append("🌤 Сповіщення про погоду — увімкнено")
+        if calendar is True:
+            lines.append("📅 Нагадування календаря — увімкнено")
+        return replace(view, text=view.text + "\n\n" + "\n".join(lines)) if lines else view
 
     async def menu(self, user_id: int, *, prefix: str = "") -> View:
         await self._hydrate(user_id)
-        view = self._app.menu(user_id, prefix=prefix)
+        view = await self._with_notification_status(user_id, self._app.menu(user_id, prefix=prefix))
         if self.homework_ux is None:
             return view
         try:
@@ -614,6 +805,7 @@ class AsyncTelegramApplication:
             CalendarKind,
             CalendarMembership,
             CalendarSource,
+            MyDay,
             build_my_day,
         )
 
@@ -676,6 +868,30 @@ class AsyncTelegramApplication:
                 "Перевірте правила та час розкладу. Дані не змінено.\n\n" + SAFETY_NOTE,
                 rows,
             )
+        if self.personal_calendar_port is not None:
+            try:
+                timeline = await asyncio.wait_for(
+                    self.personal_calendar_port.read_personal_day(
+                        user_id,
+                        at,
+                        extra_sources=tuple(
+                            source
+                            for source in sources
+                            if source.calendar.calendar_id.startswith("legacy:")
+                        ),
+                    ),
+                    timeout=2,
+                )
+                from .my_day import KYIV
+
+                if not isinstance(timeline, MyDay) or timeline.day != at.astimezone(KYIV).date():
+                    raise ValueError("invalid personal day projection")
+            except Exception:
+                return View(
+                    "⚠️ Особисті зміни тимчасово недоступні. "
+                    "Мій день не показано, щоб не приховати вашу правку.",
+                    rows,
+                )
         pending_count: int | None = None
         if self.homework_ux is not None:
             try:
@@ -689,13 +905,25 @@ class AsyncTelegramApplication:
             except Exception:
                 # Unavailability is explicit in the renderer, never "nothing assigned".
                 pass
-        return render_my_day(
+        view = render_my_day(
             timeline,
             at=at,
             homework_count=pending_count,
             homework_enabled=self.homework_ux is not None,
             page=page,
         )
+        if self.personal_calendar_changes_enabled:
+            text = (
+                view.text + "\n\n" + NOTICE + "\nПісля оновлення спільного календаря "
+                "особисті зміни потрібно підтвердити заново."
+            )
+            if len(text.encode("utf-16-le")) // 2 > 4096:
+                return projection_unavailable_view(homework_enabled=self.homework_ux is not None)
+            return View(
+                text,
+                view.rows,
+            )
+        return view
 
     async def profile_editor_view(
         self,
@@ -874,7 +1102,7 @@ class AsyncTelegramApplication:
             await self._hydrate(user_id)
             view = self._app.set_reminder_lead(user_id, minutes)
             await self._persist(user_id)
-            return view
+            return await self._with_notification_status(user_id, view)
 
     async def create_profile(self, user_id: int, name: str) -> str:
         async with self._user_lock(user_id):
@@ -895,7 +1123,9 @@ class AsyncTelegramApplication:
                     for key, profile in account.profiles.items()
                 }
             await self._persist(user_id)
-            return self._app.menu(user_id, prefix=f"Розклад «{removed.name}» видалено.")
+            return await self._with_notification_status(
+                user_id, self._app.menu(user_id, prefix=f"Розклад «{removed.name}» видалено.")
+            )
 
     async def request_profile_deletion(self, user_id: int, profile_id: str) -> View:
         account = await self._hydrate(user_id)
@@ -1097,7 +1327,7 @@ class AsyncTelegramApplication:
             await self._hydrate(user_id)
             view = self._app.confirm_activation(user_id, token)
             await self._persist(user_id)
-            return view
+            return await self._with_notification_status(user_id, view)
 
     async def preview_import(self, user_id: int, raw: str | bytes) -> tuple[str, View]:
         await self._hydrate(user_id)
@@ -1113,7 +1343,7 @@ class AsyncTelegramApplication:
             await self._hydrate(user_id)
             view = self._app.confirm_import(user_id, token, confirm_links=confirm_links)
             await self._persist(user_id)
-            return view
+            return await self._with_notification_status(user_id, view)
 
     async def import_replacement_picker(
         self, user_id: int, import_token: str, *, confirm_links: bool
@@ -1172,7 +1402,7 @@ class AsyncTelegramApplication:
             await self._hydrate(user_id)
             view = self._app.confirm_import_replacement(user_id, token)
             await self._persist(user_id)
-            return view
+            return await self._with_notification_status(user_id, view)
 
     async def request_data_deletion(self, user_id: int) -> View:
         async with self._user_lock(user_id):
@@ -1198,7 +1428,9 @@ class AsyncTelegramApplication:
     async def cancel_data_deletion(self, user_id: int) -> View:
         async with self._user_lock(user_id):
             await self._hydrate(user_id)
-            return self._app.cancel_data_deletion(user_id)
+            return await self._with_notification_status(
+                user_id, self._app.cancel_data_deletion(user_id)
+            )
 
     async def confirm_data_deletion(self, user_id: int, token: str) -> View:
         async with self._user_lock(user_id):
@@ -1375,13 +1607,45 @@ def build_async_router(
     router.message.outer_middleware(existing_account)
     router.callback_query.outer_middleware(existing_account)
 
+    if application.power_ux is not None:
+        from .power_router import build_power_router
+
+        build_power_router(application.power_ux, router=router)
+    if application.weather_ux is not None:
+        from .weather_router import build_weather_router
+
+        build_weather_router(application.weather_ux, router=router)
+    if application.power_address_ux is not None:
+        from .power_address_router import build_power_address_router
+
+        build_power_address_router(application.power_address_ux, router=router)
+
     if application.calendars_enabled:
         from .calendar_router import CalendarManagementPort, CalendarUx, build_calendar_router
+
+        if application.personal_calendar_port is not None:
+            from .personal_calendar_router import PersonalCalendarUx, build_personal_calendar_router
+
+            build_personal_calendar_router(
+                PersonalCalendarUx(
+                    application.personal_calendar_port,
+                    application.repository,
+                    now=application._my_day_clock,
+                ),
+                enabled=True,
+                router=router,
+            )
 
         build_calendar_router(
             CalendarUx(
                 cast(CalendarManagementPort, application.calendar_port),
                 application.repository,
+                personal_changes_enabled=application.personal_calendar_changes_enabled,
+                personal_export=(
+                    application.personal_calendar_port.export_personal_overrides
+                    if application.personal_calendar_port is not None
+                    else None
+                ),
             ),
             enabled=True,
             router=router,
@@ -1438,11 +1702,12 @@ def build_async_router(
 
     @router.callback_query(F.data.startswith("mode:"))
     async def choose_mode(callback: CallbackQuery) -> None:
+        mode = _callback_data(callback).split(":", 1)[1]
         await _edit(
             callback,
             await application.choose_mode(
                 _callback_user_id(callback),
-                NotificationMode(_callback_data(callback).split(":", 1)[1]),
+                None if mode == "off" else NotificationMode(mode),
             ),
         )
 
@@ -1486,6 +1751,19 @@ def build_async_router(
     @router.callback_query(F.data == "menu:notifications")
     async def notifications(callback: CallbackQuery) -> None:
         await _edit(callback, application.notifications_menu())
+
+    @router.callback_query(F.data.in_({
+        "calendar-reminders:settings", "calendar-reminders:on", "calendar-reminders:off",
+    }))
+    async def calendar_reminders(callback: CallbackQuery) -> None:
+        action = _callback_data(callback).rsplit(":", 1)[1]
+        await _edit(
+            callback,
+            await application.calendar_reminder_settings(
+                _callback_user_id(callback),
+                enabled=None if action == "settings" else action == "on",
+            ),
+        )
 
     @router.callback_query(F.data == "menu:settings")
     async def settings(callback: CallbackQuery) -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 
 from time_tl.application.schedule_worker import (
     ConfirmedClear,
@@ -107,6 +107,19 @@ class ScheduleWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await ScheduleWorker(repo).run_once(much_later), 0)
         self.assertEqual(repo.events, {})
+
+    async def test_return_inherits_original_all_clear_deadline(self):
+        recorded_at = datetime(2026, 9, 21, 6, 15, tzinfo=UTC)
+        deadline = recorded_at + timedelta(seconds=30)
+        clear = ConfirmedClear(
+            "bounded-clear", recorded_at, target(), transition_revision=5, expires_at=deadline
+        )
+        repo = MemoryRepo(clears=(clear,))
+        self.assertEqual(await ScheduleWorker(repo).run_once(deadline), 0)
+        self.assertEqual(await ScheduleWorker(repo).run_once(recorded_at), 1)
+        event = next(iter(repo.events.values()))
+        self.assertEqual(datetime.fromisoformat(str(event.payload["valid_until"])), deadline)
+        self.assertEqual(event.payload["transition_revision"], 5)
 
     async def test_return_is_evaluated_at_current_time_not_clear_time(self):
         short_lesson = Lesson(time(9), time(9, 16), "Short")

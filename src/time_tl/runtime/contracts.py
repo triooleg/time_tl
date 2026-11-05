@@ -24,11 +24,12 @@ class RuntimeContractError(RuntimeError):
 # This is the single compiled release switch. Independent safety review must change
 # it only for an exact approved release; all production role gates stay closed together.
 PRODUCTION_PUBLIC_RELEASE_APPROVED = True
+PRODUCTION_SCHEMA_HEAD = "0014_calendar_reminders"
 PRODUCTION_RELEASE_MANIFEST = {
     "provider": "alerts.in.ua/full-territory",
     "territory_selection": "manual-oblast-raion-hromada",
     "catalog_sha256": EXPECTED_SHA256,
-    "migration_head": "0009_calendar_foundation",
+    "migration_head": PRODUCTION_SCHEMA_HEAD,
     "homework_enabled": True,
     "replicas": 1,
 }
@@ -52,9 +53,13 @@ class ProductionReleaseManifest:
     homework_enabled: bool
     replicas: int
     territory_selection: str
+    calendar_reminders_enabled: bool = False
 
     def fingerprint(self) -> str:
-        payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":")).encode()
+        fields = asdict(self)
+        if not self.calendar_reminders_enabled:
+            fields.pop("calendar_reminders_enabled")
+        payload = json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
         return sha256(payload).hexdigest()
 
 
@@ -89,6 +94,8 @@ def validate_production_release_manifest(
         raise RuntimeContractError("production release catalogue mismatch")
     if manifest.migration_head != PRODUCTION_RELEASE_MANIFEST["migration_head"]:
         raise RuntimeContractError("production release migration head mismatch")
+    if type(manifest.calendar_reminders_enabled) is not bool:
+        raise RuntimeContractError("production release calendar reminder capability mismatch")
     if (
         not isinstance(manifest.homework_enabled, bool)
         or manifest.homework_enabled != PRODUCTION_RELEASE_MANIFEST["homework_enabled"]
@@ -103,6 +110,9 @@ def validate_production_release_manifest(
 
 @dataclass(frozen=True)
 class RuntimeCapabilities:
+    reviewed_weather: bool = False
+    reviewed_power_outages: bool = False
+    reviewed_power_address: bool = False
     postgres_alert_repository: bool = True
     postgres_alert_lease: bool = True
     reviewed_full_territory_provider: bool = True
@@ -130,6 +140,38 @@ def validate_runtime_contract(
 ) -> None:
     """Reject any role that would otherwise look live without required adapters."""
     production_like = settings.environment in {Environment.STAGING, Environment.PRODUCTION}
+    if settings.calendar_reminders_enabled and (
+        service not in {"bot", "schedule-worker", "sender-worker"}
+        or (service == "bot" and not settings.calendars_enabled)
+    ):
+        raise RuntimeContractError("calendar reminders require a supported calendar runtime")
+    if settings.environment is Environment.PRODUCTION and any(
+        (
+            settings.weather_enabled,
+            settings.weather_notifications_enabled,
+            settings.weather_admin_enabled,
+            settings.dynamic_coverage_enabled,
+        )
+    ) and not capabilities.reviewed_weather:
+        raise RuntimeContractError("weather and dynamic coverage require a new reviewed release")
+    if settings.weather_notifications_enabled and not settings.weather_enabled:
+        raise RuntimeContractError("weather notifications require the weather feature")
+    if (
+        settings.power_address_lookup_enabled
+        and production_like
+        and not capabilities.reviewed_power_address
+    ):
+        raise RuntimeContractError(
+            "power address lookup requires separately reviewed shared quota and canary"
+        )
+    if (
+        settings.power_outages_enabled
+        and production_like
+        and not capabilities.reviewed_power_outages
+    ):
+        raise RuntimeContractError(
+            "power outages require separate reviewed staging/production feature approval"
+        )
     if production_like and service in {
         "bot",
         "alert-worker",

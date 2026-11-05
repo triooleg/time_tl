@@ -15,7 +15,15 @@ from typing import Any, Protocol
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import SecretStr
 
-_SENSITIVE_SETTING_PARTS = ("token", "secret", "password", "fernet", "key", "ciphertext")
+_SENSITIVE_SETTING_PARTS = (
+    "token",
+    "secret",
+    "password",
+    "fernet",
+    "key",
+    "ciphertext",
+    "credential",
+)
 MAX_ONBOARDING_TEXT_LENGTH = 1500
 PRODUCTION_PREFLIGHT_RECEIPT_TTL = timedelta(minutes=10)
 DEFAULT_ONBOARDING_TEXT = (
@@ -36,7 +44,9 @@ def reject_sensitive_generic_settings(keys: Any) -> None:
 
     for key in keys:
         normalized = str(key).lower()
-        if any(part in normalized for part in _SENSITIVE_SETTING_PARTS):
+        if normalized.startswith(
+            ("power_api_user_pref:", "power_api_reminder_state:", "weather_")
+        ) or any(part in normalized for part in _SENSITIVE_SETTING_PARTS):
             raise ValueError("sensitive values require the owner configuration store")
 
 

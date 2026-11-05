@@ -1,0 +1,56 @@
+# Opt-in LOCAL/SIMULATION overlay. Automatic API polling is not registered yet.
+# Do not combine with a production stack or start Telegram for a source test.
+x-power-env: &power-env
+  POWER_OUTAGES_ENABLED: ${POWER_OUTAGES_ENABLED:-false}
+  POWER_POLL_INTERVAL_SECONDS: ${POWER_POLL_INTERVAL_SECONDS:-300}
+  POWER_STALE_AFTER_SECONDS: ${POWER_STALE_AFTER_SECONDS:-1800}
+  POWER_DTEK_ENABLED: ${POWER_DTEK_ENABLED:-false}
+  POWER_CEK_ENABLED: ${POWER_CEK_ENABLED:-false}
+  POWER_ALERTS_ENERGY_HTML_ENABLED: ${POWER_ALERTS_ENERGY_HTML_ENABLED:-false}
+  POWER_ALERTS_ENERGY_API_ENABLED: ${POWER_ALERTS_ENERGY_API_ENABLED:-false}
+  POWER_ADDRESS_LOOKUP_ENABLED: ${POWER_ADDRESS_LOOKUP_ENABLED:-false}
+  POWER_BEZSVITLA_ENABLED: ${POWER_BEZSVITLA_ENABLED:-false}
+  POWER_ALERTS_ENERGY_POLL_INTERVAL_SECONDS: ${POWER_ALERTS_ENERGY_POLL_INTERVAL_SECONDS:-300}
+  POWER_ALERTS_ENERGY_BASE_URL: https://alerts.energy
+  POWER_ALERTS_ENERGY_BROWSER_FALLBACK: "false"
+  POWER_NOTIFICATION_DEFAULT_OUTAGE_LEAD: ${POWER_NOTIFICATION_DEFAULT_OUTAGE_LEAD:-30}
+  POWER_NOTIFICATION_DEFAULT_RESTORE_LEAD: ${POWER_NOTIFICATION_DEFAULT_RESTORE_LEAD:-15}
+
+services:
+  bot:
+    environment: *power-env
+  admin-web:
+    environment: *power-env
+  sender-worker:
+    environment: *power-env
+  power-worker:
+    profiles: [power]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: time-tl-bot:${TIME_TL_IMAGE_TAG:?immutable tag required}
+    command: [power-worker]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs: [/tmp:size=16m,mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      <<: *power-env
+      TIME_TL_ENV: ${TIME_TL_ENV:-simulation}
+      SERVICE_ROLE: power-worker
+      DATABASE_URL: ${DATABASE_URL:?local database required}
+      TELEGRAM_TRANSPORT: disabled
+      ALERT_PROVIDER: fake
+      HEALTH_HOST: 0.0.0.0
+      HEALTH_PORT: 8080
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [database]
+    healthcheck:
+      test: [CMD, python, -m, time_tl.entrypoints.healthcheck]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy: {replicas: 1}

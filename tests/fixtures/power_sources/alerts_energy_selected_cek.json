@@ -1,0 +1,25 @@
+{
+  "provenance": {
+    "url": "https://alerts.energy/dnipropetrovska-oblast",
+    "observed_on": "2026-11-04",
+    "format": "Selected public ng-state shutdown record; unrelated state and announcement text omitted. Not a normalized positive schedule or ingestion permission."
+  },
+  "record": {
+    "initiator": "dnipropetrovska_oblast_cek",
+    "queue": "1.1",
+    "updated": "2026-11-03T18:39:08.251Z",
+    "today": [0,0,0,0,0,1,1,1,2,0,0,0,0,0,0,3,1,1,1,0,0,0,0,0],
+    "tomorrow": [],
+    "todayStatus": "ScheduleApplies",
+    "tomorrowStatus": "WaitingForSchedule",
+    "todayDate": "2026-11-04",
+    "tomorrowDate": "2026-11-05",
+    "todayPossible": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    "todayCheckedAt": "2026-11-04T13:13:38.359Z",
+    "todaySourceSlug": "dnipropetrovska_oblast_cek_site",
+    "todayAnnouncements": [
+      {"kind":"Emergency","state":"active","scope":"local","publishedAt":"2026-11-04T11:26:49+00:00","timeBasis":"publication","effectiveAt":"2026-11-04T11:26:49.000Z","expiresAt":"2026-11-04T23:26:49.000Z"},
+      {"kind":"GPV","state":"cancelled","scope":"local","publishedAt":"2026-11-04T11:26:49+00:00","timeBasis":"publication","effectiveAt":"2026-11-04T11:26:49.000Z","expiresAt":"2026-11-04T22:00:00.000Z"}
+    ]
+  }
+}

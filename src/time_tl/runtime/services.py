@@ -8,6 +8,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,6 +24,7 @@ from time_tl.config import (
     TelegramTransport,
 )
 from time_tl.domain.alerts import RegionScope, SourceFailure, SourceFailureKind
+from time_tl.domain.power_outages.models import PowerProvider
 from time_tl.entrypoints.health import serve_health
 from time_tl.infrastructure.alerts import (
     AlertsInUaAdapter,
@@ -32,16 +34,89 @@ from time_tl.infrastructure.alerts import (
 )
 
 from . import region_registry_full
-from .contracts import RuntimeContractError, validate_runtime_contract
+from .contracts import (
+    DEFAULT_CAPABILITIES,
+    RuntimeCapabilities,
+    RuntimeContractError,
+    validate_runtime_contract,
+)
 from .httpx_transport import HttpxTransport
 from .local_alerts import JsonAlertRepository
+from .power_map_release import (
+    MapFeatureAuthority,
+    feature_authority_guard,
+    verify_feature_scope,
+)
 from .region_registry_full import load_catalog
 from .regions import OBLAST_REGION_IDS, OBLAST_REGIONS
+from .weather_release import (
+    WeatherFeatureAuthority,
+    requested_capabilities,
+    verify_weather_scope,
+    weather_authority_guard,
+)
 
 LOGGER = logging.getLogger(__name__)
 ALERT_ADVISORY_LOCK_KEY = 0x54494D45544C  # stable signed-int64 value: ASCII "TIMETL"
 SENDER_ADVISORY_LOCK_KEY = 0x54494D455453  # distinct stable value: ASCII "TIMETS"
 LIVE_ALERT_REQUESTS_PER_MINUTE_MAX = 4.0
+
+
+def _admit_map_feature(
+    role: str,
+    settings: Settings,
+    production_gate: Any,
+) -> MapFeatureAuthority | None:
+    """Admit new public capabilities before database owner resolution changes settings."""
+    if settings.environment is not Environment.PRODUCTION or not (
+        settings.power_outages_enabled and settings.power_alerts_energy_api_enabled
+    ):
+        return None
+    if production_gate is None:
+        raise RuntimeContractError("normal production gate is required for map features")
+    return verify_feature_scope(role, settings, production_manifest=production_gate.manifest)
+
+
+def _admit_weather_feature(
+    role: str, settings: Settings, production_gate: Any = None
+) -> WeatherFeatureAuthority | None:
+    if settings.environment is not Environment.PRODUCTION or not any(
+        requested_capabilities(role, settings).values()
+    ):
+        return None
+    return verify_weather_scope(
+        role, settings, production_manifest=production_gate.manifest if production_gate else None
+    )
+
+
+def _reviewed_map_capabilities(
+    authority: MapFeatureAuthority | None, weather: WeatherFeatureAuthority | None = None
+) -> RuntimeCapabilities:
+    if authority is None and weather is None:
+        return DEFAULT_CAPABILITIES
+    # The environment cannot grant these review facts: authority admission has
+    # already verified both signed releases and all installed source bytes.
+    return replace(
+        DEFAULT_CAPABILITIES,
+        reviewed_power_outages=authority is not None,
+        reviewed_power_address=authority.enabled("address_lookup") if authority else False,
+        reviewed_weather=weather is not None,
+    )
+
+
+def _map_preferences_enabled(settings: Settings, authority: MapFeatureAuthority | None) -> bool:
+    if not (
+        settings.power_outages_enabled
+        and settings.power_alerts_energy_api_enabled
+        and settings.power_map_reminders_enabled
+    ):
+        return False
+    if settings.environment is Environment.PRODUCTION:
+        return authority is not None and authority.enabled("map_preferences")
+    return (
+        settings.environment in {Environment.LOCAL, Environment.SIMULATION}
+        and settings.power_map_reminders_enabled
+    )
 
 
 def _live_alert_requests_per_minute(configured: int) -> float:
@@ -240,6 +315,7 @@ async def resolve_owner_runtime_settings(
     )
 
     from time_tl.admin.settings import OwnerSettingsService
+
     if production_gate is not None:
         service = OwnerSettingsService(
             cast(Any, None),
@@ -411,9 +487,7 @@ async def run_alert_worker(settings: Settings) -> None:
         settings.environment not in {Environment.LOCAL, Environment.SIMULATION}
         and not region_registry_full.ACTIVE_JSON_WIRE_RUNTIME
     ):
-        raise RuntimeContractError(
-            "active.json full-territory alert runtime wiring is disabled"
-        )
+        raise RuntimeContractError("active.json full-territory alert runtime wiring is disabled")
     settings = await resolve_owner_runtime_settings(settings, production_gate=production_gate)
     validate_runtime_contract(settings, "alert-worker")
     if settings.environment in {Environment.LOCAL, Environment.SIMULATION}:
@@ -428,9 +502,7 @@ async def _run_postgres_alert_worker(
 ) -> None:
     """Compose durable polling for the reviewed full provider UID catalogue."""
     if not region_registry_full.ACTIVE_JSON_WIRE_RUNTIME:
-        raise RuntimeContractError(
-            "active.json full-territory alert runtime wiring is disabled"
-        )
+        raise RuntimeContractError("active.json full-territory alert runtime wiring is disabled")
     if verified_region_ids != frozenset(item.uid for item in load_catalog().records):
         raise RuntimeContractError(
             "alert-worker requires the reviewed full alerts.in.ua UID registry"
@@ -563,6 +635,7 @@ class PostgresRegionConfirmationService:
                     if snapshot is not None:
                         snapshot.state = "UNKNOWN"
                         snapshot.last_fetch_revision = None
+                        snapshot.transition_revision = None
                         snapshot.last_full_active_episodes = None
                         snapshot.processed_update_ids = []
                         snapshot.pending_clear_candidate = False
@@ -571,13 +644,35 @@ class PostgresRegionConfirmationService:
 @asynccontextmanager
 async def postgres_bot_dependencies(
     settings: Settings,
-) -> AsyncIterator[tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any]]:
+    *,
+    power_authority: MapFeatureAuthority | None = None,
+    power_feature_settings: Settings | None = None,
+) -> AsyncIterator[tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any]]:
     """Construct ready persistence plus a fail-safe resolver without connecting to Telegram."""
     from time_tl.infrastructure.db.accounts import AsyncPostgresAccountRepository
     from time_tl.infrastructure.db.codec import FernetLessonLinkCodec
     from time_tl.infrastructure.db.engine import create_engine, create_session_factory
     from time_tl.infrastructure.db.workers import PostgresWorkerHeartbeatRepository
 
+    if settings.environment is Environment.PRODUCTION and (
+        settings.power_outages_enabled and settings.power_alerts_energy_api_enabled
+    ):
+        if (
+            not isinstance(power_authority, MapFeatureAuthority)
+            or power_authority.role != "bot"
+            or power_feature_settings is None
+            or not power_authority.enabled("bot_power_ui", power_feature_settings)
+        ):
+            raise RuntimeContractError("signed bot power authority is required")
+        original = power_feature_settings
+        if original.owner_config_revision is None:
+            original = original.model_copy(
+                update={
+                    "owner_config_revision": power_authority.owner_revision,
+                }
+            )
+        if verify_feature_scope("bot", original) != power_authority:
+            raise RuntimeContractError("signed bot power authority changed")
     assert settings.lesson_link_fernet_key is not None
     engine = create_engine(settings.database_url.get_secret_value())
     factory = create_session_factory(engine)
@@ -598,6 +693,43 @@ async def postgres_bot_dependencies(
         from time_tl.infrastructure.db.calendars import AsyncPostgresCalendarRepository
 
         calendar_repository = AsyncPostgresCalendarRepository(factory)
+    power_port: Any | None = None
+    if settings.power_outages_enabled and settings.power_alerts_energy_api_enabled:
+        from time_tl.runtime.power_map_bot import build_power_map_bot_port
+
+        power_port = build_power_map_bot_port(
+            factory,
+            settings.owner_alerts_fernet_key,
+            address_lookup_enabled=False,
+            notifications_enabled=_map_preferences_enabled(settings, power_authority),
+        )
+    elif settings.power_outages_enabled:
+        from time_tl.infrastructure.db.power import PostgresPowerRepository
+        from time_tl.infrastructure.db.power_map import PostgresPowerMapRepository
+        from time_tl.runtime.power import PostgresPowerBotPort
+        from time_tl.runtime.power_map import PowerMapScheduleReader
+
+        power_port = PostgresPowerBotPort(
+            factory,
+            PostgresPowerRepository(
+                factory, stale_after_seconds=settings.power_stale_after_seconds
+            ),
+            map_reader=PowerMapScheduleReader(PostgresPowerMapRepository(factory))
+            if settings.power_alerts_energy_api_enabled
+            else None,
+        )
+        if settings.power_address_lookup_enabled and settings.owner_alerts_fernet_key is not None:
+            from time_tl.infrastructure.db.energy_api_budget import PostgresEnergyApiBudget
+            from time_tl.infrastructure.db.energy_api_credentials import (
+                PostgresEnergyApiCredentials,
+            )
+            from time_tl.runtime.power_address import PostgresPowerAddressPort
+
+            power_port.address_port = PostgresPowerAddressPort(
+                power_port,
+                PostgresEnergyApiCredentials(factory, settings.owner_alerts_fernet_key),
+                budget=PostgresEnergyApiBudget(factory),
+            )
     from time_tl.infrastructure.db.territories import PostgresTerritoryCatalogRepository
 
     await _assert_territory_runtime_ready(factory)
@@ -623,6 +755,7 @@ async def postgres_bot_dependencies(
             region_confirmation,
             territory_catalog,
             PostgresWorkerHeartbeatRepository(factory),
+            power_port,
             homework_repository,
             calendar_repository,
         )
@@ -634,8 +767,13 @@ async def run_bot(settings: Settings) -> None:
     from .production_release import validate_production_runtime_release
 
     production_gate = await validate_production_runtime_release(settings)
+    admission_settings = settings
+    power_authority = _admit_map_feature("bot", admission_settings, production_gate)
+    weather_authority = _admit_weather_feature("bot", admission_settings, production_gate)
     settings = await resolve_owner_runtime_settings(settings, production_gate=production_gate)
-    validate_runtime_contract(settings, "bot")
+    validate_runtime_contract(
+        settings, "bot", _reviewed_map_capabilities(power_authority, weather_authority)
+    )
     if settings.telegram_transport is TelegramTransport.DISABLED:
         if settings.environment not in {Environment.LOCAL, Environment.SIMULATION}:
             raise RuntimeError("disabled Telegram transport is not a live bot")
@@ -645,7 +783,11 @@ async def run_bot(settings: Settings) -> None:
     from aiogram import Bot, Dispatcher
 
     assert settings.telegram_bot_token is not None
-    async with postgres_bot_dependencies(settings) as (
+    async with postgres_bot_dependencies(
+        settings,
+        power_authority=power_authority,
+        power_feature_settings=admission_settings,
+    ) as (
         repository,
         resolver,
         regions,
@@ -653,6 +795,7 @@ async def run_bot(settings: Settings) -> None:
         region_confirmation,
         territory_catalog,
         heartbeat_repository,
+        power_port,
         homework_repository,
         calendar_repository,
     ):
@@ -678,6 +821,40 @@ async def run_bot(settings: Settings) -> None:
             my_day_enabled=settings.my_day_enabled,
             calendars_enabled=settings.calendars_enabled,
             calendar_port=calendar_repository,
+            calendar_reminder_port=(
+                calendar_repository.make_calendar_reminder_repository()
+                if settings.calendar_reminders_enabled
+                else None
+            ),
+            power_outages_enabled=settings.power_outages_enabled,
+            power_port=power_port,
+            weather_enabled=settings.weather_enabled,
+            weather_port=_weather_bot_port(
+                settings, repository, weather_authority, admission_settings
+            ),
+            weather_notifications_available=settings.weather_notifications_enabled,
+            power_address_port=(
+                power_port.address_port
+                if settings.power_address_lookup_enabled and power_port is not None
+                else None
+            ),
+            power_default_outage_lead=settings.power_notification_default_outage_lead,
+            power_default_restore_lead=settings.power_notification_default_restore_lead,
+            power_stale_after_seconds=settings.power_stale_after_seconds,
+            power_supported_providers=(PowerProvider.DTEK, PowerProvider.CEK)
+            if settings.power_alerts_energy_api_enabled
+            else tuple(PowerProvider),
+            power_notifications_available=(
+                not settings.power_alerts_energy_api_enabled
+                or _map_preferences_enabled(settings, power_authority)
+            ),
+            power_forecast_available=not settings.power_alerts_energy_api_enabled,
+            personal_calendar_changes_enabled=settings.personal_calendar_changes_enabled,
+            personal_calendar_port=(
+                calendar_repository.make_personal_calendar_repository()
+                if settings.personal_calendar_changes_enabled
+                else None
+            ),
         )
         bot = Bot(token=settings.telegram_bot_token.get_secret_value())
         from time_tl.bot.safety import (
@@ -745,12 +922,102 @@ def _postgres_admin_repository(settings: Settings) -> tuple[Any, Any]:
     return engine, repository
 
 
+def _power_admin_port(settings: Settings, engine: Any) -> Any | None:
+    if not settings.power_outages_enabled:
+        return None
+    from time_tl.infrastructure.db.engine import create_session_factory
+    from time_tl.infrastructure.db.power import PostgresPowerRepository
+    from time_tl.runtime.power import PostgresPowerAdminPort
+
+    return PostgresPowerAdminPort(
+        PostgresPowerRepository(
+            create_session_factory(engine), stale_after_seconds=settings.power_stale_after_seconds
+        )
+    )
+
+
+def _power_source_admin_port(settings: Settings, engine: Any) -> Any | None:
+    if not settings.power_outages_enabled:
+        return None
+    from time_tl.infrastructure.db.engine import create_session_factory
+    from time_tl.infrastructure.db.power_sources import PostgresPowerSourceRepository
+    from time_tl.runtime.power import PostgresPowerSourceAdminPort
+
+    return PostgresPowerSourceAdminPort(
+        PostgresPowerSourceRepository(create_session_factory(engine))
+    )
+
+
+def _energy_api_admin_port(settings: Settings, engine: Any) -> Any | None:
+    # Credential setup is available before the power feature is enabled.
+    # Missing owner key fails closed; never create or rotate it automatically.
+    if settings.owner_alerts_fernet_key is None:
+        return None
+    from time_tl.infrastructure.db.energy_api_budget import PostgresEnergyApiBudget
+    from time_tl.infrastructure.db.energy_api_credentials import PostgresEnergyApiCredentials
+    from time_tl.infrastructure.db.engine import create_session_factory
+    from time_tl.runtime.power import AlertsEnergyAccessChecker
+
+    return PostgresEnergyApiCredentials(
+        create_session_factory(engine),
+        settings.owner_alerts_fernet_key,
+        checker=AlertsEnergyAccessChecker(PostgresEnergyApiBudget(create_session_factory(engine))),
+    )
+
+
+def _power_map_admin_port(engine: Any) -> Any:
+    from time_tl.infrastructure.db.energy_api_budget import PostgresEnergyApiBudget
+    from time_tl.infrastructure.db.engine import create_session_factory
+    from time_tl.infrastructure.db.power_map import PostgresPowerMapRepository
+    from time_tl.runtime.power_map_admin import PowerMapAdminPort
+
+    factory = create_session_factory(engine)
+    return PowerMapAdminPort(PostgresPowerMapRepository(factory), PostgresEnergyApiBudget(factory))
+
+
+def _weather_bot_port(
+    settings: Settings,
+    repository: Any,
+    authority: WeatherFeatureAuthority | None = None,
+    admission_settings: Settings | None = None,
+) -> Any | None:
+    if not settings.weather_enabled:
+        return None
+    from time_tl.runtime.weather_bot import build_weather_bot_port
+
+    return build_weather_bot_port(
+        repository._factory,
+        notifications_enabled=settings.weather_notifications_enabled,
+        authority_guard=weather_authority_guard(authority, admission_settings or settings)
+        if authority
+        else None,
+    )
+
+
+def _weather_admin_port(
+    settings: Settings, engine: Any, authority: WeatherFeatureAuthority | None = None
+) -> Any | None:
+    if not settings.weather_admin_enabled:
+        return None
+    from time_tl.infrastructure.db.engine import create_session_factory
+    from time_tl.runtime.weather_admin import WeatherAdminPort
+
+    return WeatherAdminPort(
+        create_session_factory(engine),
+        authority_guard=weather_authority_guard(authority, settings) if authority else None,
+    )
+
+
 def run_admin_web_service(settings: Settings) -> None:
+    production_gate = None
     if settings.environment is Environment.PRODUCTION:
         from .production_release import validate_production_runtime_release
 
-        asyncio.run(validate_production_runtime_release(settings))
-    validate_runtime_contract(settings, "admin-web")
+        production_gate = asyncio.run(validate_production_runtime_release(settings))
+    weather_authority = _admit_weather_feature("admin-web", settings, production_gate)
+    validate_runtime_contract(
+        settings, "admin-web", _reviewed_map_capabilities(None, weather_authority)
+    )
     if settings.admin_backend is AdminBackend.LOCAL_SQLITE:
         from time_tl.admin.app import run_admin_web
 
@@ -788,6 +1055,11 @@ def run_admin_web_service(settings: Settings) -> None:
             owner_settings=owner_settings,
             proxy_policy=proxy_policy,
             bootstrap_artifact_path=settings.admin_bootstrap_artifact_path,
+            power_admin=_power_admin_port(settings, engine),
+            power_source_admin=_power_source_admin_port(settings, engine),
+            energy_api=_energy_api_admin_port(settings, engine),
+            power_map=_power_map_admin_port(engine),
+            weather_admin=_weather_admin_port(settings, engine, weather_authority),
         )
 
         @app.on_event("shutdown")
@@ -859,9 +1131,7 @@ async def activate_owner_settings(settings: Settings, revision: int, evidence_id
         await engine.dispose()
 
 
-async def activate_production_owner_settings(
-    settings: Settings, revision: int
-) -> None:
+async def activate_production_owner_settings(settings: Settings, revision: int) -> None:
     """Consume an exact preflight receipt without repeating external probes."""
 
     if settings.environment is not Environment.PRODUCTION:
@@ -933,6 +1203,7 @@ async def run_schedule_worker(settings: Settings) -> None:
     from datetime import UTC, datetime
 
     from time_tl.application.schedule_worker import build_schedule_worker
+    from time_tl.infrastructure.db.calendar_reminders import PostgresCalendarReminderRepository
     from time_tl.infrastructure.db.codec import FernetLessonLinkCodec
     from time_tl.infrastructure.db.engine import create_engine, create_session_factory
     from time_tl.infrastructure.db.workers import (
@@ -955,10 +1226,16 @@ async def run_schedule_worker(settings: Settings) -> None:
         )
     )
     heartbeat_repository = PostgresWorkerHeartbeatRepository(factory)
+    calendar_reminders = (
+        PostgresCalendarReminderRepository(factory) if settings.calendar_reminders_enabled else None
+    )
 
     async def loop() -> None:
         while True:
-            await worker.run_once(datetime.now(UTC))
+            now = datetime.now(UTC)
+            await worker.run_once(now)
+            if calendar_reminders is not None:
+                await calendar_reminders.plan(now)
             await asyncio.sleep(settings.schedule_worker_interval_seconds)
 
     try:
@@ -997,8 +1274,15 @@ async def run_sender_worker(settings: Settings) -> None:
     from .production_release import validate_production_runtime_release
 
     production_gate = await validate_production_runtime_release(settings)
+    admission_settings = settings
+    power_authority = _admit_map_feature("sender-worker", admission_settings, production_gate)
+    weather_authority = _admit_weather_feature("sender-worker", admission_settings, production_gate)
     settings = await resolve_owner_runtime_settings(settings, production_gate=production_gate)
-    validate_runtime_contract(settings, "sender-worker")
+    validate_runtime_contract(
+        settings,
+        "sender-worker",
+        _reviewed_map_capabilities(power_authority, weather_authority),
+    )
     if settings.environment in {Environment.LOCAL, Environment.SIMULATION}:
         await run_inert_worker(settings, "sender-worker")
         return
@@ -1030,9 +1314,32 @@ async def run_sender_worker(settings: Settings) -> None:
         factory,
         stale_after_seconds=settings.alert_stale_after_seconds,
         expected_owner_config_revision=settings.owner_config_revision,
+        power_enabled=settings.power_outages_enabled
+        and not settings.power_alerts_energy_api_enabled,
+        power_map_notifications_enabled=(
+            settings.power_outages_enabled
+            and settings.power_alerts_energy_api_enabled
+            and settings.power_map_reminders_enabled
+            and (
+                settings.environment is not Environment.PRODUCTION
+                or power_authority is not None
+                and power_authority.enabled("map_dispatch")
+            )
+        ),
+        power_map_authority_guard=(
+            feature_authority_guard(power_authority, admission_settings)
+            if power_authority is not None and power_authority.enabled("map_dispatch")
+            else None
+        ),
+        power_stale_after_seconds=settings.power_stale_after_seconds,
         expected_staging_allowlist=(
-            settings.test_chat_allowlist
-            if settings.environment is Environment.STAGING
+            settings.test_chat_allowlist if settings.environment is Environment.STAGING else None
+        ),
+        weather_notifications_enabled=settings.weather_notifications_enabled,
+        calendar_reminders_enabled=settings.calendar_reminders_enabled,
+        weather_authority_guard=(
+            weather_authority_guard(weather_authority, admission_settings)
+            if weather_authority
             else None
         ),
     )
@@ -1085,6 +1392,85 @@ async def run_sender_worker(settings: Settings) -> None:
             await _serve_sender_singleton(lease, lambda: serve_owned(lease))
     finally:
         await bot.session.close()
+        await engine.dispose()
+
+
+async def run_power_worker(settings: Settings) -> None:
+    """One isolated service; no alert poller, bot or sender is started here."""
+    if not settings.power_outages_enabled:
+        raise RuntimeContractError("power worker is disabled")
+    validate_runtime_contract(settings, "power-worker")
+    if settings.power_alerts_energy_api_enabled:
+        raise RuntimeContractError("API map planning requires the signed map-planner entrypoint")
+    from datetime import UTC, datetime
+    from hashlib import sha256
+
+    from time_tl.application.power_notification_worker import PowerNotificationWorker
+    from time_tl.application.power_outage_worker import PowerOutageWorker
+    from time_tl.domain.power_outages.models import PowerProvider
+    from time_tl.infrastructure.db.engine import create_engine, create_session_factory
+    from time_tl.infrastructure.db.lease import dedicated_advisory_lease
+    from time_tl.infrastructure.db.power import PostgresPowerRepository
+    from time_tl.infrastructure.db.power_sources import PostgresPowerSourceRepository
+    from time_tl.infrastructure.db.workers import PostgresWorkerHeartbeatRepository
+    from time_tl.infrastructure.power_outages.cek import CekPowerScheduleProvider
+    from time_tl.infrastructure.power_outages.dtek_html_provider import DtekHtmlProvider
+
+    database_url = settings.database_url.get_secret_value()
+    engine = create_engine(database_url)
+    factory = create_session_factory(engine)
+    repository = PostgresPowerRepository(
+        factory, stale_after_seconds=settings.power_stale_after_seconds
+    )
+    heartbeat_repository = PostgresWorkerHeartbeatRepository(factory)
+    regions = {
+        PowerProvider.DTEK: "dn",
+        PowerProvider.DTEK_KYIV: "k",
+        PowerProvider.DTEK_KYIV_REGION: "kr",
+        PowerProvider.DTEK_ODESA: "o",
+        PowerProvider.DTEK_DONETSK: "d",
+    }
+
+    async def poll(provider: Any) -> None:
+        raw = b"PWR" + sha256(provider.provider_id.value.encode()).digest()[:5]
+        async with dedicated_advisory_lease(database_url, int.from_bytes(raw, "big")) as lease:
+            worker = PowerOutageWorker(
+                provider,
+                repository,
+                lease,
+                poll_interval_seconds=settings.power_poll_interval_seconds,
+            )
+            while True:
+                await worker.run_once(datetime.now(UTC))
+                await asyncio.sleep(1)
+
+    async def plan() -> None:
+        worker = PowerNotificationWorker(repository)
+        while True:
+            await worker.run_once(datetime.now(UTC))
+            await asyncio.sleep(2)
+
+    try:
+        await repository.initialize()
+        await PostgresPowerSourceRepository(
+            factory, stale_after_seconds=settings.power_stale_after_seconds
+        ).initialize()
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(
+                serve_health(settings.health_host, settings.health_port, "power-worker")
+            )
+            tasks.create_task(plan())
+            tasks.create_task(
+                _heartbeat_loop(
+                    heartbeat_repository, "power-worker", settings.owner_config_revision
+                )
+            )
+            for region in regions.values():
+                if settings.power_dtek_enabled:
+                    tasks.create_task(poll(DtekHtmlProvider(region=region)))
+            if settings.power_cek_enabled:
+                tasks.create_task(poll(CekPowerScheduleProvider()))
+    finally:
         await engine.dispose()
 
 

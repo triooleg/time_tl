@@ -29,8 +29,9 @@ def test_main_menu_keeps_learning_sections_and_settings_without_duplicates(
         my_day_enabled=my_day,
         calendars_enabled=calendars,
     )
-    expected = (["menu:myday"] if my_day else []) + ["menu:schedules"]
+    expected = ["menu:myday"] if my_day else []
     expected += ["menu:calendars"] if calendars else []
+    expected += ["menu:schedules"]
     expected += ["menu:homework"] if homework else []
     expected += ["menu:settings", "menu:info"]
     home = app.menu(1)
@@ -47,7 +48,11 @@ def test_main_menu_keeps_learning_sections_and_settings_without_duplicates(
 def test_configuration_controls_have_one_entry_each_under_settings():
     settings = TelegramApplication.settings_menu()
     assert callbacks(settings) == [
-        "menu:notifications", "menu:region", "menu:reminder", "settings:privacy", "menu:home"
+        "menu:notifications",
+        "menu:region",
+        "menu:reminder",
+        "settings:privacy",
+        "menu:home",
     ]
     notifications = TelegramApplication.notifications_menu()
     assert callbacks(notifications) == ["menu:mode", "menu:settings", "menu:home"]

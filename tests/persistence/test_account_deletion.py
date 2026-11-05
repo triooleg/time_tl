@@ -133,11 +133,19 @@ async def test_delete_account_is_isolated_type_aware_and_removes_all_outbox_stat
     deletes = delete_statements(session)
     assert [statement.table.name for statement in deletes] == [
         "outbox_messages",
+        "runtime_settings",
         "users",
     ]
     outbox_sql = compiled(deletes[0])
     values = set(outbox_sql.params.values())
-    assert {"schedule", "alert_scope", str(target.id), str(scope.id)}.issubset(values)
+    assert {
+        "schedule",
+        "power",
+        "power_map",
+        "alert_scope",
+        str(target.id),
+        str(scope.id),
+    }.issubset(values)
     assert str(other.id) not in values
     normalized_sql = str(outbox_sql).casefold()
     assert "aggregate_type" in normalized_sql
@@ -145,7 +153,15 @@ async def test_delete_account_is_isolated_type_aware_and_removes_all_outbox_stat
     assert "delivered_at" not in normalized_sql
     assert "dead_at" not in normalized_sql
 
-    user_sql = compiled(deletes[1])
+    preference_sql = compiled(deletes[1])
+    private_keys = set(next(iter(preference_sql.params.values())))
+    assert private_keys == {
+        "power_api_user_pref:" + str(target.id),
+        "power_api_reminder_state:" + str(target.id),
+    }
+    assert "power_api_user_pref:" + str(other.id) not in private_keys
+    assert "power_api_reminder_state:" + str(other.id) not in private_keys
+    user_sql = compiled(deletes[2])
     assert target.id in user_sql.params.values()
     assert other.id not in user_sql.params.values()
 

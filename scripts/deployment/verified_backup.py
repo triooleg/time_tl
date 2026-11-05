@@ -33,26 +33,165 @@ LIMIT = 64 * 1024 * 1024
 MAGIC = b"TLBK1"
 SCHEMA = "0008_homework_foundation"
 # Frozen migration contracts, not derived from possibly changed ORM metadata.
-LEGACY_TABLES = frozenset({
-    "alembic_version", "users", "schedule_profiles", "schedule_rules", "date_overrides",
-    "rule_lessons", "override_lessons", "pending_import_sessions", "share_sessions",
-    "schedule_subjects", "homework_assignments", "homework_user_states",
-    "pending_homework_drafts", "alert_poll_state", "territory_catalog_versions",
-    "territories", "active_territory_catalogs", "alert_scopes", "alert_snapshots",
-    "alert_episodes", "outbox_messages", "worker_heartbeats", "runtime_settings",
-    "admin_accounts", "admin_sessions", "admin_login_attempts", "audit_log",
-    "daily_aggregate_stats",
-})
+LEGACY_TABLES = frozenset(
+    {
+        "alembic_version",
+        "users",
+        "schedule_profiles",
+        "schedule_rules",
+        "date_overrides",
+        "rule_lessons",
+        "override_lessons",
+        "pending_import_sessions",
+        "share_sessions",
+        "schedule_subjects",
+        "homework_assignments",
+        "homework_user_states",
+        "pending_homework_drafts",
+        "alert_poll_state",
+        "territory_catalog_versions",
+        "territories",
+        "active_territory_catalogs",
+        "alert_scopes",
+        "alert_snapshots",
+        "alert_episodes",
+        "outbox_messages",
+        "worker_heartbeats",
+        "runtime_settings",
+        "admin_accounts",
+        "admin_sessions",
+        "admin_login_attempts",
+        "audit_log",
+        "daily_aggregate_stats",
+    }
+)
 SCHEMA_TABLES = {
     SCHEMA: LEGACY_TABLES,
-    "0009_calendar_foundation": LEGACY_TABLES | {
-        "calendars", "calendar_memberships", "calendar_invitations",
+    "0009_calendar_foundation": LEGACY_TABLES
+    | {
+        "calendars",
+        "calendar_memberships",
+        "calendar_invitations",
     },
 }
+PERSONAL_SCHEMA = "0010_personal_calendar_overrides"
+SCHEMA_TABLES[PERSONAL_SCHEMA] = SCHEMA_TABLES["0009_calendar_foundation"] | {
+    "personal_calendar_overrides",
+}
+POWER_SCHEMA = "0011_power_outages"
+SCHEMA_TABLES[POWER_SCHEMA] = SCHEMA_TABLES[PERSONAL_SCHEMA] | {
+    "power_providers",
+    "power_schedule_snapshots",
+    "power_schedule_intervals",
+    "user_power_subscriptions",
+    "power_notification_events",
+}
+WEATHER_SCHEMA = "0012_weather_coverage"
+SCHEMA_TABLES[WEATHER_SCHEMA] = SCHEMA_TABLES[POWER_SCHEMA] | {
+    "weather_locations",
+    "weather_forecast_runs",
+    "weather_forecast_snapshots",
+    "weather_forecast_hours",
+    "weather_change_events",
+    "user_weather_preferences",
+    "weather_notification_deliveries",
+}
+REMINDER_SCHEMA = "0014_calendar_reminders"
+SCHEMA_TABLES[REMINDER_SCHEMA] = SCHEMA_TABLES[WEATHER_SCHEMA]
 # TLBK1 AAD is a legacy FORMAT label, not an assertion about restored schema.
 # Keep it byte-identical so all retained copies use the existing original key.
 # The authenticated dump's actual head and exact named tables are validated below.
 PG_IMAGE = "sha256:fff3594bf464bea0f502788874403882d8bbbe618b3250f8649e7e42fd118020"
+PERSONAL_SCHEMA_INSPECTOR = r"""
+import asyncio, importlib, sys
+async def main():
+ from alembic.migration import MigrationContext
+ from alembic.operations import Operations
+ from sqlalchemy import inspect, text
+ from sqlalchemy.ext.asyncio import create_async_engine
+ from unittest.mock import patch
+ prior=importlib.import_module('migrations.versions.0009_calendar_foundation')
+ personal=importlib.import_module('migrations.versions.0010_personal_calendar_overrides')
+ if (prior.revision, personal.revision, personal.down_revision) != (
+   '0009_calendar_foundation','0010_personal_calendar_overrides','0009_calendar_foundation'):
+  raise ValueError()
+ engine=create_async_engine(
+  'postgresql+asyncpg://backupcheck@127.0.0.1/backupcheck', echo=False)
+ try:
+  async with engine.connect() as connection:
+   async with connection.begin():
+    await connection.execute(text('SET TRANSACTION READ ONLY'))
+    result=await connection.execute(text('SELECT version_num FROM alembic_version'))
+    heads=result.scalars().all()
+    if heads != ['0010_personal_calendar_overrides']: raise ValueError()
+    def validate(bind):
+     operations=Operations(MigrationContext.configure(bind))
+     with patch.object(prior,'op',operations), patch.object(personal,'op',operations):
+      prior._validate(inspect(bind),prior._schema())
+      personal._validate(personal._schema())
+    await connection.run_sync(validate)
+ finally:
+  await engine.dispose()
+try:
+ asyncio.run(main())
+except BaseException:
+ sys.exit(2)
+print('CAL29_SCHEMA_VALIDATED')
+"""
+# Reuse the exact frozen calendar inspection and additionally validate all power
+# tables. This changes neither encryption/AAD nor validation of retained backups.
+POWER_SCHEMA_INSPECTOR = (
+    PERSONAL_SCHEMA_INSPECTOR.replace(
+        "if heads != ['0010_personal_calendar_overrides']: raise ValueError()",
+        "if heads != ['0011_power_outages']: raise ValueError()",
+    )
+    .replace(
+        "personal._validate(personal._schema())",
+        "personal._validate(personal._schema())\n"
+        "     power=importlib.import_module('migrations.versions.0011_power_outages')\n"
+        "     if power.down_revision != personal.revision: raise ValueError()\n"
+        "     power.validate_schema(bind)",
+    )
+    .replace("CAL29_SCHEMA_VALIDATED", "POWER_SCHEMA_VALIDATED")
+)
+WEATHER_SCHEMA_INSPECTOR = (
+    POWER_SCHEMA_INSPECTOR.replace(
+        "if heads != ['0011_power_outages']: raise ValueError()",
+        "if heads != ['0012_weather_coverage']: raise ValueError()",
+    )
+    .replace(
+        "power.validate_schema(bind)",
+        "power.validate_schema(bind)\n"
+        "     weather=importlib.import_module('migrations.versions.0012_weather_coverage')\n"
+        "     if weather.down_revision != power.revision: raise ValueError()\n"
+        "     weather.validate_schema(bind)",
+    )
+    .replace("POWER_SCHEMA_VALIDATED", "WEATHER_SCHEMA_VALIDATED")
+)
+REMINDER_SCHEMA_INSPECTOR = (
+    WEATHER_SCHEMA_INSPECTOR.replace(
+        "if heads != ['0012_weather_coverage']: raise ValueError()",
+        "if heads != ['0014_calendar_reminders']: raise ValueError()",
+    )
+    .replace(
+        "weather.validate_schema(bind)",
+        "weather.validate_schema(bind)\n"
+        "     alert=importlib.import_module('migrations.versions.0013_alert_transition_revision')\n"
+        "     reminders=importlib.import_module('migrations.versions.0014_calendar_reminders')\n"
+        "     if (alert.down_revision, reminders.down_revision) != "
+        "(weather.revision, alert.revision):\n"
+        "      raise ValueError()\n"
+        "     alert.validate_schema(bind)\n"
+        "     reminders.validate_schema(bind)",
+    )
+    .replace("WEATHER_SCHEMA_VALIDATED", "REMINDER_SCHEMA_VALIDATED")
+)
+RESTORE_INSPECTORS = {
+    PERSONAL_SCHEMA: (PERSONAL_SCHEMA_INSPECTOR, b"CAL29_SCHEMA_VALIDATED\n"),
+    POWER_SCHEMA: (POWER_SCHEMA_INSPECTOR, b"POWER_SCHEMA_VALIDATED\n"),
+    WEATHER_SCHEMA: (WEATHER_SCHEMA_INSPECTOR, b"WEATHER_SCHEMA_VALIDATED\n"),
+    REMINDER_SCHEMA: (REMINDER_SCHEMA_INSPECTOR, b"REMINDER_SCHEMA_VALIDATED\n"),
+}
 CRYPTO = r"""
 import os,sys,base64
 from cryptography.hazmat.primitives import hashes
@@ -209,6 +348,233 @@ def identity() -> str:
     return image
 
 
+def inspector_creators_quiescent(name: str) -> None:
+    """Reject own still-live Docker creators; this cannot prove daemon quiescence.
+
+    A timed-out CREATE remains rejected even after best-effort owned cleanup:
+    killing/reaping the CLI does not cancel a possible late daemon transaction.
+    """
+    if not re.fullmatch(r"time-tl-cal29-inspector-[0-9a-f]{32}", name):
+        raise ValueError("Restore inspector creator identity")
+    count = 0
+    for process in Path("/proc").iterdir():
+        if not process.name.isdecimal():
+            continue
+        count += 1
+        if count > 32768:
+            raise ValueError("Restore inspector process bound")
+        try:
+            if process.stat().st_uid != os.geteuid():
+                continue
+            with (process / "cmdline").open("rb") as stream:
+                raw = stream.read(65537)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if not raw:
+            continue
+        end = raw.find(b"\0", 0, 4097)
+        if end < 0:
+            raise ValueError("Restore inspector argv bound")
+        executable = raw[:end].rsplit(b"/", 1)[-1]
+        if executable not in {b"docker", b"docker-compose"}:
+            continue
+        if len(raw) > 65536 or not raw.endswith(b"\0"):
+            raise ValueError("Restore inspector Docker argv bound")
+        args = raw[:-1].decode("utf-8", errors="strict").split("\0")
+        if "create" in args and name in args:
+            raise ValueError("Restore inspector creator still live")
+
+
+def validate_personal_restore(name: str, image: str, schema: str = PERSONAL_SCHEMA) -> None:
+    """Inspect frozen 0009/0010 contracts in synthetic PG, never migrate.
+
+    Requires the approved running admin image to contain migration 0010. An old
+    application image is NOT a compatible substitute. No production environment
+    or mount enters the inspector, which shares only the network-none lab's
+    loopback namespace. Both auxiliary resources are bounded and UUID-owned.
+    """
+    if (
+        not re.fullmatch(r"time-tl-rc24-restore-[0-9a-f]{32}", name)
+        or image != PG_IMAGE
+        or schema not in RESTORE_INSPECTORS
+    ):
+        raise ValueError("Restore inspector target")
+    config = monitor.protected_read(CONFIG)
+    monitor.validate_config(config)
+    records = json.loads(command(["docker", "inspect", name, ADMIN], limit=1024 * 1024))
+    if not isinstance(records, list) or len(records) != 2:
+        raise ValueError("Restore inspector identity")
+    postgres, admin = records
+    id_pattern = r"[0-9a-f]{64}"
+    if (
+        not re.fullmatch(id_pattern, postgres.get("Id", ""))
+        or postgres.get("Name") != "/" + name
+        or postgres.get("Image") != image
+        or postgres.get("HostConfig", {}).get("NetworkMode") != "none"
+        or postgres.get("State", {}).get("Running") is not True
+        or admin.get("Name") != "/" + ADMIN
+        or admin.get("Config", {}).get("Image") != monitor.expected_admin_image(config)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", admin.get("Image", ""))
+        or admin.get("State", {}).get("Running") is not True
+    ):
+        raise ValueError("Restore inspector identity")
+    inspector_name = "time-tl-cal29-inspector-" + uuid.uuid4().hex
+    label_key = "time-tl.backup-inspector"
+    inspector, marker = RESTORE_INSPECTORS[schema]
+    args = [
+        "docker",
+        "create",
+        "--name",
+        inspector_name,
+        "--label",
+        "time-tl.backup-inspector=" + inspector_name,
+        "--network",
+        "container:" + postgres["Id"],
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--memory",
+        "256m",
+        "--memory-swap",
+        "256m",
+        "--cpus",
+        "1",
+        "--pids-limit",
+        "64",
+        "--log-driver",
+        "none",
+        "--user",
+        "10001:10001",
+        "--entrypoint",
+        "python",
+        admin["Image"],
+        "-c",
+        inspector,
+    ]
+    owned_id = None
+    try:
+        created = command(args, timeout=30, limit=65536).decode().strip()
+        if not re.fullmatch(id_pattern, created):
+            raise ValueError("Restore inspector create")
+        records = json.loads(command(["docker", "inspect", created], limit=1024 * 1024))
+        if not isinstance(records, list) or len(records) != 1:
+            raise ValueError("Restore inspector container")
+        actual = records[0]
+        if (
+            actual.get("Id") != created
+            or actual.get("Name") != "/" + inspector_name
+            or actual.get("Image") != admin["Image"]
+            or actual.get("Config", {}).get("Labels", {}).get(label_key) != inspector_name
+            or actual.get("State", {}).get("Running") is not False
+            or actual.get("HostConfig", {}).get("NetworkMode") != "container:" + postgres["Id"]
+        ):
+            raise ValueError("Restore inspector container")
+        owned_id = created
+        result = command(["docker", "start", "-a", owned_id], timeout=60, limit=65536)
+        if result != marker:
+            raise ValueError("Restore inspector validation")
+        terminal = json.loads(
+            command(
+                ["docker", "inspect", owned_id],
+                timeout=15,
+                limit=1024 * 1024,
+            )
+        )[0]
+        state = terminal.get("State", {})
+        if (
+            terminal.get("Id") != owned_id
+            or state.get("Running") is not False
+            or type(state.get("ExitCode")) is not int
+            or state["ExitCode"] != 0
+        ):
+            raise ValueError("Restore inspector terminal state")
+    finally:
+        if owned_id is None:
+            # CREATE can time out after Docker creates a stopped container. Only
+            # adopt it for removal after full UUID-name/label/image validation.
+            # Original CREATE failure is never turned into cleanup/restore PASS.
+            inspector_creators_quiescent(inspector_name)
+            records = json.loads(
+                command(
+                    [
+                        "docker",
+                        "ps",
+                        "-a",
+                        "--no-trunc",
+                        "--format",
+                        "{{json .}}",
+                        "--filter",
+                        "label=time-tl.backup-inspector=" + inspector_name,
+                    ],
+                    timeout=15,
+                    limit=65536,
+                )
+                .decode()
+                .strip()
+                or "null"
+            )
+            if records is not None:
+                candidate_id = records.get("ID", "")
+                if not re.fullmatch(id_pattern, candidate_id):
+                    raise ValueError("Restore inspector cleanup identity")
+                actual = json.loads(
+                    command(
+                        ["docker", "inspect", candidate_id],
+                        timeout=15,
+                        limit=1024 * 1024,
+                    )
+                )[0]
+                if (
+                    actual.get("Id") != candidate_id
+                    or actual.get("Name") != "/" + inspector_name
+                    or actual.get("Image") != admin["Image"]
+                    or actual.get("Config", {}).get("Labels", {}).get(label_key) != inspector_name
+                    or actual.get("State", {}).get("Running") is not False
+                ):
+                    raise ValueError("Restore inspector cleanup identity")
+                owned_id = candidate_id
+        if owned_id is not None:
+            actual = json.loads(
+                command(
+                    ["docker", "inspect", owned_id],
+                    timeout=15,
+                    limit=1024 * 1024,
+                )
+            )[0]
+            if (
+                actual.get("Id") != owned_id
+                or actual.get("Name") != "/" + inspector_name
+                or actual.get("Image") != admin["Image"]
+                or actual.get("Config", {}).get("Labels", {}).get(label_key) != inspector_name
+            ):
+                raise ValueError("Restore inspector cleanup identity")
+            command(["docker", "rm", "-f", owned_id], timeout=30, limit=65536)
+            inspector_creators_quiescent(inspector_name)
+            for selector in (
+                "id=" + owned_id,
+                "name=^/" + inspector_name + "$",
+                "label=time-tl.backup-inspector=" + inspector_name,
+            ):
+                remaining = command(
+                    [
+                        "docker",
+                        "ps",
+                        "-a",
+                        "--no-trunc",
+                        "--format",
+                        "{{.ID}}",
+                        "--filter",
+                        selector,
+                    ],
+                    timeout=15,
+                    limit=65536,
+                )
+                if remaining.strip():
+                    raise ValueError("Restore inspector cleanup unconfirmed")
+
+
 def restore(dump: bytes, image: str, *, expected_schema: str | None = None) -> dict[str, Any]:
     if not dump.startswith(b"PGDMP") or len(dump) > LIMIT:
         raise ValueError("Dump format")
@@ -327,6 +693,8 @@ def restore(dump: bytes, image: str, *, expected_schema: str | None = None) -> d
             != "0"
         ):
             raise ValueError("Unvalidated constraints")
+        if schema in RESTORE_INSPECTORS:
+            validate_personal_restore(name, image, schema)
         counts = {table: int(query('SELECT count(*) FROM "' + table + '"')) for table in tables}
         return {
             "schema": schema,
@@ -435,10 +803,27 @@ def backup() -> dict[str, Any]:
     if persisted != encrypted:
         raise ValueError("Persisted readback")
     result = restore(crypt(persisted, "decrypt"), image)
-    current_schema = command([
-        "docker", "exec", PG, "psql", "-v", "ON_ERROR_STOP=1", "-U", "time_tl",
-        "-d", "time_tl", "-Atc", "SELECT version_num FROM alembic_version",
-    ], limit=256).decode().strip()
+    current_schema = (
+        command(
+            [
+                "docker",
+                "exec",
+                PG,
+                "psql",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-U",
+                "time_tl",
+                "-d",
+                "time_tl",
+                "-Atc",
+                "SELECT version_num FROM alembic_version",
+            ],
+            limit=256,
+        )
+        .decode()
+        .strip()
+    )
     if current_schema != result["schema"]:
         raise ValueError("Schema changed during backup; guard not advanced")
     verified = datetime.now(UTC).isoformat()

@@ -68,7 +68,12 @@ def bind_scope(scope: AlertScope) -> dict[str, object]:
 
 
 def alert_payload(scope: AlertScope, **values: object) -> dict[str, object]:
-    return {**values, "scope_binding": bind_scope(scope)}
+    return {
+        "transition_revision": 1,
+        "valid_until": (AUTHORIZATION_AT + timedelta(minutes=5)).isoformat(),
+        **values,
+        "scope_binding": bind_scope(scope),
+    }
 
 
 class Result:
@@ -580,7 +585,9 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
             selected_region_id="31",
             applicable_region_ids=["31"],
         )
-        snapshot = AlertSnapshot(scope_id=scope.id, state=AlertState.ACTIVE.value)
+        snapshot = AlertSnapshot(
+            scope_id=scope.id, state=AlertState.ACTIVE.value, transition_revision=1
+        )
         poll = PollRow(singleton_id=1, fetch_revision=1, circuit_open=False)
         poll.last_success_at = AUTHORIZATION_AT
         row = OutboxMessage(
@@ -654,7 +661,9 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
             selected_region_id="31",
             applicable_region_ids=["31"],
         )
-        snapshot = AlertSnapshot(scope_id=scope.id, state=AlertState.ACTIVE.value)
+        snapshot = AlertSnapshot(
+            scope_id=scope.id, state=AlertState.ACTIVE.value, transition_revision=1
+        )
         poll = PollRow(singleton_id=1, fetch_revision=1, circuit_open=False)
         poll.last_success_at = AUTHORIZATION_AT
         row = OutboxMessage(
@@ -760,7 +769,7 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(row.claimed_at)
         self.assertEqual("delivery_policy_changed", row.last_error_code)
 
-    async def test_claim_defers_alert_events_until_stale_snapshot_recovers(self):
+    async def test_claim_rejects_old_alert_events_even_after_state_recovers(self):
         for event_type, recovered_state in (
             ("ALERT_STARTED", AlertState.ACTIVE.value),
             ("ALL_CLEAR_CONFIRMED", AlertState.CLEAR_CONFIRMED.value),
@@ -808,21 +817,17 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
                 first = await repo.claim_batch_skip_locked(AUTHORIZATION_AT, limit=10)
 
                 self.assertEqual(first, ())
-                self.assertIsNone(row.dead_at)
+                self.assertEqual(AUTHORIZATION_AT, row.dead_at)
                 self.assertIsNone(row.claimed_at)
-                self.assertEqual(row.available_at, AUTHORIZATION_AT + timedelta(seconds=15))
-                self.assertEqual(row.attempts, 0)
 
                 recovery_at = AUTHORIZATION_AT + timedelta(seconds=15)
                 snapshot.state = recovered_state
+                snapshot.transition_revision = 2
                 poll.last_success_at = recovery_at
                 recovered = await repo.claim_batch_skip_locked(recovery_at, limit=10)
 
-                self.assertEqual(len(recovered), 1)
-                self.assertEqual(recovered[0].message_id, str(row.id))
-                self.assertEqual(row.claimed_at, recovery_at)
-                self.assertIsNone(row.dead_at)
-                self.assertEqual(row.attempts, 0)
+                self.assertEqual(recovered, ())
+                self.assertIsNone(row.claimed_at)
 
     async def test_claim_permanently_rejects_old_or_missing_scope_binding(self):
         for binding in (
@@ -1139,7 +1144,9 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
             selected_region_id="31",
             applicable_region_ids=["31"],
         )
-        snapshot = AlertSnapshot(scope_id=scope.id, state=AlertState.CLEAR_CONFIRMED.value)
+        snapshot = AlertSnapshot(
+            scope_id=scope.id, state=AlertState.CLEAR_CONFIRMED.value, transition_revision=1
+        )
         message = OutboxMessage(
             aggregate_type="alert_scope",
             aggregate_id=str(scope.id),
@@ -1286,7 +1293,9 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
             selected_region_id="31",
             applicable_region_ids=["31"],
         )
-        snapshot = AlertSnapshot(scope_id=scope.id, state=AlertState.ACTIVE.value)
+        snapshot = AlertSnapshot(
+            scope_id=scope.id, state=AlertState.ACTIVE.value, transition_revision=1
+        )
         message = OutboxMessage(
             id=uuid4(),
             aggregate_type="alert_scope",
@@ -1321,30 +1330,17 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         # This transition occurs after claim_batch_skip_locked returned.
         snapshot.state = AlertState.STALE.value
+        snapshot.transition_revision = None
         allowed = await repo.deliver_if_authorized(
             str(message.id), now, deliver, expected_recipient=RECIPIENT
         )
 
         self.assertFalse(allowed)
         self.assertFalse(sent)
-        self.assertIsNone(message.dead_at)
+        self.assertEqual(now, message.dead_at)
         self.assertIsNone(message.claimed_at)
-        self.assertEqual(message.available_at, now + timedelta(seconds=15))
-        self.assertEqual(message.last_error_code, "delivery_policy_temporarily_unavailable")
+        self.assertEqual(message.last_error_code, "final_delivery_policy_changed")
         self.assertIsNone(message.dispatch_started_at)
-
-        snapshot.state = AlertState.ACTIVE.value
-        message.claimed_at = now + timedelta(seconds=15)
-        recovered = await repo.deliver_if_authorized(
-            str(message.id),
-            now + timedelta(seconds=15),
-            deliver,
-            expected_recipient=RECIPIENT,
-        )
-        self.assertTrue(recovered)
-        self.assertTrue(sent)
-        self.assertIsNotNone(message.delivered_at)
-        self.assertIsNotNone(message.dispatch_started_at)
 
     async def test_final_authorization_uses_delivery_time_freshness_boundary(self):
         async def attempt(
@@ -1368,7 +1364,9 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
                 selected_region_id="31",
                 applicable_region_ids=["31"],
             )
-            snapshot = AlertSnapshot(scope_id=scope.id, state=AlertState.CLEAR_CONFIRMED.value)
+            snapshot = AlertSnapshot(
+            scope_id=scope.id, state=AlertState.CLEAR_CONFIRMED.value, transition_revision=1
+        )
             poll = PollRow(singleton_id=1, fetch_revision=5, circuit_open=False)
             poll.last_success_at = last_success_at
             message = OutboxMessage(
@@ -1616,25 +1614,7 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(allowed)
             self.assertFalse(sent)
-            if event_type == "RETURN_TO_ACTIVE_LESSON":
-                self.assertIsNone(message.dead_at)
-                self.assertEqual(
-                    message.last_error_code,
-                    "delivery_policy_temporarily_unavailable",
-                )
-                snapshot.state = AlertState.CLEAR_CONFIRMED.value
-                message.claimed_at = now + timedelta(seconds=15)
-                recovered = await repo.deliver_if_authorized(
-                    str(message.id),
-                    now + timedelta(seconds=15),
-                    deliver,
-                    expected_recipient=RECIPIENT,
-                )
-                self.assertTrue(recovered)
-                self.assertTrue(sent)
-                snapshot.state = AlertState.STALE.value
-            else:
-                self.assertEqual(message.last_error_code, "final_delivery_policy_changed")
+            self.assertEqual(message.last_error_code, "final_delivery_policy_changed")
 
     async def test_final_authorization_blocks_profile_revision_change_after_claim(self):
         now = datetime(2026, 9, 21, 6, tzinfo=UTC)
@@ -1865,7 +1845,9 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
                 applicable_region_ids=["31"],
             )
             binding = bind_scope(scope)
-            snapshot = AlertSnapshot(scope_id=scope.id, state=AlertState.CLEAR_CONFIRMED.value)
+            snapshot = AlertSnapshot(
+            scope_id=scope.id, state=AlertState.CLEAR_CONFIRMED.value, transition_revision=1
+        )
             profile = ProfileRow(
                 id=uuid4(),
                 user_id=user.id,
@@ -1889,6 +1871,7 @@ class SafetyPersistenceRegressionTests(unittest.IsolatedAsyncioTestCase):
                     "confirmed_region_id": "31",
                     "confirmed_region_name": "м. Київ",
                     "scope_binding": binding,
+                    "transition_revision": 1,
                 },
                 claimed_at=authorization_at,
             )

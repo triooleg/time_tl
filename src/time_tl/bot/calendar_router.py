@@ -10,7 +10,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from typing import Any, Protocol
@@ -27,11 +27,13 @@ from time_tl.domain.calendar_memberships import (
     CalendarSummary,
     InvitationPreview,
     deserialize_profile,
+    may_edit,
     serialize_profile,
 )
 from time_tl.domain.calendars import CalendarKind
 from time_tl.domain.schedule import ScheduleProfile
 
+from .calendar_editing import CalendarInputError, calendar_name, weekly_rules, weekly_text
 from .models import Button, View
 from .service import UserAccount
 
@@ -63,6 +65,10 @@ class CalendarManagementPort(Protocol):
 
     async def create_calendar(
         self, actor: int, profile: ScheduleProfile, kind: CalendarKind
+    ) -> CalendarSummary: ...
+
+    async def update_calendar(
+        self, actor: int, calendar_id: UUID, expected_version: int, profile: ScheduleProfile
     ) -> CalendarSummary: ...
 
     async def set_visible(
@@ -181,10 +187,14 @@ class CalendarUx:
         accounts: ExistingCalendarAccounts,
         *,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        personal_changes_enabled: bool = False,
+        personal_export: Callable[[int], Awaitable[str]] | None = None,
     ) -> None:
         self.port = port
         self.accounts = accounts
         self.now = now
+        self.personal_changes_enabled = personal_changes_enabled
+        self.personal_export = personal_export if personal_changes_enabled else None
         self._pending: dict[UUID, _Pending] = {}
         self._invitations: dict[UUID, _Invitation] = {}
         self._reserved: dict[UUID, _Reservation] = {}
@@ -279,6 +289,7 @@ class CalendarUx:
         )
         rows.extend(
             [
+                (Button("➕ Створити календар", "cal:blank"),),
                 (Button("➕ Створити з активного розкладу", "cal:new"),),
                 (Button("📤 Мої календарі — JSON", "cal:export"),),
                 (Button("🕐 Мій день", "menu:myday"),),
@@ -327,6 +338,15 @@ class CalendarUx:
                 for handle, invitation in self._invitations.items()
                 if invitation.issuer == actor and invitation.calendar_id == identity
             )
+        if may_edit(item.role):
+            rows.extend(
+                [
+                    (Button("✏️ Назва календаря", _callback("rename", identity, version)),),
+                    (Button("🗓 Дні, уроки та час", _callback("week", identity, version)),),
+                ]
+            )
+        if self.personal_changes_enabled and item.visible:
+            rows.append((Button("🗓 Мої зміни на дату", f"pcal:open:{identity.hex}"),))
         rows.append((Button("⬅️ Календарі", "menu:calendars"),))
         return View(
             f"📚 {_label(item.name)}\nРоль: {_ROLE[item.role]}.\n"
@@ -347,6 +367,125 @@ class CalendarUx:
     def _fingerprint(profile: ScheduleProfile) -> str:
         data = [profile.profile_id, profile.name, serialize_profile(profile)]
         return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+    def abandon_editor(self, actor: int) -> None:
+        """Navigation invalidates this actor's unconfirmed editor drafts only."""
+        for handle, pending in tuple(self._pending.items()):
+            if pending.actor == actor and pending.action in {
+                "blank_name",
+                "blank_week",
+                "create_blank",
+                "rename",
+                "week",
+                "update",
+            }:
+                del self._pending[handle]
+
+    @staticmethod
+    def _week_prompt(handle: UUID, *, existing: str = "") -> View:
+        return View(
+            "Надішліть усі щотижневі уроки, по одному в рядку:\n"
+            "Пн 08:30–09:15 Математика\nВт 10:00–10:45 Українська мова\n"
+            "Дні: Пн, Вт, Ср, Чт, Пт, Сб, Нд (або 1–7). "
+            "До 3500 символів / 70 рядків. Посилання не додавайте.\n"
+            "Надішліть «-», щоб залишити тиждень порожнім. "
+            "Новий список замінить усі тижневі уроки; дат-винятки збережуться."
+            + (
+                "\n\nПоточні уроки:\n"
+                + "\n".join(_label(line, 250) for line in existing[:2800].splitlines())
+                + ("\n… Попередній перегляд скорочено." if len(existing) > 2800 else "")
+                if existing
+                else ""
+            ),
+            ((Button("Скасувати", _callback("no", handle)),),),
+        )
+
+    @_bounded
+    async def blank_prompt(self, actor: int) -> tuple[UUID, View]:
+        if len(await self._summaries(actor)) >= MAX_PERSISTENT_CALENDARS:
+            raise CalendarLimitExceeded()
+        handle = self._proposal(_Pending("blank_name", actor, self._now() + _TTL))
+        return handle, View(
+            "Надішліть назву нового особистого календаря (до 120 символів). "
+            "Він буде окремим від активного розкладу.",
+            ((Button("Скасувати", _callback("no", handle)),),),
+        )
+
+    @_bounded
+    async def edit_prompt(
+        self, actor: int, identity: UUID, version: int, *, rename: bool
+    ) -> tuple[UUID, View]:
+        item = await self._summary(actor, identity, version)
+        if not may_edit(item.role):
+            raise CalendarAccessDenied()
+        summary, profile = await self.port.get_snapshot(actor, identity)
+        if summary != item:
+            raise CalendarConflict()
+        # Refuse complex weekly rules rather than flatten parity or validity.
+        existing = "" if rename else weekly_text(profile)
+        handle = self._proposal(
+            _Pending(
+                "rename" if rename else "week",
+                actor,
+                self._now() + _TTL,
+                identity,
+                version,
+                profile=profile,
+            )
+        )
+        if not rename:
+            return handle, self._week_prompt(handle, existing=existing)
+        return handle, View(
+            f"Поточна назва: {_label(item.name)}.\nНадішліть нову назву (до 120 символів). "
+            "Уроки та дат-винятки не зміняться.",
+            ((Button("Скасувати", _callback("no", handle)),),),
+        )
+
+    @_bounded
+    async def editor_input(self, actor: int, handle: UUID, text: str) -> tuple[bool, View]:
+        await self._account(actor)
+        pending = self._peek(actor, handle)
+        if pending.action == "blank_name":
+            profile = ScheduleProfile(uuid4().hex, calendar_name(text))
+            self._pending[handle] = replace(pending, action="blank_week", profile=profile)
+            return False, self._week_prompt(handle)
+        if pending.action not in {"blank_week", "rename", "week"} or pending.profile is None:
+            raise CalendarDataUnavailable()
+        if pending.calendar_id is not None:
+            summary = await self._summary(actor, pending.calendar_id, pending.version)
+            if not may_edit(summary.role):
+                raise CalendarAccessDenied()
+            if self._peek(actor, handle) is not pending:
+                raise CalendarConflict()
+        if pending.action == "rename":
+            profile = replace(pending.profile, name=calendar_name(text))
+            description = "Зміниться лише назва. Уроки та дат-винятки збережуться."
+        else:
+            profile = replace(pending.profile, rules=weekly_rules(text), active=False)
+            preview = weekly_text(profile)
+            description = (
+                "Щотижневі уроки:\n"
+                + (
+                    "Тиждень буде порожнім."
+                    if preview == "-"
+                    else "\n".join(_label(line, 250) for line in preview.splitlines())
+                )
+                + f"\nДат-винятків збережено: {len(profile.overrides)}."
+            )
+        self._pending[handle] = replace(
+            pending,
+            action="create_blank" if pending.action == "blank_week" else "update",
+            profile=profile,
+        )
+        return True, View(
+            f"📚 {_label(profile.name)}\n{description}\n\n"
+            "Активний розклад та його нагадування не зміняться. "
+            "Для спільного календаря зміни побачать усі учасники. Підтвердити?",
+            (
+                (Button("✅ Зберегти", _callback("ok", handle)),),
+                (Button("Скасувати", _callback("no", handle)),),
+            ),
+        )
 
     @_bounded
     async def create_preview(self, actor: int) -> View:
@@ -534,6 +673,19 @@ class CalendarUx:
             if item.profile is None or self._fingerprint(source) != item.fingerprint:
                 raise CalendarConflict()
             await self.port.create_calendar(actor, item.profile, CalendarKind.PERSONAL)
+        elif item.action == "create_blank":
+            if item.profile is None:
+                raise CalendarDataUnavailable()
+            if len(await self._summaries(actor)) >= MAX_PERSISTENT_CALENDARS:
+                raise CalendarLimitExceeded()
+            await self.port.create_calendar(actor, item.profile, CalendarKind.PERSONAL)
+        elif item.action == "update":
+            if item.profile is None or item.calendar_id is None:
+                raise CalendarDataUnavailable()
+            summary = await self._summary(actor, item.calendar_id, item.version)
+            if not may_edit(summary.role):
+                raise CalendarAccessDenied()
+            await self.port.update_calendar(actor, item.calendar_id, item.version, item.profile)
         elif item.action in {"delete", "leave", "invite"}:
             if item.calendar_id is None:
                 raise CalendarDataUnavailable()
@@ -644,8 +796,16 @@ class CalendarUx:
             seen.add(identity)
             profile = deserialize_profile(item["snapshot"], identity, summary.name)
             checked.append({**item, "snapshot": serialize_profile(profile)})
+        payload: dict[str, object] = {
+            "schema_version": "time-tl-calendars/1", "calendars": checked,
+        }
+        if self.personal_export is not None:
+            personal = await self.personal_export(actor)
+            if type(personal) is not str or len(personal.encode("utf-8")) > 512_000:
+                raise CalendarDataUnavailable()
+            payload["personal_changes"] = json.loads(personal)
         raw = json.dumps(
-            {"schema_version": "time-tl-calendars/1", "calendars": checked},
+            payload,
             ensure_ascii=False,
             allow_nan=False,
         ).encode("utf-8")
@@ -660,7 +820,7 @@ def build_calendar_router(
     """Register before generic parent text handlers, or return a standalone router."""
     if not enabled:
         return None
-    from aiogram import F, Router
+    from aiogram import BaseMiddleware, F, Router
     from aiogram.fsm.context import FSMContext
     from aiogram.fsm.state import State, StatesGroup
     from aiogram.types import BufferedInputFile, CallbackQuery, Message
@@ -669,8 +829,31 @@ def build_calendar_router(
 
     class CalendarFlow(StatesGroup):
         target = State()
+        editor = State()
 
     selected: Router = router if router is not None else Router(name="time_tl_calendars")
+
+    class EditorNavigation(BaseMiddleware):
+        async def __call__(
+            self, handler: Callable[..., Awaitable[Any]], event: Any, data: dict[str, Any]
+        ) -> Any:
+            context = data.get("state")
+            slash = isinstance(event, Message) and bool(event.text and event.text.startswith("/"))
+            away = isinstance(event, CallbackQuery) and not (
+                (event.data or "").startswith("cal:") or event.data == "menu:calendars"
+            )
+            if slash or away:
+                actor = event.from_user.id if event.from_user is not None else 0
+                # Confirmation previews intentionally have no FSM state, but
+                # leaving them must invalidate their old Save buttons too.
+                ux.abandon_editor(actor)
+                if context is not None and await context.get_state() == CalendarFlow.editor.state:
+                    await context.clear()
+                    data["raw_state"] = None
+            return await handler(event, data)
+
+    selected.message.outer_middleware(EditorNavigation())
+    selected.callback_query.outer_middleware(EditorNavigation())
 
     def private_callback(callback: CallbackQuery) -> None:
         actor = _callback_user_id(callback)
@@ -686,6 +869,7 @@ def build_calendar_router(
         await state.clear()
         try:
             private_callback(callback)
+            ux.abandon_editor(_callback_user_id(callback))
             view = await ux.listing(_callback_user_id(callback))
         except Exception:
             view = _error_view()
@@ -698,8 +882,14 @@ def build_calendar_router(
             raw = _callback_data(callback)
             actor = _callback_user_id(callback)
             await state.clear()
+            if not raw.startswith(("cal:ok:", "cal:no:")):
+                ux.abandon_editor(actor)
             if raw == "cal:new":
                 view = await ux.create_preview(actor)
+            elif raw == "cal:blank":
+                handle, view = await ux.blank_prompt(actor)
+                await state.update_data(calendar_handle=handle.hex)
+                await state.set_state(CalendarFlow.editor)
             elif raw == "cal:export":
                 if (
                     callback.message is None
@@ -719,7 +909,7 @@ def build_calendar_router(
             else:
                 action = raw.split(":")[1]
                 identity, version = _parse(
-                    raw, versioned=action in {"d", "vis", "remove", "invite"}
+                    raw, versioned=action in {"d", "vis", "remove", "invite", "rename", "week"}
                 )
                 if action == "d":
                     view = await ux.detail(actor, identity, version)
@@ -731,6 +921,12 @@ def build_calendar_router(
                     handle, view = await ux.invitation_target_prompt(actor, identity, version)
                     await state.update_data(calendar_handle=handle.hex)
                     await state.set_state(CalendarFlow.target)
+                elif action in {"rename", "week"}:
+                    handle, view = await ux.edit_prompt(
+                        actor, identity, version, rename=action == "rename"
+                    )
+                    await state.update_data(calendar_handle=handle.hex)
+                    await state.set_state(CalendarFlow.editor)
                 elif action == "ip":
                     view = await ux.invitation_preview(actor, identity)
                 elif action == "rp":
@@ -758,6 +954,39 @@ def build_calendar_router(
         except Exception:
             view = _error_view()
         await state.clear()
+        await _answer(message, view)
+
+    @selected.message(CalendarFlow.editor, ~F.text.startswith("/"))
+    async def calendar_editor(message: Message, state: FSMContext) -> None:
+        try:
+            actor = _message_user_id(message)
+            if message.chat.type != "private" or message.chat.id != actor:
+                raise CalendarAccessDenied()
+            data = await state.get_data()
+            identity, _ = _parse("cal:editor:" + data.get("calendar_handle", ""))
+            if message.text and message.text.startswith("/"):
+                await ux.cancel(actor, identity)
+                await state.clear()
+                view = await ux.listing(actor)
+            elif message.text is None:
+                async with asyncio.timeout(_OPERATION_TIMEOUT_SECONDS):
+                    await ux._account(actor)
+                    ux._peek(actor, identity)
+                view = View(
+                    "Надішліть текст у вказаному форматі або скасуйте дію.",
+                    ((Button("Скасувати", _callback("no", identity)),),),
+                )
+            else:
+                complete, view = await ux.editor_input(actor, identity, message.text)
+                if complete:
+                    await state.clear()
+        except CalendarInputError as error:
+            # Only fixed parser messages are rendered; retain the opaque draft
+            # and the original expiry so the user can correct invalid input.
+            view = View(str(error), ((Button("Скасувати", _callback("no", identity)),),))
+        except Exception:
+            await state.clear()
+            view = _error_view()
         await _answer(message, view)
 
     return selected

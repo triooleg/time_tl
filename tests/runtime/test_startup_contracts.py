@@ -120,7 +120,7 @@ def production_release_manifest() -> ProductionReleaseManifest:
         config_revision=5,
         provider="alerts.in.ua/full-territory",
         catalog_sha256=region_registry_full.EXPECTED_SHA256,
-        migration_head="0009_calendar_foundation",
+        migration_head="0014_calendar_reminders",
         homework_enabled=True,
         replicas=1,
         territory_selection="manual-oblast-raion-hromada",
@@ -497,6 +497,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 region_confirmation,
                 territory_catalog,
                 heartbeat_repository,
+                power_port,
                 homework_repository,
                 calendar_repository,
             ):
@@ -525,6 +526,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIsNone(homework_repository)
                 self.assertIsNone(calendar_repository)
+                self.assertIsNone(power_port)
 
     async def test_staging_homework_dependency_is_built_only_when_enabled(self) -> None:
         settings = settings_for(
@@ -664,7 +666,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             PRODUCTION_RELEASE_MANIFEST["catalog_sha256"],
         )
         self.assertEqual(
-            "0009_calendar_foundation",
+            "0014_calendar_reminders",
             PRODUCTION_RELEASE_MANIFEST["migration_head"],
         )
         self.assertIs(True, PRODUCTION_RELEASE_MANIFEST["homework_enabled"])
@@ -748,7 +750,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 "time_tl.runtime.production_release._read_atomic_runtime_facts",
                 AsyncMock(
                     return_value=(
-                        ["0009_calendar_foundation"],
+                        ["0014_calendar_reminders"],
                         {"active_revision": 5},
                         active,
                     )

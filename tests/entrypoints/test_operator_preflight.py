@@ -102,7 +102,7 @@ def production_manifest() -> ProductionReleaseManifest:
         config_revision=5,
         provider="alerts.in.ua/full-territory",
         catalog_sha256=EXPECTED_SHA256,
-        migration_head="0009_calendar_foundation",
+        migration_head="0014_calendar_reminders",
         homework_enabled=True,
         replicas=1,
         territory_selection="manual-oblast-raion-hromada",
@@ -277,6 +277,7 @@ async def test_production_probe_rejects_wrong_manifest_before_io() -> None:
     candidate_value = candidate(environment="production", allowlist=())
     samples = (
         (replace(production_manifest(), provider="fake"), "provider"),
+        (replace(production_manifest(), migration_head="0009_calendar_foundation"), "migration"),
         (
             replace(production_manifest(), config_revision=6),
             "config revision mismatch",

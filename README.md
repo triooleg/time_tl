@@ -7,25 +7,28 @@ still active.
 
 ## Current status
 
-The schedule engine, Telegram menus, PostgreSQL persistence, one global official
-alert poller, transactional outbox, schedule/sender workers and owner admin dashboard
-are implemented and locally tested.
+Time TL includes lesson schedules, homework, calendars and a day view. It uses
+PostgreSQL to store user settings, cached electricity schedules and weather
+forecasts, and the notification queue. The owner dashboard manages settings
+and exposes operational checks.
 
-This is not a staging or production release. An exact immutable SIMULATION stack is
-running on the mini-server with the fake provider and Telegram disabled. Coordinate
-resolution remains closed; users can only confirm an oblast manually. Production,
-provider and worker capability gates remain false pending allowlisted Telegram
-staging and a separately approved exact release.
+See the [operations timeline](docs/operations/TIMELINE.md) for deployed build
+identities, production checks and incident recovery. The version recorded in
+the source identifies the package under preparation. Deployment status follows
+the evidence for the exact image in each environment.
 
-Verified LOCAL evidence recorded 2026-09-23: 242 pytest tests and one opt-in
-PostgreSQL E2E skip; unittest ran 233 tests with the same one skip,
-Ruff, strict mypy for 66 source files, compileall, Alembic offline SQL, an eight-
-service Compose parse and admin JavaScript syntax all passed. The server simulation
-for commit `4ea3b1bedfc31142ae2c53d32e550e4e8a20dcff` and image
-`sha256:08eaa3d06e7ca5d97f11d760c44e67bc085ac395cba196f04a05839d2658da21`
-also passed real PostgreSQL 16 fault/restart E2E, migration `0003`, backup/restore
-and restart persistence checks. No official-provider polling, live Telegram staging,
-production release or real-user delivery has been performed.
+## Versioning and release notes
+
+- Use Semantic Versioning. Increment `PATCH` for compatible fixes, `MINOR`
+  for compatible features, and `MAJOR` for incompatible changes to supported
+  interfaces or upgrade paths.
+- Keep the versions in [pyproject.toml](pyproject.toml) and
+  [src/time_tl/__init__.py](src/time_tl/__init__.py) aligned. Record changes under
+  **Unreleased** in the [changelog](CHANGELOG.md) as they land.
+- Before publishing, move those entries into a dated version section, verify
+  the exact commit, and create an annotated `vMAJOR.MINOR.PATCH` tag on it.
+  Use that section for the GitHub release notes. Record the exact deployed
+  image and verification separately in the operations timeline.
 
 ## Documentation
 

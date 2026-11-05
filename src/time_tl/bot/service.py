@@ -40,6 +40,10 @@ from .models import Button, NotificationMode, View
 
 _IMPORT_PREVIEW_MAX_CHARS = 3_500
 _IMPORT_PREVIEW_LESSONS_PER_DAY = 6
+HOME_NAVIGATION = (
+    Button("⚙️ Налаштування", "menu:settings"),
+    Button("ℹ️ Допомога", "menu:info"),
+)
 
 
 def _safe_preview_value(raw: object, *, limit: int = 120) -> str:
@@ -129,7 +133,7 @@ class UserAccount:
 
     @property
     def onboarding_complete(self) -> bool:
-        return self.mode is not None and self.region_id is not None
+        return self.region_id is not None
 
 
 class AccountRepository(Protocol):
@@ -203,6 +207,8 @@ class TelegramApplication:
         homework_enabled: bool = False,
         my_day_enabled: bool = False,
         calendars_enabled: bool = False,
+        power_outages_enabled: bool = False,
+        weather_enabled: bool = False,
         process_state_max_users: int = 256,
         process_state_ttl_seconds: float = 900.0,
         process_state_clock: Callable[[], float] = monotonic,
@@ -212,8 +218,10 @@ class TelegramApplication:
         self.resolver = resolver
         self.coordinate_suggestions_enabled = coordinate_suggestions_enabled
         self.homework_enabled = homework_enabled
+        self.weather_enabled = weather_enabled
         self.my_day_enabled = my_day_enabled
         self.calendars_enabled = calendars_enabled
+        self.power_outages_enabled = power_outages_enabled
         self.repository = repository or InMemoryAccountRepository()
         if import_sessions is not None:
             selected_import_sessions = import_sessions
@@ -280,10 +288,12 @@ class TelegramApplication:
             self._mode_rows() + ((Button("⬅️ До налаштувань", "menu:settings"),),),
         )
 
-    def choose_mode(self, user_id: int, mode: NotificationMode) -> View:
+    def choose_mode(self, user_id: int, mode: NotificationMode | None) -> View:
         account = self.repository.get_or_create(user_id)
         account.mode = mode
         self.repository.save(account)
+        if mode is None:
+            return self.menu(user_id, prefix="🔕 Сповіщення про тривоги й уроки вимкнено.")
         return self.menu(user_id) if account.region_id else self.region_prompt()
 
     def region_prompt(self) -> View:
@@ -334,8 +344,7 @@ class TelegramApplication:
         self._pending_regions[user_id] = canonical
         confirmation = self._region_confirmation(canonical)
         return View(
-            "Геолокацію оброблено одноразово й не збережено.\n\n"
-            + confirmation.text,
+            "Геолокацію оброблено одноразово й не збережено.\n\n" + confirmation.text,
             confirmation.rows,
         )
 
@@ -365,26 +374,38 @@ class TelegramApplication:
     def menu(self, user_id: int, *, prefix: str = "") -> View:
         account = self.repository.get_or_create(user_id)
         active = next((profile for profile in account.profiles.values() if profile.active), None)
+        mode_label = (
+            f"🔔 Сповіщення: {account.mode.label}" if account.mode else
+            "🔕 Тривоги й уроки: вимкнено" if account.onboarding_complete else
+            "🔔 Сповіщення: не обрано"
+        )
         summary = (
             "🏠 Головне меню\n\n"
-            f"🔔 Сповіщення: {account.mode.label if account.mode else 'не обрано'}\n"
+            f"{mode_label}\n"
             f"📍 Територія: {_friendly_territory_name(account.region_name)}\n"
             f"📚 Розклад: {active.name if active else 'ще немає'}"
         )
         text = f"{prefix}\n\n{summary}" if prefix else summary
-        rows = [(Button("📚 Розклад", "menu:schedules"),)]
+        rows: list[tuple[Button, ...]] = []
+        day_row: list[Button] = []
         if self.my_day_enabled:
-            rows.insert(0, (Button("🕐 Мій день", "menu:myday"),))
+            day_row.append(Button("🕐 Мій день", "menu:myday"))
         if self.calendars_enabled:
-            rows.append((Button("📅 Мої календарі", "menu:calendars"),))
+            day_row.append(Button("📅 Мої календарі", "menu:calendars"))
+        if day_row:
+            rows.append(tuple(day_row))
+        study_row = [Button("📚 Розклад", "menu:schedules")]
         if self.homework_enabled:
-            rows.append((Button("📝 Домашні завдання", "menu:homework"),))
-        rows.extend(
-            (
-                (Button("⚙️ Налаштування", "menu:settings"),),
-                (Button("ℹ️ Допомога", "menu:info"),),
-            )
-        )
+            study_row.append(Button("📝 Домашні завдання", "menu:homework"))
+        rows.append(tuple(study_row))
+        utility_row: list[Button] = []
+        if self.power_outages_enabled:
+            utility_row.append(Button("⚡ Електроенергія", "menu:power"))
+        if self.weather_enabled:
+            utility_row.append(Button("🌤 Погода", "menu:weather"))
+        if utility_row:
+            rows.append(tuple(utility_row))
+        rows.append(HOME_NAVIGATION)
         return View(text, tuple(rows))
 
     @staticmethod
@@ -419,6 +440,12 @@ class TelegramApplication:
             if self.homework_enabled
             else ""
         )
+        power_line = (
+            "\n• оператора та групу графіків електроенергії; вулиця й номер будинку "
+            "використовуються лише під час пошуку та не зберігаються;"
+            if self.power_outages_enabled
+            else ""
+        )
         return View(
             "🔐 Конфіденційність\n\n"
             "Time TL зберігає лише дані, потрібні для роботи бота:\n"
@@ -426,7 +453,7 @@ class TelegramApplication:
             "• підтверджену територію;\n"
             "• режим сповіщень і час нагадування;\n"
             "• ваші розклади."
-            f"{homework_line}\n\n"
+            f"{homework_line}{power_line}\n\n"
             "Координати після пропозиції території не зберігаються. "
             "Посилання на уроки зберігаються зашифрованими та не показуються "
             "іншим користувачам.",
@@ -458,9 +485,7 @@ class TelegramApplication:
         token = uuid4().hex[:12]
         self._deletions[user_id] = (token, 1)
         homework_line = (
-            "• усі домашні завдання та позначки виконання;\n"
-            if self.homework_enabled
-            else ""
+            "• усі домашні завдання та позначки виконання;\n" if self.homework_enabled else ""
         )
         return View(
             "⚠️ Видалення особистих даних\n\n"

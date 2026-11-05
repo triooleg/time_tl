@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, delete, func, or_, select
@@ -28,6 +29,10 @@ from time_tl.domain.schedule import ScheduleProfile
 from .models import Calendar as CalendarRow
 from .models import CalendarInvitation, User
 from .models import CalendarMembership as MembershipRow
+
+if TYPE_CHECKING:
+    from .calendar_overrides import AsyncPostgresPersonalCalendarRepository
+    from .calendar_reminders import PostgresCalendarReminderRepository
 
 
 def _user_id(value: int) -> None:
@@ -67,6 +72,17 @@ def digest_invitation_token(value: str) -> str:
 class AsyncPostgresCalendarRepository:
     def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
         self._factory = factory
+
+    def make_personal_calendar_repository(self) -> AsyncPostgresPersonalCalendarRepository:
+        """Share the session factory without changing the legacy port or queries."""
+        from .calendar_overrides import AsyncPostgresPersonalCalendarRepository
+
+        return AsyncPostgresPersonalCalendarRepository(self._factory)
+
+    def make_calendar_reminder_repository(self) -> PostgresCalendarReminderRepository:
+        from .calendar_reminders import PostgresCalendarReminderRepository
+
+        return PostgresCalendarReminderRepository(self._factory)
 
     async def list_calendars(self, telegram_user_id: int) -> tuple[CalendarSummary, ...]:
         _user_id(telegram_user_id)
@@ -224,6 +240,12 @@ class AsyncPostgresCalendarRepository:
         expected_version: int,
         profile: ScheduleProfile,
     ) -> CalendarSummary:
+        """Replace one independent snapshot atomically for an authorized editor.
+
+        The caller must carry any existing date overrides in ``profile``. This
+        is a CAS replacement, not a merge or activation of the legacy schedule.
+        Validation precedes the transaction; rejected edits change no rows.
+        """
         self._inputs(actor, calendar_id, expected_version)
         payload = serialize_profile(profile)
         async with self._factory() as session, session.begin():

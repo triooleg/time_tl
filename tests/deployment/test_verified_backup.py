@@ -17,7 +17,8 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(backup, "secure_directory", lambda path: None)
     monkeypatch.setattr(backup, "identity", lambda: "sha256:" + "a" * 64)
     monkeypatch.setattr(
-        backup, "command",
+        backup,
+        "command",
         lambda args, **kw: backup.SCHEMA.encode() if "-Atc" in args else b"PGDMPfixture",
     )
     monkeypatch.setattr(
@@ -95,7 +96,8 @@ def test_readback_corruption_does_not_publish(sandbox, monkeypatch):
 def test_backup_schema_drift_never_advances_guard_or_runs_retention(sandbox, monkeypatch):
     _, publish = sandbox
     monkeypatch.setattr(
-        backup, "command",
+        backup,
+        "command",
         lambda args, **kw: b"0009_calendar_foundation" if "-Atc" in args else b"PGDMPfixture",
     )
     retention = Mock(side_effect=AssertionError("must not delete retained copies"))
@@ -118,7 +120,9 @@ def test_named_table_contract_has_exact_old_and_new_tables():
     assert len(backup.LEGACY_TABLES) == 28
     assert len(backup.SCHEMA_TABLES["0009_calendar_foundation"]) == 31
     assert backup.SCHEMA_TABLES["0009_calendar_foundation"] - backup.LEGACY_TABLES == {
-        "calendars", "calendar_memberships", "calendar_invitations",
+        "calendars",
+        "calendar_memberships",
+        "calendar_invitations",
     }
 
 
@@ -223,7 +227,12 @@ def test_restore_actual_schema_toc_and_counts(monkeypatch, schema):
         return b""
 
     monkeypatch.setattr(backup, "command", command)
+    inspector = Mock()
+    monkeypatch.setattr(backup, "validate_personal_restore", inspector)
     result = backup.restore(b"PGDMPfixture", "sha256:" + "a" * 64, expected_schema=schema)
+    assert inspector.call_count == int(schema in backup.RESTORE_INSPECTORS)
+    if schema in backup.RESTORE_INSPECTORS:
+        assert inspector.call_args.args[2] == schema
     assert result["schema"] == schema
     assert result["tables_checked"] == len(tables)
     assert result["restored_total_rows"] == 2 * len(tables)

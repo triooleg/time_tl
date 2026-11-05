@@ -6,8 +6,9 @@ import base64
 import binascii
 from enum import StrEnum
 from functools import lru_cache
+from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -71,6 +72,56 @@ class Settings(BaseSettings):
     homework_enabled: bool = Field(default=False, alias="HOMEWORK_ENABLED")
     my_day_enabled: bool = Field(default=False, alias="MY_DAY_ENABLED")
     calendars_enabled: bool = Field(default=False, alias="CALENDARS_ENABLED")
+    calendar_reminders_enabled: bool = Field(default=False, alias="CALENDAR_REMINDERS_ENABLED")
+    personal_calendar_changes_enabled: bool = Field(
+        default=False, alias="PERSONAL_CALENDAR_CHANGES_ENABLED"
+    )
+    power_outages_enabled: bool = Field(default=False, alias="POWER_OUTAGES_ENABLED")
+    weather_enabled: bool = Field(default=False, alias="WEATHER_ENABLED")
+    weather_notifications_enabled: bool = Field(
+        default=False, alias="WEATHER_NOTIFICATIONS_ENABLED"
+    )
+    weather_admin_enabled: bool = Field(default=False, alias="WEATHER_ADMIN_ENABLED")
+    dynamic_coverage_enabled: bool = Field(default=False, alias="DYNAMIC_COVERAGE_ENABLED")
+    power_poll_interval_seconds: int = Field(
+        default=300, ge=300, le=86400, alias="POWER_POLL_INTERVAL_SECONDS"
+    )
+    power_stale_after_seconds: int = Field(
+        default=1800, ge=600, le=604800, alias="POWER_STALE_AFTER_SECONDS"
+    )
+    power_dtek_enabled: bool = Field(default=False, alias="POWER_DTEK_ENABLED")
+    power_cek_enabled: bool = Field(default=False, alias="POWER_CEK_ENABLED")
+    power_alerts_energy_html_enabled: bool = Field(
+        default=False, alias="POWER_ALERTS_ENERGY_HTML_ENABLED"
+    )
+    power_alerts_energy_api_enabled: bool = Field(
+        default=False, alias="POWER_ALERTS_ENERGY_API_ENABLED"
+    )
+    power_address_lookup_enabled: bool = Field(default=False, alias="POWER_ADDRESS_LOOKUP_ENABLED")
+    power_map_reminders_enabled: bool = Field(default=False, alias="POWER_MAP_REMINDERS_ENABLED")
+    power_bezsvitla_enabled: bool = Field(default=False, alias="POWER_BEZSVITLA_ENABLED")
+    power_alerts_energy_html_poll_interval_seconds: int = Field(
+        default=300,
+        ge=300,
+        le=86400,
+        alias="POWER_ALERTS_ENERGY_POLL_INTERVAL_SECONDS",
+        validation_alias=AliasChoices(
+            "POWER_ALERTS_ENERGY_POLL_INTERVAL_SECONDS",
+            "POWER_ALERTS_ENERGY_HTML_POLL_INTERVAL_SECONDS",
+        ),
+    )
+    power_alerts_energy_base_url: Literal["https://alerts.energy"] = Field(
+        default="https://alerts.energy", alias="POWER_ALERTS_ENERGY_BASE_URL"
+    )
+    power_alerts_energy_browser_fallback: Literal[False] = Field(
+        default=False, alias="POWER_ALERTS_ENERGY_BROWSER_FALLBACK"
+    )
+    power_notification_default_outage_lead: int = Field(
+        default=10, ge=0, le=180, alias="POWER_NOTIFICATION_DEFAULT_OUTAGE_LEAD"
+    )
+    power_notification_default_restore_lead: int = Field(
+        default=10, ge=0, le=180, alias="POWER_NOTIFICATION_DEFAULT_RESTORE_LEAD"
+    )
     lesson_link_fernet_key: SecretStr | None = Field(default=None, alias="LESSON_LINK_FERNET_KEY")
     test_chat_allowlist_raw: str = Field(default="", alias="TEST_CHAT_ALLOWLIST")
     database_url: SecretStr = Field(alias="DATABASE_URL")
@@ -182,7 +233,21 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_safety_boundaries(self) -> Settings:
         local = self.environment in {Environment.LOCAL, Environment.SIMULATION}
+        if self.power_map_reminders_enabled and (
+            not self.power_outages_enabled or not self.power_alerts_energy_api_enabled
+        ):
+            raise ValueError("map reminders require power schedules and API flags")
+        if self.power_address_lookup_enabled and (
+            not self.power_outages_enabled or not self.power_alerts_energy_api_enabled
+        ):
+            raise ValueError("power address lookup requires power schedules and API flags")
+        if self.power_stale_after_seconds <= self.power_poll_interval_seconds:
+            raise ValueError("power freshness must exceed the central poll interval")
         database_managed = self.owner_config_source is OwnerConfigSource.DATABASE
+        if self.personal_calendar_changes_enabled and (
+            not self.calendars_enabled or self.service_role not in {"bot", "unspecified"}
+        ):
+            raise ValueError("personal calendar changes require bot calendars capability")
         if self.homework_enabled and self.service_role not in {"bot", "unspecified"}:
             raise ValueError("manual homework capability is restricted to the bot role")
         if self.my_day_enabled and self.service_role not in {"bot", "unspecified"}:

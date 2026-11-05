@@ -43,12 +43,16 @@ class ConfirmedClear:
     confirmed_at: datetime
     target: ScheduleTarget
     scope_binding: dict[str, object] | None = None
+    transition_revision: int | None = None
+    expires_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.event_id:
             raise ValueError("clear event id must not be empty")
         if self.confirmed_at.tzinfo is None:
             raise ValueError("confirmed_at must be timezone-aware")
+        if self.expires_at is not None and self.expires_at.tzinfo is None:
+            raise ValueError("expires_at must be timezone-aware")
         if self.target.alert_state is not AlertState.CLEAR_CONFIRMED:
             raise ValueError("return-to-lesson requires CLEAR_CONFIRMED")
 
@@ -196,6 +200,11 @@ class ScheduleWorker:
         age = now - clear.confirmed_at
         if age < timedelta(0) or age > RETURN_TO_LESSON_MAX_AGE:
             return None
+        cutoff = clear.confirmed_at + RETURN_TO_LESSON_MAX_AGE
+        if clear.expires_at is not None:
+            cutoff = min(cutoff, clear.expires_at)
+        if now >= cutoff:
+            return None
         local_now = now.astimezone(KYIV)
         resolved = resolve_day(target.profile, local_now.date())
         for lesson in resolved.lessons:
@@ -204,10 +213,7 @@ class ScheduleWorker:
             starts_at = datetime.combine(resolved.day, lesson.start, KYIV)
             ends_at = datetime.combine(resolved.day, lesson.end, KYIV)
             if starts_at <= local_now < ends_at:
-                valid_until = min(
-                    clear.confirmed_at + RETURN_TO_LESSON_MAX_AGE,
-                    ends_at,
-                )
+                valid_until = min(cutoff, ends_at)
                 return PlannedOutboxMessage(
                     # One clear event may create at most one return message per user,
                     # even if a profile changes while the fresh-event window is open.
@@ -224,6 +230,11 @@ class ScheduleWorker:
                         **(
                             {"scope_binding": dict(clear.scope_binding)}
                             if clear.scope_binding is not None
+                            else {}
+                        ),
+                        **(
+                            {"transition_revision": clear.transition_revision}
+                            if clear.transition_revision is not None
                             else {}
                         ),
                     },

@@ -309,6 +309,41 @@ class AsyncTelegramApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("не зберігаються", privacy.text)
         self.assertEqual("account:delete:request", privacy.rows[0][0].callback_data)
 
+    async def test_notifications_hub_links_only_available_settings(self) -> None:
+        self.app.power_ux = SimpleNamespace(notifications_available=True)
+        self.app.weather_ux = SimpleNamespace(notifications_available=True)
+        self.app.calendars_enabled = True
+        view = self.app.notifications_menu()
+        callbacks = [button.callback_data for row in view.rows for button in row]
+        self.assertEqual(
+            ["menu:mode", "menu:power", "wt:settings", "menu:settings", "menu:home"],
+            callbacks,
+        )
+        self.assertIn("Для подій календаря окремих сповіщень поки немає", view.text)
+        self.app.power_ux.notifications_available = False
+        self.app.weather_ux.notifications_available = False
+        view = self.app.notifications_menu()
+        callbacks = [button.callback_data for row in view.rows for button in row]
+        self.assertNotIn("menu:power", callbacks)
+        self.assertNotIn("wt:settings", callbacks)
+
+    async def test_both_alert_and_lesson_notifications_can_be_disabled(self) -> None:
+        self.repo.accounts[1] = UserAccount(
+            user_id=1, mode=NotificationMode.LESSONS_AND_SIRENS,
+            region_id=self.kyiv.region_id, region_name=self.kyiv.name,
+        )
+        callbacks = [button.callback_data for row in self.app.mode_prompt().rows for button in row]
+        self.assertIn("mode:off", callbacks)
+        await self.app.choose_mode(1, None)
+        self.assertIsNone(self.repo.accounts[1].mode)
+        self.assertEqual(self.kyiv.region_id, self.repo.accounts[1].region_id)
+        views = await self.app.start_sequence(1)
+        self.assertEqual(1, len(views))
+        self.assertIn("Тривоги й уроки: вимкнено", views[-1].text)
+        self.assertNotIn("Спочатку оберіть режим", views[-1].text)
+        await self.app.choose_mode(1, NotificationMode.SIRENS)
+        self.assertIs(self.repo.accounts[1].mode, NotificationMode.SIRENS)
+
     async def test_homework_menu_is_hidden_by_default(self) -> None:
         menu = await self.app.menu(1)
 

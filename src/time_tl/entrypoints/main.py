@@ -17,6 +17,7 @@ class Service(StrEnum):
     ALERT_WORKER = "alert-worker"
     SCHEDULE_WORKER = "schedule-worker"
     SENDER_WORKER = "sender-worker"
+    POWER_WORKER = "power-worker"
     ADMIN_WEB = "admin-web"
     MIGRATE = "migrate"
 
@@ -34,9 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
             "activate-production-owner-settings",
             "import-territories",
             "activate-territories",
+            "diagnose-power-html",
         ],
     )
     parser.add_argument("--output", help=argparse.SUPPRESS)
+    parser.add_argument("--html-file", type=Path, help="Offline DTEK HTML file; no network access")
     parser.add_argument("--revision", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--evidence", help=argparse.SUPPRESS)
     parser.add_argument("--approved-chat-id", type=int, help=argparse.SUPPRESS)
@@ -50,6 +53,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.service == "diagnose-power-html":
+        import json
+
+        from time_tl.infrastructure.power_outages.dtek_html_provider import inspect_html_fact
+
+        if args.html_file is None:
+            raise SystemExit("diagnose-power-html requires --html-file")
+        with args.html_file.open("rb") as stream:
+            payload = stream.read(2 * 1024 * 1024 + 1)
+        try:
+            diagnostic = inspect_html_fact(payload)
+        except ValueError:
+            raise SystemExit("power_html_invalid") from None
+        print(json.dumps(diagnostic, ensure_ascii=False, default=str))
+        return
     settings = get_settings()
     logging.basicConfig(
         level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -98,9 +116,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         from time_tl.entrypoints.operator_preflight import (
             preflight_production_owner_settings,
         )
-        evidence = asyncio.run(
-            preflight_production_owner_settings(settings, args.revision)
-        )
+
+        evidence = asyncio.run(preflight_production_owner_settings(settings, args.revision))
         print(evidence.sanitized_summary())
         return
     if args.service == "import-territories":
@@ -167,6 +184,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     from time_tl.runtime.services import (
         run_alert_worker,
         run_bot,
+        run_power_worker,
         run_schedule_worker,
         run_sender_worker,
     )
@@ -178,6 +196,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         asyncio.run(run_bot(settings))
     elif service is Service.SCHEDULE_WORKER:
         asyncio.run(run_schedule_worker(settings))
+    elif service is Service.POWER_WORKER:
+        asyncio.run(run_power_worker(settings))
     else:
         asyncio.run(run_sender_worker(settings))
 

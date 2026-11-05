@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -86,6 +86,7 @@ class SenderWorker:
         messages_per_second: float = 20.0,
         batch_size: int = 50,
         transport_timeout_seconds: float = 8.0,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if (
             max_attempts < 1
@@ -101,6 +102,7 @@ class SenderWorker:
         self._interval = 1.0 / messages_per_second
         self._batch_size = batch_size
         self._transport_timeout_seconds = transport_timeout_seconds
+        self._clock = clock
 
     async def run_once(self, now: datetime, *, sleep: Callable[[float], Awaitable[None]]) -> int:
         if now.tzinfo is None:
@@ -110,6 +112,18 @@ class SenderWorker:
         for index, record in enumerate(claimed):
             if index:
                 await sleep(self._interval)
+            priority_check = getattr(self._repository, "higher_priority_pending", None)
+            probe_at = max(now, self._clock())
+            if priority_check is not None and await priority_check(record.event_type, probe_at):
+                # Release unattempted lower-priority rows. The next claim sees a
+                # newly arrived air alert instead of draining an old weather batch.
+                await self._repository.release_unattempted(
+                    tuple(item.message_id for item in claimed[index:]),
+                    claimed_at=now,
+                    available_at=probe_at,
+                    error_code="higher_priority_pending",
+                )
+                break
             try:
                 message = await self._render(record, now)
                 authorized = await self._repository.deliver_if_authorized(
@@ -188,6 +202,15 @@ class SenderWorker:
                 f"🕐 Початок: {starts_at}\n\n"
                 "Час підготуватися до підключення."
             )
+        elif record.event_type == "CALENDAR_REMINDER":
+            name = _display_text(payload.get("calendar_name"), fallback="Особистий календар")
+            event = _display_text(payload.get("event_title"), fallback="Подія")
+            text = (
+                "📅 ПОДІЯ НЕЗАБАРОМ\n\n"
+                f"🗓 {name}\n"
+                f"📌 {event}\n"
+                f"🕐 Початок: {_lesson_time(payload, 'starts_at')}"
+            )
         elif record.event_type == "RETURN_TO_ACTIVE_LESSON":
             region_name = _confirmed_region_name(payload)
             ends_at = _lesson_time(payload, "ends_at")
@@ -215,11 +238,46 @@ class SenderWorker:
                 "Відбій підтверджено офіційним джерелом. "
                 "Продовжуйте виконувати актуальні офіційні вказівки."
             )
+        elif record.event_type.startswith("POWER_MAP_"):
+            from time_tl.infrastructure.db.power_map_notifications import render_map_outbox
+
+            try:
+                text = render_map_outbox(record.event_type, payload, now)
+            except (KeyError, ValueError, TypeError) as exc:
+                raise DeliveryFailure("invalid_power_map_payload", retryable=False) from exc
+        elif record.event_type.startswith("WEATHER_"):
+            from time_tl.application.weather_notifications import render_weather_notification
+
+            if record.event_type not in {"WEATHER_DAILY", "WEATHER_EVENTS"}:
+                raise DeliveryFailure("invalid_weather_payload", retryable=False)
+            try:
+                body = {
+                    key: value
+                    for key, value in payload.items()
+                    if key
+                    not in {"telegram_chat_id", "confirmed_region_id", "confirmed_region_name"}
+                }
+                if body.get("kind") != record.event_type:
+                    raise ValueError("weather_kind_mismatch")
+                text = render_weather_notification(body)
+            except (KeyError, ValueError, TypeError) as exc:
+                raise DeliveryFailure("invalid_weather_payload", retryable=False) from exc
+        elif record.event_type in {
+            "POWER_OUTAGE_UPCOMING",
+            "POWER_RESTORATION_UPCOMING",
+            "POWER_SCHEDULE_CHANGED",
+        }:
+            from time_tl.application.power_notification_worker import render_power_message
+
+            try:
+                text = render_power_message(record.event_type, payload, now)
+            except (KeyError, ValueError, TypeError) as exc:
+                raise DeliveryFailure("invalid_power_payload", retryable=False) from exc
         else:
             raise DeliveryFailure("unsupported_event_type", retryable=False)
         join_url = None
         reference = payload.get("join_link_ref")
-        if reference and self._join_links is not None:
+        if reference and self._join_links is not None and record.event_type != "CALENDAR_REMINDER":
             join_url = await self._join_links.resolve(str(reference))
         return TelegramMessage(chat_id=chat_id, text=text, join_url=join_url)
 

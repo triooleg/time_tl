@@ -122,6 +122,8 @@ async def _answer(message: Any, view: View) -> None:
         ReplyKeyboardMarkup,
     )
 
+    parse_mode = getattr(view, "parse_mode", None)
+    formatting = {"parse_mode": parse_mode} if parse_mode else {}
     reply_rows = [
         [KeyboardButton(text=b.label, request_location=b.request_location) for b in row]
         for row in view.rows
@@ -135,6 +137,7 @@ async def _answer(message: Any, view: View) -> None:
                 resize_keyboard=True,
                 one_time_keyboard=True,
             ),
+            **formatting,
         )
         return
 
@@ -148,7 +151,7 @@ async def _answer(message: Any, view: View) -> None:
         if any(b.callback_data for b in row)
     ]
     markup = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
-    await message.answer(view.text, reply_markup=markup)
+    await message.answer(view.text, reply_markup=markup, **formatting)
 
 
 async def _edit(callback: Any, view: View) -> None:
@@ -168,7 +171,9 @@ async def _edit(callback: Any, view: View) -> None:
     ]
     markup = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
     if callback.message is not None:
-        await callback.message.edit_text(view.text, reply_markup=markup)
+        parse_mode = getattr(view, "parse_mode", None)
+        formatting = {"parse_mode": parse_mode} if parse_mode else {}
+        await callback.message.edit_text(view.text, reply_markup=markup, **formatting)
         if reply_rows:
             # Reply-keyboard buttons cannot be attached to editMessageText.
             # Send the keyboard as a short follow-up after preserving the

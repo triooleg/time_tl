@@ -1,0 +1,12 @@
+{
+  "provenance": "normalized extract of observed public date/no-records fragments and empty arrays; not byte-exact, not a complete response or accepted schedule",
+  "observed_date": "2026-11-04",
+  "source_url": "https://cek.dp.ua/index.php/cpojivaham/vidkliuchennia/2-uncategorised/921-grafik-pogodinikh-vidklyuchen.html",
+  "method": "POST",
+  "request_fields": {"queue": "all", "date": "2026-11-04"},
+  "http_status": 200,
+  "source_updated_at": null,
+  "verified_schedule_date": null,
+  "accepted_as_schedule": false,
+  "warning": "Empty dedicated-form result conflicts with the undated-year daily article. Never infer expected power or published complete no-schedule from this fixture."
+}

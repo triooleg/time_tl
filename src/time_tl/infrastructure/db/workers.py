@@ -36,7 +36,30 @@ from .models import (
     User,
     WorkerHeartbeat,
 )
-from .outbox import pending_outbox_query
+from .outbox import pending_outbox_query, priority_expression
+from .power import (
+    POWER_EVENT_TYPES,
+    PowerDeliveryFence,
+    mark_power_delivered,
+    power_delivery_policy,
+)
+from .power_map_notifications import (
+    EVENT_TYPES as POWER_MAP_EVENT_TYPES,
+)
+from .power_map_notifications import (
+    MapDeliveryFence,
+    disable_map_for_failed_recipient,
+    map_delivery_policy,
+)
+from .weather_notifications import (
+    EVENT_TYPES as WEATHER_EVENT_TYPES,
+)
+from .weather_notifications import (
+    WeatherDeliveryFence,
+    disable_weather_for_failed_recipient,
+    mark_weather_delivered,
+    weather_delivery_policy,
+)
 
 _MODE = {
     "LESSONS_ONLY": NotificationMode.LESSONS_ONLY,
@@ -46,6 +69,7 @@ _MODE = {
 _SENDER_COOLDOWN_WORKER_NAME = "sender-global-cooldown"
 TERMINAL_OUTBOX_RETENTION = timedelta(days=90)
 MAX_TERMINAL_OUTBOX_PRUNE_BATCH = 100
+MapAuthorityGuard = Callable[[AsyncSession, datetime], Awaitable[None]]
 
 _REF = re.compile(
     r"^lesson:(rule|override):([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$",
@@ -84,9 +108,14 @@ def _scope_binding_matches(payload: dict[str, object], scope: AlertScope) -> boo
 
 def _delivery_deadline(row: OutboxMessage) -> datetime | None:
     key = {
+        "CALENDAR_REMINDER": "starts_at",
+        "ALERT_STARTED": "valid_until",
+        "ALL_CLEAR_CONFIRMED": "valid_until",
         "LESSON_REMINDER": "starts_at",
         "RETURN_TO_ACTIVE_LESSON": "valid_until",
     }.get(row.event_type)
+    if row.event_type in WEATHER_EVENT_TYPES:
+        key = "expires_at"
     if key is None:
         return None
     raw = row.payload.get(key)
@@ -97,6 +126,11 @@ def _delivery_deadline(row: OutboxMessage) -> datetime | None:
     except ValueError:
         return None
     return value if value.tzinfo is not None else None
+
+
+def _transition_matches(row: OutboxMessage, snapshot: AlertSnapshot) -> bool:
+    revision = row.payload.get("transition_revision")
+    return type(revision) is int and revision > 0 and revision == snapshot.transition_revision
 
 
 class PostgresScheduleWorkerRepository:
@@ -280,7 +314,7 @@ class PostgresScheduleWorkerRepository:
                 return ConfirmedClearPage((), None, None)
             items: list[ConfirmedClear] = []
             for message in messages:
-                clear = await self._load_confirmed_clear(session, message)
+                clear = await self._load_confirmed_clear(session, message, now)
                 if clear is not None:
                     items.append(clear)
             last = messages[-1]
@@ -294,7 +328,11 @@ class PostgresScheduleWorkerRepository:
         self,
         session: AsyncSession,
         message: OutboxMessage,
+        now: datetime,
     ) -> ConfirmedClear | None:
+        deadline = _delivery_deadline(message)
+        if deadline is None or now >= deadline:
+            return None
         try:
             scope_id = UUID(message.aggregate_id)
         except ValueError:
@@ -303,7 +341,12 @@ class PostgresScheduleWorkerRepository:
         if scope is None or not _scope_binding_matches(message.payload, scope):
             return None
         snapshot = await session.get(AlertSnapshot, scope.id)
-        if snapshot is None or snapshot.state != AlertState.CLEAR_CONFIRMED.value:
+        if (
+            message.dead_at is not None
+            or snapshot is None
+            or snapshot.state != AlertState.CLEAR_CONFIRMED.value
+            or not _transition_matches(message, snapshot)
+        ):
             return None
         user = await session.get(User, scope.user_id)
         if user is None or user.mode != "LESSONS_AND_ALERTS":
@@ -336,6 +379,8 @@ class PostgresScheduleWorkerRepository:
             message.created_at,
             target,
             scope_binding=dict(binding),
+            transition_revision=snapshot.transition_revision,
+            expires_at=deadline,
         )
 
     async def enqueue_deduplicated(self, messages: tuple[PlannedOutboxMessage, ...]) -> int:
@@ -419,6 +464,13 @@ class PostgresSenderRepository:
         expected_owner_config_revision: int | None = None,
         expected_staging_allowlist: tuple[int, ...] | None = None,
         clock: Callable[[], datetime] | None = None,
+        power_enabled: bool = False,
+        power_map_notifications_enabled: bool = False,
+        power_map_authority_guard: MapAuthorityGuard | None = None,
+        weather_notifications_enabled: bool = False,
+        weather_authority_guard: MapAuthorityGuard | None = None,
+        calendar_reminders_enabled: bool = False,
+        power_stale_after_seconds: int = 1800,
     ) -> None:
         if stale_after_seconds < 1:
             raise ValueError("stale threshold must be positive")
@@ -438,6 +490,19 @@ class PostgresSenderRepository:
         self._expected_owner_config_revision = expected_owner_config_revision
         self._expected_staging_allowlist = expected_staging_allowlist
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._calendar_reminders_enabled = calendar_reminders_enabled
+        if type(power_enabled) is not bool or power_stale_after_seconds < 1:
+            raise ValueError("invalid power delivery configuration")
+        self._power_enabled = power_enabled
+        if type(power_map_notifications_enabled) is not bool:
+            raise ValueError("invalid_power_map_delivery_configuration")
+        self._power_map_notifications_enabled = power_map_notifications_enabled
+        self._power_map_authority_guard = power_map_authority_guard
+        self._power_stale_after_seconds = power_stale_after_seconds
+        if type(weather_notifications_enabled) is not bool:
+            raise ValueError("invalid_weather_delivery_configuration")
+        self._weather_notifications_enabled = weather_notifications_enabled
+        self._weather_authority_guard = weather_authority_guard
 
     def _current_time(self) -> datetime:
         current = self._clock()
@@ -597,7 +662,7 @@ class PostgresSenderRepository:
         if row.aggregate_type == "alert_scope":
             scope = await session.get(AlertScope, aggregate_id)
             return await session.get(User, scope.user_id) if scope is not None else None
-        if row.aggregate_type == "schedule":
+        if row.aggregate_type in {"schedule", "power", "power_map", "weather"}:
             return await session.get(User, aggregate_id)
         return None
 
@@ -617,6 +682,18 @@ class PostgresSenderRepository:
             and expected.confirmed_region_id == region_id
             and expected.confirmed_region_name == region_name
         )
+
+    async def higher_priority_pending(self, event_type: str, now: datetime) -> bool:
+        from time_tl.application.notification_priority import notification_priority
+
+        priority = notification_priority(event_type)
+        if priority == 0:
+            return False
+        async with self._factory() as session:
+            candidate = pending_outbox_query(
+                now, limit=1, visibility_timeout=self._visibility_timeout
+            ).where(priority_expression() < priority)
+            return (await session.execute(candidate)).first() is not None
 
     async def claim_batch_skip_locked(
         self, now: datetime, *, limit: int
@@ -659,19 +736,37 @@ class PostgresSenderRepository:
                         row,
                         authorization_at=now,
                         stale_after=self._stale_after,
+                        power_enabled=self._power_enabled,
+                        power_map_notifications_enabled=self._power_map_notifications_enabled,
+                        power_map_authority_guard=self._power_map_authority_guard,
+                        power_stale_after_seconds=self._power_stale_after_seconds,
+                        weather_notifications_enabled=self._weather_notifications_enabled,
+                        weather_authority_guard=self._weather_authority_guard,
+                        calendar_reminders_enabled=self._calendar_reminders_enabled,
                     ):
-                        supported = row.event_type in {
-                            "LESSON_REMINDER",
-                            "RETURN_TO_ACTIVE_LESSON",
-                            "ALERT_STARTED",
-                            "ALL_CLEAR_CONFIRMED",
-                        }
+                        supported = (
+                            row.event_type
+                            in {
+                                "LESSON_REMINDER",
+                                "RETURN_TO_ACTIVE_LESSON",
+                                "ALERT_STARTED",
+                                "ALL_CLEAR_CONFIRMED",
+                                "CALENDAR_REMINDER",
+                            }
+                            | POWER_EVENT_TYPES
+                            | POWER_MAP_EVENT_TYPES
+                            | WEATHER_EVENT_TYPES
+                        )
                         user = await self._current_user_for_row(session, row) if supported else None
-                        require_region = row.event_type in {
-                            "RETURN_TO_ACTIVE_LESSON",
-                            "ALERT_STARTED",
-                            "ALL_CLEAR_CONFIRMED",
-                        }
+                        require_region = (
+                            row.event_type
+                            in {
+                                "RETURN_TO_ACTIVE_LESSON",
+                                "ALERT_STARTED",
+                                "ALL_CLEAR_CONFIRMED",
+                            }
+                            | WEATHER_EVENT_TYPES
+                        )
                         region_id = (user.confirmed_region_id or "").strip() if user else ""
                         region_name = (user.region_name or "").strip() if user else ""
                         if supported and (
@@ -705,6 +800,8 @@ class PostgresSenderRepository:
                             row,
                             authorization_at=now,
                             stale_after=self._stale_after,
+                            power_enabled=self._power_enabled,
+                            power_stale_after_seconds=self._power_stale_after_seconds,
                         ):
                             self._defer_transient(row, now)
                         else:
@@ -729,7 +826,24 @@ class PostgresSenderRepository:
         stale_after: timedelta,
         lock_policy_rows: bool = False,
         expected_recipient: DeliveryRecipient | None = None,
+        power_enabled: bool = False,
+        power_stale_after_seconds: int = 1800,
     ) -> bool:
+        if row.event_type.startswith("POWER_MAP_") or row.aggregate_type == "power_map":
+            return False
+        if row.event_type in POWER_EVENT_TYPES:
+            return (
+                power_enabled
+                and await power_delivery_policy(
+                    session,
+                    row,
+                    authorization_at,
+                    stale_after_seconds=power_stale_after_seconds,
+                    lock=lock_policy_rows,
+                    expected_recipient=expected_recipient,
+                )
+                == "TEMPORARY"
+            )
         if row.event_type == "RETURN_TO_ACTIVE_LESSON":
             if row.aggregate_type != "schedule":
                 return False
@@ -809,6 +923,7 @@ class PostgresSenderRepository:
                 or not (user.confirmed_region_id or "").strip()
                 or not (user.region_name or "").strip()
                 or not _scope_binding_matches(row.payload, scope)
+                or not _transition_matches(row, snapshot)
             ):
                 return False
             if lock_policy_rows and (
@@ -829,6 +944,9 @@ class PostgresSenderRepository:
             )
 
         if row.event_type not in {"ALERT_STARTED", "ALL_CLEAR_CONFIRMED"}:
+            return False
+        deadline = _delivery_deadline(row)
+        if deadline is None or authorization_at >= deadline:
             return False
         if row.aggregate_type != "alert_scope":
             return False
@@ -878,6 +996,7 @@ class PostgresSenderRepository:
             or not (user.confirmed_region_id or "").strip()
             or not (user.region_name or "").strip()
             or not _scope_binding_matches(row.payload, scope)
+            or not _transition_matches(row, snapshot)
         ):
             return False
         if lock_policy_rows and (
@@ -912,9 +1031,68 @@ class PostgresSenderRepository:
         stale_after: timedelta,
         lock_policy_rows: bool = False,
         expected_recipient: DeliveryRecipient | None = None,
+        power_enabled: bool = False,
+        power_stale_after_seconds: int = 1800,
+        power_fences: list[PowerDeliveryFence] | None = None,
+        power_map_notifications_enabled: bool = False,
+        power_map_fences: list[MapDeliveryFence] | None = None,
+        power_map_authority_guard: MapAuthorityGuard | None = None,
+        weather_notifications_enabled: bool = False,
+        weather_authority_guard: MapAuthorityGuard | None = None,
+        weather_fences: list[WeatherDeliveryFence] | None = None,
+        calendar_reminders_enabled: bool = False,
     ) -> bool:
         if authorization_at.tzinfo is None:
             raise ValueError("authorization time must be timezone-aware")
+        if row.event_type == "CALENDAR_REMINDER":
+            from .calendar_reminders import calendar_reminder_deliverable
+
+            return calendar_reminders_enabled and await calendar_reminder_deliverable(
+                session, row, authorization_at,
+                lock=lock_policy_rows, expected_recipient=expected_recipient,
+            )
+        if row.event_type.startswith("WEATHER_") or row.aggregate_type == "weather":
+            if weather_notifications_enabled and weather_authority_guard is not None:
+                await weather_authority_guard(session, authorization_at)
+            return weather_notifications_enabled and await weather_delivery_policy(
+                session,
+                row,
+                authorization_at,
+                lock=lock_policy_rows,
+                expected_recipient=expected_recipient,
+                fences=weather_fences,
+            )
+        if row.event_type.startswith("POWER_MAP_") or row.aggregate_type == "power_map":
+            if power_map_notifications_enabled and power_map_authority_guard is not None:
+                await power_map_authority_guard(session, authorization_at)
+            return (
+                power_map_notifications_enabled
+                and row.event_type in POWER_MAP_EVENT_TYPES
+                and await map_delivery_policy(
+                    session,
+                    row,
+                    authorization_at,
+                    stale_after_seconds=power_stale_after_seconds,
+                    lock=lock_policy_rows,
+                    expected_recipient=expected_recipient,
+                    fences=power_map_fences,
+                )
+                == "AUTHORIZED"
+            )
+        if row.event_type in POWER_EVENT_TYPES:
+            return (
+                power_enabled
+                and await power_delivery_policy(
+                    session,
+                    row,
+                    authorization_at,
+                    stale_after_seconds=power_stale_after_seconds,
+                    lock=lock_policy_rows,
+                    expected_recipient=expected_recipient,
+                    fences=power_fences,
+                )
+                == "AUTHORIZED"
+            )
         alert_dependent = row.event_type in {
             "ALERT_STARTED",
             "ALL_CLEAR_CONFIRMED",
@@ -1004,7 +1182,13 @@ class PostgresSenderRepository:
                 if row.event_type == "ALERT_STARTED"
                 else AlertState.CLEAR_CONFIRMED.value
             )
-            return snapshot.state == required
+            deadline = _delivery_deadline(row)
+            return (
+                snapshot.state == required
+                and _transition_matches(row, snapshot)
+                and deadline is not None
+                and authorization_at < deadline
+            )
 
         if row.event_type in {"LESSON_REMINDER", "RETURN_TO_ACTIVE_LESSON"}:
             if row.aggregate_type != "schedule":
@@ -1054,6 +1238,10 @@ class PostgresSenderRepository:
                 ):
                     return False
                 if not _scope_binding_matches(row.payload, scope):
+                    return False
+                if row.event_type == "RETURN_TO_ACTIVE_LESSON" and not _transition_matches(
+                    row, snapshot
+                ):
                     return False
             if row.event_type == "RETURN_TO_ACTIVE_LESSON" and user.mode != "LESSONS_AND_ALERTS":
                 return False
@@ -1105,6 +1293,9 @@ class PostgresSenderRepository:
                 if row.claimed_at is None or row.dispatch_started_at is None:
                     raise LookupError(message_id)
                 authorization_at = self._current_time()
+                power_fences: list[PowerDeliveryFence] = []
+                power_map_fences: list[MapDeliveryFence] = []
+                weather_fences: list[WeatherDeliveryFence] = []
                 if not await self._active_owner_config_authorizes(
                     session,
                     expected_recipient=expected_recipient,
@@ -1120,6 +1311,16 @@ class PostgresSenderRepository:
                     stale_after=self._stale_after,
                     lock_policy_rows=True,
                     expected_recipient=expected_recipient,
+                    power_enabled=self._power_enabled,
+                    power_stale_after_seconds=self._power_stale_after_seconds,
+                    power_fences=power_fences,
+                    power_map_notifications_enabled=self._power_map_notifications_enabled,
+                    power_map_authority_guard=self._power_map_authority_guard,
+                    power_map_fences=power_map_fences,
+                    weather_notifications_enabled=self._weather_notifications_enabled,
+                    weather_authority_guard=self._weather_authority_guard,
+                    weather_fences=weather_fences,
+                    calendar_reminders_enabled=self._calendar_reminders_enabled,
                 ):
                     if await self._should_defer_alert_event(
                         session,
@@ -1128,6 +1329,8 @@ class PostgresSenderRepository:
                         stale_after=self._stale_after,
                         lock_policy_rows=True,
                         expected_recipient=expected_recipient,
+                        power_enabled=self._power_enabled,
+                        power_stale_after_seconds=self._power_stale_after_seconds,
                     ):
                         row.dispatch_started_at = None
                         self._defer_transient(row, authorization_at)
@@ -1157,11 +1360,51 @@ class PostgresSenderRepository:
                         lesson_user is not None and lesson_user.mode == "LESSONS_AND_ALERTS"
                     )
                 locked_poll = await session.get(PollRow, 1) if requires_fresh_provider else None
+                if (
+                    row.event_type in POWER_MAP_EVENT_TYPES
+                    and self._power_map_authority_guard is not None
+                ):
+                    # Signed files may be revoked while waiting for user/cache
+                    # locks. Recheck after those waits and before the final clock
+                    # and freshness fences, with no external I/O in between.
+                    await self._power_map_authority_guard(session, self._current_time())
                 # Read the clock only after all policy rows are locked. For a
                 # return-to-lesson message this is the exact no-send boundary:
                 # equality with valid_until is expired.
+                if (
+                    row.event_type in WEATHER_EVENT_TYPES
+                    and self._weather_authority_guard is not None
+                ):
+                    await self._weather_authority_guard(session, self._current_time())
                 send_at = self._current_time()
+                if row.event_type in WEATHER_EVENT_TYPES and (
+                    len(weather_fences) != 1 or not weather_fences[0].valid_at(send_at)
+                ):
+                    row.dispatch_started_at = None
+                    row.dead_at = send_at
+                    row.claimed_at = None
+                    row.last_error_code = "final_weather_expired_or_stale"
+                    return False
+                if row.event_type in POWER_MAP_EVENT_TYPES and (
+                    len(power_map_fences) != 1 or not power_map_fences[0].valid_at(send_at)
+                ):
+                    row.dispatch_started_at = None
+                    row.dead_at = send_at
+                    row.claimed_at = None
+                    row.last_error_code = "final_power_map_expired_or_stale"
+                    return False
+                if row.event_type in POWER_EVENT_TYPES and (
+                    len(power_fences) != 1 or not power_fences[0].valid_at(send_at)
+                ):
+                    row.dispatch_started_at = None
+                    row.dead_at = send_at
+                    row.claimed_at = None
+                    row.last_error_code = "final_power_expired_or_stale"
+                    return False
                 if valid_until is None and row.event_type in {
+                    "CALENDAR_REMINDER",
+                    "ALERT_STARTED",
+                    "ALL_CLEAR_CONFIRMED",
                     "LESSON_REMINDER",
                     "RETURN_TO_ACTIVE_LESSON",
                 }:
@@ -1195,6 +1438,10 @@ class PostgresSenderRepository:
                         row.last_error_code = "final_delivery_policy_changed"
                     return False
                 await deliver()
+                if row.event_type in POWER_EVENT_TYPES:
+                    await mark_power_delivered(session, row)
+                if row.event_type in WEATHER_EVENT_TYPES:
+                    await mark_weather_delivered(session, row, send_at)
                 row.delivered_at = send_at
                 row.claimed_at = None
                 row.last_error_code = None
@@ -1276,6 +1523,16 @@ class PostgresSenderRepository:
         async with self._factory() as session:
             async with session.begin():
                 row = await self._locked(session, message_id)
+                if row.event_type in POWER_MAP_EVENT_TYPES and error_code in {
+                    "telegram_forbidden",
+                    "telegram_permanent",
+                }:
+                    await disable_map_for_failed_recipient(session, row, self._current_time())
+                if row.event_type in WEATHER_EVENT_TYPES and error_code in {
+                    "telegram_forbidden",
+                    "telegram_permanent",
+                }:
+                    await disable_weather_for_failed_recipient(session, row, self._current_time())
                 if row.dispatch_started_at is not None:
                     self._mark_indeterminate(row, self._current_time())
                     return

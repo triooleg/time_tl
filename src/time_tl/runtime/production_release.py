@@ -80,7 +80,9 @@ def _parse_manifest(payload: bytes) -> ProductionReleaseManifest:
         "replicas",
         "territory_selection",
     }
-    if not isinstance(value, dict) or set(value) != fields:
+    if not isinstance(value, dict) or set(value) not in (
+        fields, fields | {"calendar_reminders_enabled"}
+    ):
         raise RuntimeContractError("production release attestation has unexpected fields")
     string_fields = fields - {"config_revision", "replicas", "homework_enabled"}
     if any(not isinstance(value[field], str) for field in string_fields):
@@ -91,6 +93,8 @@ def _parse_manifest(payload: bytes) -> ProductionReleaseManifest:
     ):
         raise RuntimeContractError("production release attestation has invalid field types")
     if not isinstance(value["homework_enabled"], bool):
+        raise RuntimeContractError("production release attestation has invalid field types")
+    if type(value.get("calendar_reminders_enabled", False)) is not bool:
         raise RuntimeContractError("production release attestation has invalid field types")
     return ProductionReleaseManifest(**value)
 
@@ -258,6 +262,11 @@ async def validate_production_runtime_release(
             raise RuntimeContractError("production homework capability does not match release")
     elif settings.homework_enabled:
         raise RuntimeContractError("production homework capability is bot-only")
+    if settings.service_role in {"bot", "schedule-worker", "sender-worker"}:
+        if settings.calendar_reminders_enabled is not manifest.calendar_reminders_enabled:
+            raise RuntimeContractError("production calendar reminders do not match release")
+    elif settings.calendar_reminders_enabled:
+        raise RuntimeContractError("production calendar reminder role is unsupported")
     heads, state, active = await _read_atomic_runtime_facts(settings)
     state_revision = state.get("active_revision")
     active_revision = active.get("revision")

@@ -676,6 +676,7 @@ class PostgresTerritoryCatalogRepository:
     def _reset_snapshot(snapshot: AlertSnapshot, *, now: datetime) -> None:
         snapshot.state = "UNKNOWN"
         snapshot.last_fetch_revision = None
+        snapshot.transition_revision = None
         snapshot.last_full_active_episodes = None
         snapshot.processed_update_ids = []
         snapshot.pending_clear_candidate = False

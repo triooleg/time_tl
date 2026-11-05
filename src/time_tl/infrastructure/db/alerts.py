@@ -95,6 +95,7 @@ class PostgresAlertRepository:
                     if snapshot is not None:
                         snapshot.state = AlertState.UNKNOWN.value
                         snapshot.last_fetch_revision = None
+                        snapshot.transition_revision = None
                         snapshot.last_full_active_episodes = None
                         snapshot.processed_update_ids = []
                         snapshot.pending_clear_candidate = False
@@ -155,6 +156,7 @@ class PostgresAlertRepository:
                     if snapshot is not None:
                         snapshot.state = AlertState.UNKNOWN.value
                         snapshot.last_fetch_revision = None
+                        snapshot.transition_revision = None
                         snapshot.last_full_active_episodes = None
                         snapshot.processed_update_ids = []
                         snapshot.pending_clear_candidate = False
@@ -240,12 +242,25 @@ class PostgresAlertRepository:
                 # Only an accepted provider snapshot reaches this point. Source
                 # freshness, snapshots, outbox and cursor commit together.
                 poll_row.last_success_at = update.fetched_at
-                for scope, _original, snapshot, transition in evaluated:
-                    await self._store_snapshot(session, scope.id, snapshot)
-                    if transition.kind in {
+                for scope, original, snapshot, transition in evaluated:
+                    is_notification_transition = transition.kind in {
                         TransitionKind.ALERT_STARTED,
                         TransitionKind.ALL_CLEAR_CONFIRMED,
-                    }:
+                    }
+                    await self._store_snapshot(
+                        session,
+                        scope.id,
+                        snapshot,
+                        transition_revision=(
+                            update.fetch_revision if is_notification_transition else None
+                        ),
+                        preserve_transition=(
+                            original is not None
+                            and original.state == snapshot.state
+                            and snapshot.state in {AlertState.ACTIVE, AlertState.CLEAR_CONFIRMED}
+                        ),
+                    )
+                    if is_notification_transition:
                         user = await session.get(User, scope.user_id)
                         if user is None:
                             raise RuntimeError("alert scope owner is missing")
@@ -257,6 +272,7 @@ class PostgresAlertRepository:
                             # event to a reviewed territory hierarchy revision.
                             continue
                         key = f"{scope.id}:{transition.kind.value}:{transition.event_id}"
+                        valid_until = update.fetched_at + timedelta(minutes=2)
                         statement = (
                             insert(OutboxMessage)
                             .values(
@@ -270,6 +286,8 @@ class PostgresAlertRepository:
                                     "event_id": transition.event_id,
                                     "telegram_chat_id": user.telegram_user_id,
                                     "scope_binding": scope_binding,
+                                    "transition_revision": update.fetch_revision,
+                                    "valid_until": valid_until.isoformat(),
                                 },
                             )
                             .on_conflict_do_nothing(index_elements=[OutboxMessage.event_key])
@@ -415,7 +433,13 @@ class PostgresAlertRepository:
         )
 
     async def _store_snapshot(
-        self, session: AsyncSession, scope_id: UUID, snapshot: DomainSnapshot
+        self,
+        session: AsyncSession,
+        scope_id: UUID,
+        snapshot: DomainSnapshot,
+        *,
+        transition_revision: int | None = None,
+        preserve_transition: bool = False,
     ) -> None:
         row = await session.get(AlertSnapshot, scope_id)
         if row is None:
@@ -423,6 +447,8 @@ class PostgresAlertRepository:
             session.add(row)
         row.state = snapshot.state.value
         row.last_fetch_revision = snapshot.last_fetch_revision
+        if transition_revision is not None or not preserve_transition:
+            row.transition_revision = transition_revision
         row.last_full_active_episodes = (
             None
             if snapshot.last_full_active_episodes is None

@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -40,6 +41,7 @@ class User(TimestampMixin, Base):
     reminder_lead_minutes: Mapped[int] = mapped_column(Integer, server_default="5")
     alerts_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     lessons_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    calendar_reminder_generation: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     __table_args__ = (
         CheckConstraint(
             "mode IN ('LESSONS_ONLY','LESSONS_AND_ALERTS','ALERTS_ONLY')", name="mode_allowed"
@@ -450,6 +452,7 @@ class AlertSnapshot(Base):
     )
     state: Mapped[str] = mapped_column(String(24), server_default="UNKNOWN")
     last_fetch_revision: Mapped[int | None] = mapped_column(BigInteger)
+    transition_revision: Mapped[int | None] = mapped_column(BigInteger)
     last_full_active_episodes: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     processed_update_ids: Mapped[list[str]] = mapped_column(
         JSONB, server_default=text("'[]'::jsonb")
@@ -538,9 +541,7 @@ class OutboxMessage(TimestampMixin, Base):
             "ix_outbox_indeterminate",
             "indeterminate_at",
             "id",
-            postgresql_where=text(
-                "indeterminate_at IS NOT NULL AND delivered_at IS NULL"
-            ),
+            postgresql_where=text("indeterminate_at IS NOT NULL AND delivered_at IS NULL"),
         ),
     )
 
@@ -659,9 +660,7 @@ class CalendarMembership(TimestampMixin, Base):
     )
     role: Mapped[str] = mapped_column(String(16), nullable=False, server_default="MEMBER")
     visible: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    __table_args__ = (
-        CheckConstraint("role IN ('MEMBER','EDITOR','ADMIN')", name="role_allowed"),
-    )
+    __table_args__ = (CheckConstraint("role IN ('MEMBER','EDITOR','ADMIN')", name="role_allowed"),)
 
 
 class CalendarInvitation(Base):
@@ -697,3 +696,399 @@ class CalendarInvitation(Base):
             "NOT (consumed_at IS NOT NULL AND revoked_at IS NOT NULL)", name="terminal"
         ),
     )
+
+
+class PersonalCalendarOverride(TimestampMixin, Base):
+    """Actor-only occurrence change; RESET rows retain their CAS tombstone."""
+
+    __tablename__ = "personal_calendar_overrides"
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    calendar_id: Mapped[UUID] = mapped_column(
+        ForeignKey("calendars.id", ondelete="CASCADE"), primary_key=True
+    )
+    snapshot_version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_day: Mapped[date] = mapped_column(Date, primary_key=True)
+    event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_day: Mapped[date | None] = mapped_column(Date)
+    start_time: Mapped[time | None] = mapped_column(Time)
+    end_time: Mapped[time | None] = mapped_column(Time)
+    __table_args__ = (
+        Index("ix_personal_calendar_overrides_calendar_id", "calendar_id"),
+        CheckConstraint("snapshot_version BETWEEN 1 AND 2147483646", name="snapshot_range"),
+        CheckConstraint("version BETWEEN 1 AND 2147483646", name="version_range"),
+        CheckConstraint("action IN ('CANCEL','MOVE','RESET')", name="action_allowed"),
+        CheckConstraint(
+            "(action = 'MOVE' AND target_day IS NOT NULL AND start_time IS NOT NULL "
+            "AND end_time IS NOT NULL AND end_time > start_time) OR "
+            "(action IN ('CANCEL','RESET') AND target_day IS NULL "
+            "AND start_time IS NULL AND end_time IS NULL)",
+            name="action_shape",
+        ),
+        CheckConstraint(
+            "(start_time IS NULL OR EXTRACT(SECOND FROM start_time) = 0) AND "
+            "(end_time IS NULL OR EXTRACT(SECOND FROM end_time) = 0)",
+            name="minute_precision",
+        ),
+    )
+
+
+class PowerProviderState(TimestampMixin, Base):
+    __tablename__ = "power_providers"
+    provider_id: Mapped[str] = mapped_column(String(24), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    official_url: Mapped[str] = mapped_column(String(240), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    source_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(64))
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    configuration_revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    refresh_requested: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "provider_id IN ('dtek_dnipro','dtek_kyiv','dtek_kyiv_region','dtek_odesa',"
+            "'dtek_donetsk','cek_dnipro')",
+            name="provider_allowed",
+        ),
+        CheckConstraint(
+            "source_status IN ('FRESH','STALE','UNAVAILABLE','INVALID')", name="status_allowed"
+        ),
+        CheckConstraint("consecutive_failures >= 0", name="failure_count"),
+        CheckConstraint("configuration_revision >= 1", name="configuration_revision"),
+    )
+
+
+class PowerScheduleSnapshotRow(TimestampMixin, Base):
+    __tablename__ = "power_schedule_snapshots"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    provider_id: Mapped[str] = mapped_column(
+        ForeignKey("power_providers.provider_id", ondelete="CASCADE"), nullable=False
+    )
+    group_id: Mapped[str] = mapped_column(String(3), nullable=False)
+    valid_for_date: Mapped[date] = mapped_column(Date, nullable=False)
+    schedule_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    mapping_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(16), nullable=False, server_default="official")
+    publication_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="PLANNED"
+    )
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    __table_args__ = (
+        UniqueConstraint("provider_id", "group_id", "valid_for_date", "schedule_type", "revision"),
+        CheckConstraint("group_id ~ '^[1-6]\\.[12]$'", name="group_allowed"),
+        CheckConstraint(
+            "schedule_type IN ('CONFIRMED_DAY','FORECAST_WEEK')", name="schedule_type_allowed"
+        ),
+        CheckConstraint("revision >= 1 AND schema_version = 1", name="version_allowed"),
+        CheckConstraint("source_kind = 'official'", name="official_only"),
+        CheckConstraint(
+            "publication_status IN ('PLANNED','NO_SCHEDULE','EMERGENCY','UNKNOWN')",
+            name="publication_allowed",
+        ),
+        Index(
+            "uq_power_current_schedule",
+            "provider_id",
+            "group_id",
+            "valid_for_date",
+            "schedule_type",
+            unique=True,
+            postgresql_where=text("is_current"),
+        ),
+    )
+
+
+class PowerScheduleIntervalRow(Base):
+    __tablename__ = "power_schedule_intervals"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    snapshot_id: Mapped[UUID] = mapped_column(
+        ForeignKey("power_schedule_snapshots.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    group_id: Mapped[str] = mapped_column(String(3), nullable=False)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False)
+    __table_args__ = (
+        CheckConstraint("ends_at > starts_at", name="positive_duration"),
+        CheckConstraint(
+            "state IN ('OUTAGE_CONFIRMED','POWER_EXPECTED','POSSIBLE_OUTAGE',"
+            "'UNKNOWN','NO_SCHEDULE')",
+            name="state_allowed",
+        ),
+        CheckConstraint("group_id ~ '^[1-6]\\.[12]$'", name="group_allowed"),
+    )
+
+
+class UserPowerSubscription(TimestampMixin, Base):
+    __tablename__ = "user_power_subscriptions"
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    provider_id: Mapped[str] = mapped_column(
+        ForeignKey("power_providers.provider_id"), nullable=False
+    )
+    group_id: Mapped[str] = mapped_column(String(3), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    outage_notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    restoration_notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    outage_lead_minutes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="30")
+    restoration_lead_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="15"
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    __table_args__ = (
+        CheckConstraint("group_id ~ '^[1-6]\\.[12]$'", name="group_allowed"),
+        CheckConstraint(
+            "outage_lead_minutes >= 0 AND outage_lead_minutes <= 180 AND "
+            "restoration_lead_minutes >= 0 AND restoration_lead_minutes <= 180",
+            name="lead_allowed",
+        ),
+        CheckConstraint("revision >= 1", name="revision_allowed"),
+        Index("ix_power_subscriptions_provider_group", "provider_id", "group_id"),
+    )
+
+
+class PowerNotificationEvent(TimestampMixin, Base):
+    __tablename__ = "power_notification_events"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("user_power_subscriptions.user_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    snapshot_id: Mapped[UUID] = mapped_column(
+        ForeignKey("power_schedule_snapshots.id", ondelete="CASCADE"), nullable=False
+    )
+    outbox_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("outbox_messages.id", ondelete="SET NULL"), unique=True
+    )
+    event_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    subscription_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    schedule_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    transition_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    transition_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    planned_send_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="PENDING")
+    __table_args__ = (
+        CheckConstraint("status IN ('PENDING','SENT','CANCELED')", name="status_allowed"),
+        CheckConstraint(
+            "transition_type IN ('POWER_OUTAGE_UPCOMING','POWER_RESTORATION_UPCOMING',"
+            "'POWER_SCHEDULE_CHANGED')",
+            name="transition_allowed",
+        ),
+        CheckConstraint(
+            "subscription_revision >= 1 AND schedule_revision >= 1", name="revisions_allowed"
+        ),
+        Index("ix_power_events_snapshot_status", "snapshot_id", "status"),
+    )
+
+
+class WeatherLocation(TimestampMixin, Base):
+    __tablename__ = "weather_locations"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    katottg_code: Mapped[str] = mapped_column(String(19), nullable=False, index=True)
+    region_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    locality_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    latitude: Mapped[float] = mapped_column(Float, nullable=False)
+    longitude: Mapped[float] = mapped_column(Float, nullable=False)
+    coverage_type: Mapped[str] = mapped_column(String(16), server_default="BASE", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
+    provenance_url: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    provenance_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint("latitude BETWEEN 44 AND 53.5", name="ukraine_latitude"),
+        CheckConstraint("longitude BETWEEN 22 AND 41", name="ukraine_longitude"),
+        CheckConstraint("katottg_code ~ '^UA[0-9]{17}$'", name="katottg_shape"),
+        CheckConstraint("coverage_type IN ('BASE','EXTENDED')", name="coverage_allowed"),
+        CheckConstraint("NOT enabled OR approved_at IS NOT NULL", name="approval_required"),
+        CheckConstraint("length(provenance_sha256)=64", name="provenance_digest"),
+        Index(
+            "uq_weather_base_location",
+            "katottg_code",
+            unique=True,
+            postgresql_where=text("coverage_type='BASE'"),
+        ),
+    )
+
+
+class WeatherForecastRun(Base):
+    __tablename__ = "weather_forecast_runs"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    requested_locations: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    successful_locations: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    failed_locations: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    __table_args__ = (
+        CheckConstraint(
+            "requested_locations>=0 AND successful_locations>=0 AND failed_locations>=0",
+            name="counts_nonnegative",
+        ),
+        CheckConstraint(
+            "successful_locations+failed_locations<=requested_locations", name="counts_bounded"
+        ),
+        Index("ix_weather_runs_provider_started", "provider", "started_at"),
+    )
+
+
+class WeatherForecastSnapshot(Base):
+    __tablename__ = "weather_forecast_snapshots"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    weather_location_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("weather_locations.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    forecast_run_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("weather_forecast_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    provider_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    cache_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    forecast_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    last_modified: Mapped[str | None] = mapped_column(String(160))
+    __table_args__ = (
+        UniqueConstraint("weather_location_id", "provider", "forecast_hash"),
+        CheckConstraint("status IN ('FRESH','STALE','PARTIAL','UNKNOWN')", name="status_allowed"),
+        Index(
+            "ix_weather_snapshot_location_fetched", "weather_location_id", "provider", "fetched_at"
+        ),
+    )
+
+
+class WeatherForecastHour(Base):
+    __tablename__ = "weather_forecast_hours"
+    snapshot_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("weather_forecast_snapshots.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    forecast_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    temperature_c: Mapped[float | None] = mapped_column(Float)
+    feels_like_c: Mapped[float | None] = mapped_column(Float)
+    precipitation_mm: Mapped[float | None] = mapped_column(Float)
+    precipitation_probability: Mapped[float | None] = mapped_column(Float)
+    snowfall_cm: Mapped[float | None] = mapped_column(Float)
+    wind_speed_ms: Mapped[float | None] = mapped_column(Float)
+    wind_gust_ms: Mapped[float | None] = mapped_column(Float)
+    cloud_cover_percent: Mapped[float | None] = mapped_column(Float)
+    weather_code: Mapped[str | None] = mapped_column(String(64))
+    __table_args__ = (
+        CheckConstraint("temperature_c BETWEEN -100 AND 70", name="temperature_range"),
+        CheckConstraint("precipitation_mm>=0 AND snowfall_cm>=0", name="precipitation_nonnegative"),
+        CheckConstraint("precipitation_probability BETWEEN 0 AND 100", name="probability_range"),
+        CheckConstraint("wind_speed_ms>=0 AND wind_gust_ms>=0", name="wind_nonnegative"),
+        CheckConstraint("cloud_cover_percent BETWEEN 0 AND 100", name="cloud_range"),
+        Index("ix_weather_hours_valid_time", "forecast_at"),
+    )
+
+
+class WeatherChangeEvent(Base):
+    __tablename__ = "weather_change_events"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    location_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("weather_locations.id", ondelete="CASCADE"), nullable=False
+    )
+    snapshot_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("weather_forecast_snapshots.id", ondelete="SET NULL")
+    )
+    event_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_revision: Mapped[str] = mapped_column(String(40), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    expected_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expected_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    previous_value: Mapped[float | None] = mapped_column(Float)
+    current_value: Mapped[float | None] = mapped_column(Float)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ADVISORY")
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ACTIVE")
+    __table_args__ = (
+        CheckConstraint("expected_end>expected_start", name="valid_interval"),
+        CheckConstraint("kind IN ('UPCOMING','CORRECTION','CANCELLATION')", name="kind_allowed"),
+        CheckConstraint("status IN ('ACTIVE','CANCELLED','EXPIRED')", name="status_allowed"),
+        Index("ix_weather_events_location_time", "location_id", "expected_start", "status"),
+    )
+
+
+class UserWeatherPreference(TimestampMixin, Base):
+    __tablename__ = "user_weather_preferences"
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    forecast_requested: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    weather_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    daily_forecast_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    daily_forecast_time: Mapped[time] = mapped_column(Time, nullable=False, server_default="07:00")
+    weather_changes_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    rain_alert_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    snow_alert_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    wind_alert_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    temperature_alert_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    frost_alert_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    notification_lead_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="120"
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    __table_args__ = (
+        CheckConstraint("notification_lead_minutes BETWEEN 0 AND 1440", name="lead_range"),
+        CheckConstraint("revision>=1", name="revision_positive"),
+        Index("ix_weather_preferences_enabled", "weather_enabled", "forecast_requested"),
+    )
+
+
+class WeatherNotificationDelivery(Base):
+    __tablename__ = "weather_notification_deliveries"
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    notification_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    outbox_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("outbox_messages.id", ondelete="SET NULL")
+    )
+    event_keys: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

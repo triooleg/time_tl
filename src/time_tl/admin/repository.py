@@ -230,6 +230,7 @@ class LocalAdminRepository:
             )
 
     def get_setting(self, key: str, default: Any = None) -> Any:
+        reject_sensitive_generic_settings((key,))
         with self._db() as db:
             row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else default

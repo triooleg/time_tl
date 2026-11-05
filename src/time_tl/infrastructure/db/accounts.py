@@ -21,6 +21,7 @@ from .models import (
     OutboxMessage,
     OverrideLesson,
     RuleLesson,
+    RuntimeSetting,
     User,
 )
 from .models import DateOverride as DateOverrideRow
@@ -119,7 +120,19 @@ class AsyncPostgresAccountRepository:
                     and_(
                         OutboxMessage.aggregate_type == "schedule",
                         OutboxMessage.aggregate_id == str(user_id),
-                    )
+                    ),
+                    and_(
+                        OutboxMessage.aggregate_type == "power",
+                        OutboxMessage.aggregate_id == str(user_id),
+                    ),
+                    and_(
+                        OutboxMessage.aggregate_type == "power_map",
+                        OutboxMessage.aggregate_id == str(user_id),
+                    ),
+                    and_(
+                        OutboxMessage.aggregate_type == "weather",
+                        OutboxMessage.aggregate_id == str(user_id),
+                    ),
                 ]
                 if scope_id is not None:
                     targets.append(
@@ -152,6 +165,16 @@ class AsyncPostgresAccountRepository:
                 if locked_scope_id != scope_id:
                     raise _AccountDeleteRetry
                 await session.execute(delete(OutboxMessage).where(predicate))
+                await session.execute(
+                    delete(RuntimeSetting).where(
+                        RuntimeSetting.key.in_(
+                            (
+                                "power_api_user_pref:" + str(user.id),
+                                "power_api_reminder_state:" + str(user.id),
+                            )
+                        )
+                    )
+                )
                 await session.execute(delete(User).where(User.id == user.id))
                 return True
 
@@ -288,6 +311,7 @@ class AsyncPostgresAccountRepository:
         if snapshot is not None:
             snapshot.state = "UNKNOWN"
             snapshot.last_fetch_revision = None
+            snapshot.transition_revision = None
             snapshot.last_full_active_episodes = None
             snapshot.processed_update_ids = []
             snapshot.pending_clear_candidate = False

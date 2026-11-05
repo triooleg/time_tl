@@ -39,7 +39,9 @@ from .app import (
     _login_html,
 )
 from .backups import BackupCatalogue, BackupCatalogueUnavailable, backups_html, public_control
+from .energy_api import EnergyApiAdminPort, register_energy_api
 from .metrics import HostMetricsCollector
+from .power import PowerAdminPort, PowerSourceAdminPort, register_power_admin
 from .security import (
     PasswordPolicyError,
     Session,
@@ -305,6 +307,11 @@ def create_async_admin_app(
     activation_preflight: Callable[[ActivationCandidate], Awaitable[OperatorPreflightEvidence]]
     | None = None,
     backup_catalogue: BackupCatalogue | None = None,
+    power_admin: PowerAdminPort | None = None,
+    power_source_admin: PowerSourceAdminPort | None = None,
+    energy_api: EnergyApiAdminPort | None = None,
+    power_map: Any | None = None,
+    weather_admin: Any | None = None,
 ) -> FastAPI:
     """Build the async app; persistence is mandatory and never downgraded."""
 
@@ -366,6 +373,9 @@ def create_async_admin_app(
                     pass
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    from .weather_geography import register_geography
+
+    register_geography(app)
 
     @app.middleware("http")
     async def security_headers(
@@ -413,6 +423,29 @@ def create_async_admin_app(
             return False, await repository.lockout_remaining(session.username, source_ip, now)
         await repository.reset_failures(session.username, source_ip)
         return True, None
+
+    register_power_admin(
+        app,
+        power_admin,
+        session_for=session_for,
+        reauthenticate=owner_reauthenticated,
+        stale_after_seconds=settings.power_stale_after_seconds,
+        source_port=power_source_admin,
+    )
+    register_energy_api(
+        app,
+        energy_api,
+        session_for=session_for,
+        reauthenticate=owner_reauthenticated,
+    )
+    from .power_map import register_power_map
+
+    register_power_map(app, power_map, session_for=session_for)
+    from .weather import register_weather
+
+    register_weather(
+        app, weather_admin, session_for=session_for, reauthenticate=owner_reauthenticated
+    )
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request) -> HTMLResponse:
@@ -567,11 +600,20 @@ def create_async_admin_app(
             ),
             owner_view,
             show_backups=True,
+            show_power=power_admin is not None,
+            show_energy_api=energy_api is not None,
         )
         page = page.replace(
             "Агрегированные данные PostgreSQL ещё не подключены.",
             "Ожидаем локальные агрегаты.",
         )
+        if weather_admin is not None:
+            page = page.replace(
+                "</main>",
+                '<p><a href="/settings/external-services">Внешние сервисы</a> · '
+                '<a href="/settings/weather">🌤 Погода</a> · '
+                '<a href="/coverage">🌍 Активные территории</a></p></main>',
+            )
         return HTMLResponse(page)
 
     @app.get("/backups", response_class=HTMLResponse)

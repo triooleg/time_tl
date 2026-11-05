@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 
 class NotificationMode(StrEnum):
@@ -29,3 +30,4 @@ class Button:
 class View:
     text: str
     rows: tuple[tuple[Button, ...], ...] = ()
+    parse_mode: Literal["HTML"] | None = None
