@@ -81,7 +81,7 @@ def test_next_group_includes_all_same_instant_without_including_later_lessons() 
         event(3, title="Пізніше", start=AT + timedelta(hours=3), end=AT + timedelta(hours=4)),
     )
     summary = render_my_day(day(*events), at=AT).text.split("Розклад ·")[0]
-    assert "Найближчі · 11:00 · занять: 2" in summary
+    assert "Найближчі · 02.10.2026 · 11:00 · занять: 2" in summary
     assert "• А ·" in summary and "• Б ·" in summary
     assert "Пізніше" not in summary
 
@@ -130,7 +130,7 @@ def test_large_current_and_next_summaries_have_explicit_omitted_counts() -> None
     text = render_my_day(day(*events), at=AT).text
     assert "Зараз · занять: 13" in text
     assert "Ще 1 зараз" in text
-    assert "Найближчі · 12:00 · занять: 13" in text
+    assert "Найближчі · 02.10.2026 · 12:00 · занять: 13" in text
     assert "Ще 1 одночасно" in text
 
 
@@ -167,7 +167,9 @@ def test_untrusted_titles_remove_angles_controls_and_multiline_injection() -> No
 
 def test_kyiv_day_and_weekday_apply_at_utc_date_boundary() -> None:
     at = datetime(2026, 10, 1, 22, 15, tzinfo=UTC)
-    view = render_my_day(day(), at=at)
+    upcoming = event(1, start=at + timedelta(minutes=15), end=at + timedelta(hours=1))
+    view = render_my_day(day(upcoming), at=at)
+    assert "Найближчі · 02.10.2026 · 01:30 · занять: 1" in view.text
     assert "02.10.2026 · п’ятниця" in view.text
     with pytest.raises(ValueError, match="Kyiv day"):
         render_my_day(day(selected=date(2026, 10, 1)), at=at)

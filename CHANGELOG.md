@@ -6,6 +6,10 @@ deployments and their verification.
 
 ## Unreleased
 
+## 0.2.4 - 2026-11-06
+
+- Show the Kyiv date next to the start time in the My Day summary.
+
 ## 0.2.3 - 2026-11-06
 
 - Compact Telegram weather cards with rounded temperatures, local precipitation times,

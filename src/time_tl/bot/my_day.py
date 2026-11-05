@@ -128,7 +128,11 @@ def render_my_day(
     if future:
         first_start = future[0].start.astimezone(UTC)
         next_group = [event for event in future if event.start.astimezone(UTC) == first_start]
-        lines.extend(("", f"Найближчі · {_clock(future[0].start)} · занять: {len(next_group)}"))
+        local_start = first_start.astimezone(KYIV)
+        lines.extend((
+            "",
+            f"Найближчі · {local_start:%d.%m.%Y · %H:%M} · занять: {len(next_group)}",
+        ))
         for event in next_group[:GROUP_LIMIT]:
             lines.append(f"• {_name(event, title_limit=24, calendar_limit=12)}")
         if len(next_group) > GROUP_LIMIT:
