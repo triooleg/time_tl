@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     )
     power_outages_enabled: bool = Field(default=False, alias="POWER_OUTAGES_ENABLED")
     weather_enabled: bool = Field(default=False, alias="WEATHER_ENABLED")
+    weather_display_gust_ms: float = Field(default=12, gt=0, alias="WEATHER_DISPLAY_GUST_MS")
     weather_notifications_enabled: bool = Field(
         default=False, alias="WEATHER_NOTIFICATIONS_ENABLED"
     )

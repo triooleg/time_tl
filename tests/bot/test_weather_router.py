@@ -136,8 +136,8 @@ async def test_current_is_forecast_attributed_not_observation_and_point_change_r
     )
     ux = WeatherUx(port, clock=lambda: NOW)
     card = await ux.forecast(1, "now")
-    assert "🌡 <b>Зараз, 5 листопада</b>\n🌡 +4°C" in card.text
-    assert card.text.endswith("🧥 Буде прохолодно — одягайтеся тепліше.")
+    assert "🌡 <b>Прогноз на зараз, 5 листопада</b>\n🌡 <b>+4°C</b>" in card.text
+    assert card.text.endswith("🧥 Одягайтеся тепліше.")
     assert card.parse_mode == "HTML"
     assert "https://" not in card.text and "wt:sources" in callbacks(card)
     port.value = replace(port.value, point_id="different")
@@ -160,12 +160,12 @@ async def test_multiday_card_groups_days_and_keeps_missing_data_visible() -> Non
     )
     ux = WeatherUx(port, clock=lambda: NOW)
     tomorrow = await ux.forecast(1, "tomorrow")
-    assert "🌤 <b>Завтра, 6 листопада</b>\n🌡 -1…+6°C" in tomorrow.text
+    assert "🌤 <b>Завтра, 6 листопада</b>\n🌡 <b>−1…+6°C</b>" in tomorrow.text
     assert "Сьогодні" not in tomorrow.text and "https://" not in tomorrow.text
     three = await ux.forecast(1, "three")
     current = await ux.forecast(1, "now")
-    assert "⛅ <b>Зараз, 5 листопада</b>\n🌡 +4°C" in current.text
-    assert "⛅ <b>Сьогодні, 5 листопада</b>\n🌡 Зараз: +4°C" in three.text
+    assert "⛅ <b>Прогноз на зараз, 5 листопада</b>\n🌡 <b>+4°C</b>" in current.text
+    assert "⛅ <b>Сьогодні, 5 листопада</b>\n🌡 Найближчі години: <b>+4°C</b>" in three.text
     assert "За добу:" not in three.text
     assert "\n\n🌡 <b>Субота, 7 листопада</b>\n🌡 Прогноз температури уточнюється" in three.text
     assert "https://" not in three.text and "wt:sources" in callbacks(three)
@@ -186,8 +186,8 @@ async def test_multiday_card_labels_precipitation_on_its_own_local_date() -> Non
     card = await WeatherUx(port, clock=lambda: NOW).forecast(1, "three")
     _, today, tomorrow, next_day, _ = card.text.split("\n\n")
     assert "5 листопада" in today and "🌧 Дощ" not in today
-    assert "☁️ <b>Завтра, 6 листопада" in tomorrow and "🌧 Дощ" in tomorrow
-    assert "7 листопада" in next_day and "❄️ Сніг · 🌨 Мокрий сніг" in next_day
+    assert "☁️ <b>Завтра, 6 листопада" in tomorrow and "🌦 Невеликий дощ уночі" in tomorrow
+    assert "7 листопада" in next_day and "❄️ Сніг від 00:00" in next_day
     assert "🌧 Дощ" not in next_day and "❄️ Сніг" not in tomorrow
 
 
@@ -207,16 +207,15 @@ async def test_day_parts_use_local_hours_and_only_show_expected_precipitation() 
     )
     ux = WeatherUx(port, clock=lambda: NOW)
     today = await ux.forecast(1, "today")
-    assert "☀️ Обід</b> · 🌡 +6…+8°C · 🌧 Дощ" in today.text
-    assert "🌆 Вечір</b> · 🌡 Прогноз температури уточнюється · 💧 Опади" in today.text
-    assert all(text not in today.text for text in ("Ніч", "Ранок", "-12°C", "❄️ Сніг"))
+    assert "Найближчі години: <b>+6°C</b>" in today.text
+    assert "☀️ День\u00a0+8°" in today.text and "🌧 Дощ від 13:00" in today.text
+    assert all(word not in today.text for word in ("Ніч", "Ранок", "Вечір", "−12", "❄️ Сніг"))
     next_day = await ux.forecast(1, "tomorrow")
-    assert "🌙 Ніч</b> · 🌡 -2°C · 🌨 Мокрий сніг" in next_day.text
-    assert "🌅 Ранок</b> · 🌡 +1°C · ❄️ Сніг" in next_day.text
-    assert "<b>☀️ Обід</b> · 🌡 +7°C" in next_day.text.splitlines()
-    assert "🌆 Вечір</b> · 🌡 +2°C · 🌧 Дощ" in next_day.text
+    assert "🌙 Ніч\u00a0−2° · 🌅 Ранок\u00a0+1°" in next_day.text
+    assert "☀️ День\u00a0+7° · 🌆 Вечір\u00a0+2°" in next_day.text
+    assert "🌨 Мокрий сніг від 00:00" in next_day.text and "❄️ Сніг від 06:00" in next_day.text
     current = await ux.forecast(1, "now")
-    assert "+6°C" in current.text and "Обід" not in current.text
+    assert "+6°C" in current.text and "День" not in current.text
 
 
 @pytest.mark.parametrize(
@@ -227,12 +226,12 @@ async def test_day_parts_use_local_hours_and_only_show_expected_precipitation() 
         ("partlycloudy_day", None, "⛅", None),
         ("cloudy", None, "☁️", None),
         ("fog", None, "🌫", None),
-        ("rain", None, "🌧", "візьміть парасольку"),
-        ("lightrainshowers_night", None, "🌦", "візьміть парасольку"),
+        ("rain", None, "🌧", "Візьміть парасольку"),
+        ("lightrainshowers_night", None, "🌦", "Візьміть парасольку"),
         ("rainandthunder", None, "⛈", "Можлива гроза"),
-        ("snow", None, "❄️", "оберіть тепле взуття"),
-        ("heavysnowshowers_day", None, "🌨", "оберіть тепле взуття"),
-        ("cloudy", 19, "💨", "Сильний вітер"),
+        ("snow", None, "❄️", "Оберіть тепле взуття"),
+        ("heavysnowshowers_day", None, "🌨", "Оберіть тепле взуття"),
+        ("cloudy", 19, "💨", "сильний вітер"),
         (None, None, "🌡", None),
         ("unknown_rain", None, "🌡", None),
     ],
@@ -244,11 +243,11 @@ async def test_weather_codes_and_supported_tips(
     await port.request_forecast(1)
     port.value = snapshot(ForecastHour(NOW, temperature_c=20, weather_code=code, wind_gust_ms=gust))
     card = await WeatherUx(port, clock=lambda: NOW).forecast(1, "now")
-    assert f"{icon} <b>Зараз, 5 листопада</b>" in card.text
+    assert f"{icon} <b>Прогноз на зараз, 5 листопада</b>" in card.text
     if tip:
         assert tip in card.text
     else:
-        assert card.text.endswith("🌡 +20°C")
+        assert card.text.endswith("🌡 <b>+20°C</b>")
         assert len(card.text.split("\n\n")) == 2
 
 
@@ -262,18 +261,18 @@ async def test_cooling_requires_two_complete_days_and_tips_are_bounded() -> None
         )
     )
     ux = WeatherUx(port, clock=lambda: NOW)
-    assert "🥶 Завтра значно похолодає." in (await ux.forecast(1, "tomorrow")).text
+    assert "🥶 Завтра суттєво похолодає." in (await ux.forecast(1, "tomorrow")).text
     three = await ux.forecast(1, "three")
-    assert "🌡 Зараз: +15°C\n🌡 За добу: +15°C" in three.text
+    assert "🌡 Найближчі години: <b>+15°C</b>" in three.text
     hours = list(port.value.hours)
-    hours[0] = replace(hours[0], temperature_c=None)
+    hours[24] = replace(hours[24], temperature_c=None)
     hours[-1] = replace(hours[-1], weather_code="rain", wind_gust_ms=20)
     port.value = replace(port.value, hours=tuple(hours))
     text = (await ux.forecast(1, "three")).text
     assert "Прогноз температури уточнюється" in text
-    assert "Завтра значно похолодає" not in text
-    assert "візьміть парасольку" in text and "Сильний вітер" in text
-    assert "одягайтеся тепліше" not in text
+    assert "Завтра суттєво похолодає" not in text
+    assert "Візьміть дощовик" in text and "сильний вітер" in text
+    assert "Одягайтеся тепліше" not in text
 
 
 async def test_telegram_callback_formats_and_escapes_forecast_with_accessible_licences() -> None:
@@ -295,7 +294,7 @@ async def test_telegram_callback_formats_and_escapes_forecast_with_accessible_li
     assert "<b>ПРОГНОЗ ПОГОДИ</b>" in args[0]
     assert "📍 Кам&#x27;янське &lt;&amp;&gt;\n" in args[0]
     assert "Кам'янська територіальна громада" not in args[0]
-    assert args[0].endswith("🌡 +9°C")
+    assert args[0].endswith("🌡 <b>+9°C</b>")
     assert not any(label in args[0] for label in ("https://", "MET Norway", "OpenStreetMap"))
     buttons = [button for row in kwargs["reply_markup"].inline_keyboard for button in row]
     assert [(button.text, button.callback_data) for button in buttons] == [
@@ -324,6 +323,59 @@ async def test_unavailable_hour_not_synthesized_from_six_hour_period() -> None:
         "url",
     )
     assert "+4" not in (await WeatherUx(port, clock=lambda: NOW).forecast(1, "now")).text
+
+
+async def test_compact_three_day_rounding_timing_and_gust_threshold() -> None:
+    port = Port()
+    await port.request_forecast(1)
+    tomorrow = TODAY_START + timedelta(days=1)
+    port.value = snapshot(
+        ForecastHour(NOW, temperature_c=-2.4, wind_gust_ms=11.9),
+        *(
+            ForecastHour(
+                tomorrow + timedelta(hours=n),
+                temperature_c=9.5 if n >= 12 else -2.5,
+                weather_code="rain" if n == 14 else "fair",
+                precipitation_probability=80 if n == 14 else None,
+                wind_gust_ms=12 if n == 15 else None,
+            )
+            for n in range(24)
+        ),
+        *(
+            ForecastHour(tomorrow + timedelta(days=1, hours=n), temperature_c=3.2)
+            for n in range(24)
+        ),
+    )
+    default = await WeatherUx(port, clock=lambda: NOW).forecast(1, "three")
+    _, today, next_day, later, tips = default.text.split("\n\n")
+    assert "Найближчі години: <b>−2°C</b>" in today and "Пориви" not in today
+    assert "🌡 <b>−3…+10°C</b>" in next_day
+    assert "🌧 Дощ від 14:00 · 80%" in next_day
+    assert "💨 Пориви до 12 м/с" in next_day
+    assert "🌙\u00a0+3° · 🌅\u00a0+3° · ☀️\u00a0+3° · 🌆\u00a0+3°" in later
+    assert "Візьміть дощовик" in tips and len(default.text.splitlines()) <= 18
+    higher = await WeatherUx(port, clock=lambda: NOW, gust_threshold=15).forecast(1, "tomorrow")
+    assert "Пориви" not in higher.text and "сильний вітер" not in higher.text
+    assert 5 <= len(higher.text.splitlines()) <= 10
+
+
+async def test_evening_shows_next_forecast_and_shortens_long_locality() -> None:
+    port = Port()
+    await port.request_forecast(1)
+    port.ctx = replace(port.ctx, locality="Назва " * 40 + "<i>тег</i>")
+    evening = TODAY_START + timedelta(hours=20)
+    port.value = replace(
+        snapshot(
+            ForecastHour(evening - timedelta(hours=5), temperature_c=18, weather_code="rain"),
+            ForecastHour(evening + timedelta(hours=1), temperature_c=0.1, precipitation_mm=0.4),
+        ),
+        expires_at=evening + timedelta(hours=2),
+    )
+    card = await WeatherUx(port, clock=lambda: evening).forecast(1, "today")
+    assert card.text.splitlines()[1].endswith("…")
+    assert "Найближчі години: <b>0°C</b>" in card.text
+    assert "🌆 Вечір\u00a00°" in card.text and "💧 Опади від 21:00" in card.text
+    assert all(word not in card.text for word in ("День", "Дощ", "+18", "%", "<i>"))
 
 
 async def test_settings_transport_capability_off_no_enable_button() -> None:

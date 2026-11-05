@@ -11,13 +11,13 @@ from typing import Any, Protocol
 from time_tl.domain.weather import ForecastSnapshot
 
 from .models import Button, View
-from .weather_presentation import render_forecast, short_weather_locality
+from .weather_presentation import DEFAULT_GUST_DISPLAY_MS, render_forecast, short_weather_locality
 
 BACK = ((Button("⬅️ Погода", "menu:weather"),),)
 SOURCES = (Button("ℹ️ Джерела та ліцензії", "wt:sources"),)
 SOURCES_VIEW = View(
     "ℹ️ Джерела та ліцензії\n\n"
-    "Прогноз: MET Norway. Time TL групує й оформлює прогнозні дані.\n"
+    "Прогноз: MET Norway. Time TL округлює температуру й групує прогноз за часом.\n"
     "https://api.met.no/\n"
     "Ліцензія CC BY 4.0: https://creativecommons.org/licenses/by/4.0/\n\n"
     "Координати громад: © OpenStreetMap contributors (ODbL).\n"
@@ -79,9 +79,11 @@ class WeatherUx:
         port: WeatherBotPort,
         *,
         notifications_available: bool = False,
+        gust_threshold: float = DEFAULT_GUST_DISPLAY_MS,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.port, self.notifications_available, self.clock = port, notifications_available, clock
+        self.gust_threshold = gust_threshold
 
     async def home(self, actor: int) -> View:
         context = await self.port.context(actor)
@@ -95,7 +97,7 @@ class WeatherUx:
                 ),
             )
         prefs = await self.port.preferences(actor)
-        locality = short_weather_locality(context.locality)
+        locality = f"{short_weather_locality(context.locality)}\nКоординати: © OpenStreetMap"
         if not prefs.forecast_requested:
             return View(
                 f"🌤 Погода\n📍 {locality}\n\n"
@@ -148,7 +150,9 @@ class WeatherUx:
                 BACK,
             )
         return View(
-            render_forecast(snapshot, context.locality, now, mode),
+            render_forecast(
+                snapshot, context.locality, now, mode, gust_threshold=self.gust_threshold
+            ),
             (SOURCES,) + BACK,
             parse_mode="HTML",
         )

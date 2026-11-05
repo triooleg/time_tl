@@ -224,6 +224,7 @@ class AsyncTelegramApplication:
         weather_enabled: bool = False,
         weather_port: Any | None = None,
         weather_notifications_available: bool = False,
+        weather_display_gust_ms: float = 12,
         power_port: PowerPort | None = None,
         power_address_port: PowerAddressPort | None = None,
         power_default_outage_lead: int = 10,
@@ -263,7 +264,9 @@ class AsyncTelegramApplication:
             from .weather_router import WeatherUx
 
             self.weather_ux = WeatherUx(
-                weather_port, notifications_available=weather_notifications_available
+                weather_port,
+                notifications_available=weather_notifications_available,
+                gust_threshold=weather_display_gust_ms,
             )
         self.power_address_ux = (
             PowerAddressUx(

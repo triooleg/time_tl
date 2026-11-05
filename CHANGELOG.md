@@ -6,6 +6,11 @@ deployments and their verification.
 
 ## Unreleased
 
+## 0.2.3 - 2026-11-06
+
+- Compact Telegram weather cards with rounded temperatures, local precipitation times,
+  significant wind gusts, and brief recommendations.
+
 ## 0.2.2 - 2026-11-05
 
 - Explain the enabled bot features in the Ukrainian Help menu.

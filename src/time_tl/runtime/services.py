@@ -833,6 +833,7 @@ async def run_bot(settings: Settings) -> None:
                 settings, repository, weather_authority, admission_settings
             ),
             weather_notifications_available=settings.weather_notifications_enabled,
+            weather_display_gust_ms=settings.weather_display_gust_ms,
             power_address_port=(
                 power_port.address_port
                 if settings.power_address_lookup_enabled and power_port is not None
