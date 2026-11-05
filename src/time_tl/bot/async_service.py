@@ -430,7 +430,7 @@ class AsyncTelegramApplication:
         )
 
     def info(self) -> View:
-        return self._app.info()
+        return self._app.info(calendar_reminders_available=self.calendar_reminder_port is not None)
 
     def notifications_menu(self) -> View:
         view = self._app.notifications_menu()

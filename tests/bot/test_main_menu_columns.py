@@ -88,6 +88,14 @@ def test_main_menu_has_four_paired_rows():
     ]
 
 
+    help_view = app.info(calendar_reminders_available=True)
+    assert "очікувані опади за частинами доби" in help_view.text
+    assert "Домашні завдання" in help_view.text
+    assert "графік відключень" in help_view.text.replace("\n", " ")
+    assert "Для особистих подій із часом" in help_view.text
+    assert help_view.rows[0][0].callback_data == "menu:home"
+
+
 def test_disabled_weather_has_no_dead_button_or_empty_row():
     app = TelegramApplication(regions=(), resolver=None, power_outages_enabled=True)
     rows = app.menu(7).rows

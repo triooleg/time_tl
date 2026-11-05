@@ -6,6 +6,10 @@ deployments and their verification.
 
 ## Unreleased
 
+## 0.2.2 - 2026-11-05
+
+- Explain the enabled bot features in the Ukrainian Help menu.
+
 ## 0.2.1 - 2026-11-05
 
 - Show temperatures and expected precipitation for night, morning, midday and evening in Telegram weather forecasts.
