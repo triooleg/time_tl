@@ -1,7 +1,9 @@
 """Real SenderWorker plus PostgresSenderRepository methods; fake SQL sessions/transport only."""
 
 from copy import deepcopy
-from datetime import timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -11,6 +13,11 @@ from tests.infrastructure.test_weather_notification_repository import (
     PolicyStore,
 )
 from time_tl.application.sender_worker import ClaimedOutboxMessage, SenderWorker
+from time_tl.application.weather_notifications import (
+    WeatherNotificationPlanner,
+    WeatherNotificationPreferences,
+)
+from time_tl.domain.weather import ForecastHour
 from time_tl.infrastructure.db import weather_notifications as policy
 from time_tl.infrastructure.db.workers import PostgresSenderRepository
 
@@ -95,6 +102,58 @@ async def test_real_sender_delivers_strict_weather_via_existing_fake_transport(s
     assert "MET Norway" in transport.sent[0].text and "CC BY 4.0" in transport.sent[0].text
     assert store.row.delivered_at == store.delivery.delivered_at == NOW
     assert store.row.claimed_at is None
+
+
+@pytest.mark.parametrize("hour", [7, 12, 18])
+async def test_scheduled_daily_forecast_reaches_transport(store, hour):
+    now = datetime(2026, 11, 5, hour, 1, tzinfo=ZoneInfo("Europe/Kyiv")).astimezone(UTC)
+    store.snapshot = replace(
+        store.snapshot,
+        fetched_at=now,
+        provider_updated_at=now,
+        expires_at=now + timedelta(hours=4),
+        hours=(ForecastHour(now + timedelta(hours=1), temperature_c=9),),
+    )
+    store.pref.daily_forecast_enabled = True
+    (plan,) = WeatherNotificationPlanner().plan(
+        user_id=str(store.user.id),
+        region_id="h1",
+        locality="Synthetic",
+        snapshot=store.snapshot,
+        events=(),
+        now=now,
+        configuration_revision=1,
+        preferences=WeatherNotificationPreferences(
+            weather_enabled=True,
+            forecast_requested=True,
+            daily_forecast_enabled=True,
+            revision=1,
+        ),
+        delivered_event_keys=frozenset(),
+        known_notification_keys=frozenset(),
+    )
+    assert plan.kind == "WEATHER_DAILY"
+    store.row.event_type, store.row.event_key = plan.kind, plan.key
+    store.row.payload, store.row.claimed_at = plan.payload, now
+    store.delivery.notification_key = plan.key.removeprefix("weather:")
+    transport = Transport()
+    sender = SenderWorker(
+        repository=Repository(store, clock=lambda: now),
+        transport=transport,
+        clock=lambda: now,
+    )
+    assert await sender.run_once(now, sleep=sleep) == 1
+    assert [message.chat_id for message in transport.sent] == [ACTOR]
+    assert store.row.delivered_at == store.delivery.delivered_at == now
+
+
+def test_bad_forecast_deadline_fails_closed():
+    fence = policy.WeatherDeliveryFence(
+        NOW.isoformat(),
+        NOW + timedelta(minutes=10),
+        NOW,
+    )
+    assert not fence.valid_at(NOW)
 
 
 async def test_deployment_capability_off_prevents_weather_io(store):

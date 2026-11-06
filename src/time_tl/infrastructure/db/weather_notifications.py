@@ -223,6 +223,11 @@ class WeatherDeliveryFence:
     source_updated_at: datetime
 
     def valid_at(self, now: datetime) -> bool:
+        if any(
+            not isinstance(value, datetime) or value.utcoffset() is None
+            for value in (now, self.expires_at, self.source_expires_at, self.source_updated_at)
+        ):
+            return False
         return now < min(self.expires_at, self.source_expires_at) and timedelta(
             minutes=-5
         ) <= now - self.source_updated_at <= timedelta(hours=24)
@@ -243,7 +248,8 @@ async def weather_delivery_policy(
         payload = validate_weather_notification_payload(row.payload)
         if payload["kind"] != row.event_type or payload["user_id"] != row.aggregate_id:
             return False
-        expiry = datetime.fromisoformat(payload["expires_at"])
+        expiry_text = payload["expires_at"]
+        expiry = datetime.fromisoformat(expiry_text)
         if now >= expiry:
             return False
         config = await _config(session, lock=lock)
@@ -304,8 +310,7 @@ async def weather_delivery_policy(
         if row.event_type == "WEATHER_DAILY":
             summary = payload["summary"]
             forecast_date = summary["forecast_date"]
-            expiry = payload["expires_at"]
-            slot = forecast_slot(forecast_date, expiry)
+            slot = forecast_slot(forecast_date, expiry_text)
             due = due_forecast_slot(now)
             if (
                 not pref.daily_forecast_enabled
@@ -314,7 +319,8 @@ async def weather_delivery_policy(
                 or due.hour != slot
                 or due.date().isoformat() != forecast_date
                 or daily_summary(snapshot, forecast_date, slot=slot) != summary
-                or forecast_delivery_key(forecast_date, expiry) in ambiguous_dates | delivered_dates
+                or forecast_delivery_key(forecast_date, expiry_text)
+                in ambiguous_dates | delivered_dates
                 or "*" in ambiguous_dates
             ):
                 return False
@@ -559,9 +565,13 @@ class PostgresWeatherNotificationPlanner:
                 if plan.kind == "WEATHER_DAILY":
                     summary = plan.payload["summary"]
                     assert isinstance(summary, dict)
-                    if "*" in ambiguous_dates or forecast_delivery_key(
-                        summary["forecast_date"], plan.payload["expires_at"]
-                    ) in ambiguous_dates:
+                    if (
+                        "*" in ambiguous_dates
+                        or forecast_delivery_key(
+                            summary["forecast_date"], plan.payload["expires_at"]
+                        )
+                        in ambiguous_dates
+                    ):
                         continue
                 elif any(key[:32] in ambiguous_events for key in plan.event_keys):
                     continue
