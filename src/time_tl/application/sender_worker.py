@@ -226,18 +226,24 @@ class SenderWorker:
             region_name = _confirmed_region_name(payload)
             text = (
                 "🚨 ПОВІТРЯНА ТРИВОГА\n\n"
-                f"📍 Територія: {region_name}\n\n"
-                "Прямуйте до укриття та виконуйте офіційні вказівки. "
-                "Бот не визначає, чи зупинено ваш урок."
+                f"📍 Територія: {region_name}"
             )
         elif record.event_type == "ALL_CLEAR_CONFIRMED":
+            from time_tl.application.alert_messages import completed_alert_duration
+
             region_name = _confirmed_region_name(payload)
             text = (
                 "✅ ВІДБІЙ ПОВІТРЯНОЇ ТРИВОГИ\n\n"
                 f"📍 Територія: {region_name}\n\n"
-                "Відбій підтверджено офіційним джерелом. "
-                "Продовжуйте виконувати актуальні офіційні вказівки."
+                f"{completed_alert_duration(payload)}"
             )
+        elif record.event_type == "ALERT_DAILY_SUMMARY":
+            from time_tl.application.alert_messages import render_alert_report
+
+            try:
+                text = render_alert_report(payload, _confirmed_region_name(payload))
+            except (KeyError, ValueError, TypeError) as exc:
+                raise DeliveryFailure("invalid_alert_report_payload", retryable=False) from exc
         elif record.event_type.startswith("POWER_MAP_"):
             from time_tl.infrastructure.db.power_map_notifications import render_map_outbox
 
@@ -279,7 +285,12 @@ class SenderWorker:
         reference = payload.get("join_link_ref")
         if reference and self._join_links is not None and record.event_type != "CALENDAR_REMINDER":
             join_url = await self._join_links.resolve(str(reference))
-        return TelegramMessage(chat_id=chat_id, text=text, join_url=join_url)
+        return TelegramMessage(
+            chat_id=chat_id,
+            text=text,
+            join_url=join_url,
+            parse_mode="HTML" if record.event_type.startswith("WEATHER_") else None,
+        )
 
     async def _handle_failure(
         self, record: ClaimedOutboxMessage, now: datetime, failure: DeliveryFailure

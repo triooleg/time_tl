@@ -1092,3 +1092,65 @@ class WeatherNotificationDelivery(Base):
     event_keys: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AlertHistoryPeriod(Base):
+    __tablename__ = "alert_history_periods"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    scope_id: Mapped[UUID] = mapped_column(
+        ForeignKey("alert_scopes.id", ondelete="CASCADE"), nullable=False
+    )
+    binding_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tracking_ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    start_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    has_gaps: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    __table_args__ = (
+        CheckConstraint("ended_at IS NULL OR ended_at >= started_at", name="valid_interval"),
+        CheckConstraint(
+            "tracking_ended_at IS NULL OR tracking_ended_at >= started_at", name="valid_tracking"
+        ),
+        Index("ix_alert_history_period_scope", "scope_id", "binding_key", "started_at"),
+    )
+
+
+class AlertHistorySegment(Base):
+    __tablename__ = "alert_history_segments"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    scope_id: Mapped[UUID] = mapped_column(
+        ForeignKey("alert_scopes.id", ondelete="CASCADE"), nullable=False
+    )
+    binding_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    period_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("alert_history_periods.id", ondelete="CASCADE")
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    __table_args__ = (
+        CheckConstraint("ended_at >= started_at", name="valid_interval"),
+        CheckConstraint("active = (period_id IS NOT NULL)", name="active_period"),
+        Index("ix_alert_history_segment_scope", "scope_id", "binding_key", "ended_at"),
+    )
+
+
+class AlertHistoryCursor(Base):
+    __tablename__ = "alert_history_cursors"
+    scope_id: Mapped[UUID] = mapped_column(
+        ForeignKey("alert_scopes.id", ondelete="CASCADE"), primary_key=True
+    )
+    binding_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    last_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    state: Mapped[str] = mapped_column(String(24), nullable=False)
+    period_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("alert_history_periods.id", ondelete="SET NULL")
+    )
+    segment_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("alert_history_segments.id", ondelete="SET NULL")
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('UNKNOWN','STALE','ACTIVE','CLEAR_CONFIRMED')", name="state_allowed"
+        ),
+    )

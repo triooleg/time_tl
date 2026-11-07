@@ -23,7 +23,7 @@ BASE = ProductionReleaseManifest(
     config_revision=15,
     provider="alerts.in.ua/full-territory",
     catalog_sha256=contracts.PRODUCTION_RELEASE_MANIFEST["catalog_sha256"],
-    migration_head="0014_calendar_reminders",
+    migration_head="0015_alert_history",
     homework_enabled=True,
     replicas=1,
     territory_selection="manual-oblast-raion-hromada",
@@ -356,7 +356,7 @@ class Session:
                 "allowlist": [],
             }
         )
-        self.heads = heads if heads is not None else ["0014_calendar_reminders"]
+        self.heads = heads if heads is not None else ["0015_alert_history"]
         self.queries = []
 
     async def execute(self, statement):
@@ -438,6 +438,6 @@ def test_historical_schema1_keeps_head9_meaning_but_cannot_be_relabelled_current
     kwargs, _, _ = prepare(monkeypatch, old)
     with pytest.raises(RuntimeContractError):
         module.verify_feature_scope("bot", settings(), production_manifest=BASE, **kwargs)
-    old["migration_head"] = "0014_calendar_reminders"
+    old["migration_head"] = "0015_alert_history"
     with pytest.raises(RuntimeContractError):
         module._parse(json.dumps(old).encode())

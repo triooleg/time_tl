@@ -255,16 +255,13 @@ class SenderWorkerTests(unittest.IsolatedAsyncioTestCase):
             (
                 "ALERT_STARTED",
                 "🚨 ПОВІТРЯНА ТРИВОГА\n\n"
-                "📍 Територія: Кам'янська територіальна громада\n\n"
-                "Прямуйте до укриття та виконуйте офіційні вказівки. "
-                "Бот не визначає, чи зупинено ваш урок.",
+                "📍 Територія: Кам'янська територіальна громада",
             ),
             (
                 "ALL_CLEAR_CONFIRMED",
                 "✅ ВІДБІЙ ПОВІТРЯНОЇ ТРИВОГИ\n\n"
                 "📍 Територія: Кам'янська територіальна громада\n\n"
-                "Відбій підтверджено офіційним джерелом. "
-                "Продовжуйте виконувати актуальні офіційні вказівки.",
+                "⏱ Тривалість тривоги: немає повних даних",
             ),
         )
         for event_type, expected in cases:
@@ -277,6 +274,47 @@ class SenderWorkerTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(delivered, 1)
             self.assertEqual(transport.sent[0].text, expected)
+
+    async def test_each_all_clear_uses_its_own_recorded_duration(self):
+        first = record(event_type="ALL_CLEAR_CONFIRMED")
+        second = record(event_type="ALL_CLEAR_CONFIRMED")
+        first.payload.update(duration_seconds=1560, duration_is_approximate=True)
+        second.payload.update(duration_seconds=3900, duration_is_approximate=True)
+        transport = Transport()
+
+        async def sleep(_):
+            pass
+
+        assert await SenderWorker(
+            repository=Repo((first, second)), transport=transport
+        ).run_once(self.NOW, sleep=sleep) == 2
+        self.assertIn("≈26 хв", transport.sent[0].text)
+        self.assertIn("≈1 год 5 хв", transport.sent[1].text)
+        for message in transport.sent:
+            self.assertNotIn("укрит", message.text)
+
+    async def test_evening_report_uses_the_22_to_22_period(self):
+        item = record(event_type="ALERT_DAILY_SUMMARY")
+        item.payload.update(
+            period_start="2026-11-06T20:00:00+00:00",
+            period_end="2026-11-07T20:00:00+00:00",
+            alert_count=2,
+            duration_seconds=1560,
+            carried_over_count=0,
+            ongoing_count=0,
+            is_partial=False,
+        )
+        transport = Transport()
+
+        async def sleep(_):
+            pass
+
+        assert await SenderWorker(
+            repository=Repo((item,)), transport=transport
+        ).run_once(datetime(2026, 11, 7, 20, 1, tzinfo=UTC), sleep=sleep) == 1
+        self.assertIn("06.11 22:00 — 07.11 22:00", transport.sent[0].text)
+        self.assertIn("Нових тривог: 2", transport.sent[0].text)
+        self.assertIn("≈26 хв", transport.sent[0].text)
 
     async def test_return_message_names_region_and_current_lesson(self):
         async def sleep(_):
@@ -382,6 +420,19 @@ class SenderWorkerTests(unittest.IsolatedAsyncioTestCase):
         await adapter.send(TelegramMessage(1, "hello", "https://example.test/join"))
         self.assertEqual(made, [True])
         self.assertEqual(client.calls[0]["chat_id"], 1)
+
+    async def test_weather_html_escaping_is_interpreted_by_telegram(self):
+        calls = []
+
+        class Client:
+            async def send_message(self, **kwargs):
+                calls.append(kwargs)
+
+        await AiogramTelegramTransport(Client).send(
+            TelegramMessage(1, "📍 Кам&#x27;янське &lt;центр&gt;", parse_mode="HTML")
+        )
+        self.assertEqual(calls[0]["parse_mode"], "HTML")
+        self.assertEqual(calls[0]["text"], "📍 Кам&#x27;янське &lt;центр&gt;")
 
 
 if __name__ == "__main__":

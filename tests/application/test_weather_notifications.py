@@ -76,7 +76,8 @@ def test_due_overlap_merges_rain_and_wind_into_one_deterministic_message() -> No
     items = plan()
     assert len(items) == 1 and len(items[0].event_keys) == 2
     text = render_weather_notification(items[0].payload)
-    assert "MET Norway" in text and "CC BY 4.0" in text and len(text) < 4096
+    assert "🌧 Дощ" in text and "💨 Сильні пориви вітру" in text and len(text) < 4096
+    assert "MET Norway" not in text and "https://" not in text
     assert USER not in text and POINT not in text
     assert plan(known=frozenset({items[0].key})) == ()
 

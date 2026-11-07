@@ -24,7 +24,7 @@ class RuntimeContractError(RuntimeError):
 # This is the single compiled release switch. Independent safety review must change
 # it only for an exact approved release; all production role gates stay closed together.
 PRODUCTION_PUBLIC_RELEASE_APPROVED = True
-PRODUCTION_SCHEMA_HEAD = "0014_calendar_reminders"
+PRODUCTION_SCHEMA_HEAD = "0015_alert_history"
 PRODUCTION_RELEASE_MANIFEST = {
     "provider": "alerts.in.ua/full-territory",
     "territory_selection": "manual-oblast-raion-hromada",

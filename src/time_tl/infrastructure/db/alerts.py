@@ -43,8 +43,15 @@ class PostgresAlertRepository:
 
     PROCESSED_ID_LIMIT = 256
 
-    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self, factory: async_sessionmaker[AsyncSession], *, history_enabled: bool = False,
+        history_max_gap: timedelta = timedelta(seconds=120),
+    ) -> None:
         self._factory = factory
+        self._history_enabled = history_enabled
+        if history_max_gap <= timedelta(0):
+            raise ValueError("history observation gap must be positive")
+        self._history_max_gap = history_max_gap
 
     async def register_scope_for_telegram_user(
         self, telegram_user_id: int, scope: RegionScope
@@ -237,6 +244,9 @@ class PostgresAlertRepository:
                         machine = AlertStateMachine(self._scope(scope), original)
                         machine.apply_failure(failure)
                         await self._store_snapshot(session, scope.id, machine.snapshot())
+                        if self._history_enabled:
+                            from .alert_history import record_source_gap
+                            await record_source_gap(session, scope.id)
                     return ()
 
                 # Only an accepted provider snapshot reaches this point. Source
@@ -260,6 +270,13 @@ class PostgresAlertRepository:
                             and snapshot.state in {AlertState.ACTIVE, AlertState.CLEAR_CONFIRMED}
                         ),
                     )
+                    timing = {}
+                    if self._history_enabled:
+                        from .alert_history import record_snapshot
+                        timing = await record_snapshot(
+                            session, scope, original, snapshot, transition, update.fetched_at,
+                            max_observation_gap=self._history_max_gap,
+                        )
                     if is_notification_transition:
                         user = await session.get(User, scope.user_id)
                         if user is None:
@@ -288,6 +305,11 @@ class PostgresAlertRepository:
                                     "scope_binding": scope_binding,
                                     "transition_revision": update.fetch_revision,
                                     "valid_until": valid_until.isoformat(),
+                                    **(
+                                        timing
+                                        if transition.kind is TransitionKind.ALL_CLEAR_CONFIRMED
+                                        else {}
+                                    ),
                                 },
                             )
                             .on_conflict_do_nothing(index_elements=[OutboxMessage.event_key])
@@ -323,6 +345,9 @@ class PostgresAlertRepository:
                     )
                     machine.apply_failure(failure)
                     await self._store_snapshot(session, scope.id, machine.snapshot())
+                    if self._history_enabled:
+                        from .alert_history import record_source_gap
+                        await record_source_gap(session, scope.id)
 
     async def apply_failure_and_poll_state_atomically(
         self, failure: SourceFailure, poll_state: AlertPollState
@@ -353,6 +378,9 @@ class PostgresAlertRepository:
                     )
                     machine.apply_failure(failure)
                     await self._store_snapshot(session, scope.id, machine.snapshot())
+                    if self._history_enabled:
+                        from .alert_history import record_source_gap
+                        await record_source_gap(session, scope.id)
                 self._store_poll_state(poll_row, poll_state)
 
     async def apply_process_restart_atomically(self) -> None:
@@ -380,6 +408,9 @@ class PostgresAlertRepository:
                     )
                     machine.apply_failure(failure)
                     await self._store_snapshot(session, scope.id, machine.snapshot())
+                    if self._history_enabled:
+                        from .alert_history import record_source_gap
+                        await record_source_gap(session, scope.id)
                 poll_row.fetch_revision += 1
                 poll_row.last_modified = None
                 poll_row.last_success_at = None

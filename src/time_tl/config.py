@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     my_day_enabled: bool = Field(default=False, alias="MY_DAY_ENABLED")
     calendars_enabled: bool = Field(default=False, alias="CALENDARS_ENABLED")
     calendar_reminders_enabled: bool = Field(default=False, alias="CALENDAR_REMINDERS_ENABLED")
+    alert_reports_enabled: bool = Field(default=False, alias="ALERT_REPORTS_ENABLED")
     personal_calendar_changes_enabled: bool = Field(
         default=False, alias="PERSONAL_CALENDAR_CHANGES_ENABLED"
     )

@@ -102,7 +102,7 @@ def production_manifest() -> ProductionReleaseManifest:
         config_revision=5,
         provider="alerts.in.ua/full-territory",
         catalog_sha256=EXPECTED_SHA256,
-        migration_head="0014_calendar_reminders",
+        migration_head="0015_alert_history",
         homework_enabled=True,
         replicas=1,
         territory_selection="manual-oblast-raion-hromada",

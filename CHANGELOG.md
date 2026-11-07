@@ -6,6 +6,21 @@ deployments and their verification.
 
 ## Unreleased
 
+## 0.2.5 - 2026-11-07
+
+- Keep weather notification bodies compact and source-free; preserve the
+  existing source/licence view and 07:00, 12:00 and 18:00 bulletin schedule.
+- Show an observed, approximate duration on each confirmed all-clear, with an
+  explicit missing-history label when a trustworthy duration is unavailable.
+- Remove shelter instructions from alert-start and all-clear notification text.
+- Add consent-bound reports around 22:00 for the previous local 22:00-to-22:00
+  period: new alerts, observed total duration, carryover and incomplete history.
+- Persist aggregate alert history in migration 0015 and retain delivery
+  tombstones across territory changes. Report/history processing is disabled
+  by default until the signed production release enables it.
+- Validate encrypted backup restores for schema 0015 without changing retained
+  backup keys, encryption format or earlier schema inspectors.
+
 ## 0.2.4 - 2026-11-06
 
 - Show the Kyiv date next to the start time in the My Day summary.

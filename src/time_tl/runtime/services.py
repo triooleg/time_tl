@@ -9,6 +9,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -516,7 +517,15 @@ async def _run_postgres_alert_worker(
     engine = create_engine(database_url)
     factory = create_session_factory(engine)
     await _assert_territory_runtime_ready(factory)
-    repository = PostgresAlertRepository(factory)
+    if settings.alert_reports_enabled:
+        from time_tl.infrastructure.db.alert_history import assert_alert_history_ready
+
+        await assert_alert_history_ready(factory)
+    repository = PostgresAlertRepository(
+        factory,
+        history_enabled=settings.alert_reports_enabled,
+        history_max_gap=timedelta(seconds=settings.alert_stale_after_seconds),
+    )
     heartbeat_repository = PostgresWorkerHeartbeatRepository(factory)
     provider = _provider(settings, verified_region_ids)
     runtime_settings = PostgresAlertRuntimeSettingsReader(
@@ -1230,6 +1239,15 @@ async def run_schedule_worker(settings: Settings) -> None:
     calendar_reminders = (
         PostgresCalendarReminderRepository(factory) if settings.calendar_reminders_enabled else None
     )
+    alert_reports = None
+    if settings.alert_reports_enabled:
+        from time_tl.infrastructure.db.alert_history import (
+            PostgresAlertReportPlanner,
+            assert_alert_history_ready,
+        )
+
+        await assert_alert_history_ready(factory)
+        alert_reports = PostgresAlertReportPlanner(factory)
 
     async def loop() -> None:
         while True:
@@ -1237,6 +1255,11 @@ async def run_schedule_worker(settings: Settings) -> None:
             await worker.run_once(now)
             if calendar_reminders is not None:
                 await calendar_reminders.plan(now)
+            if alert_reports is not None:
+                try:
+                    await alert_reports.plan(now)
+                except (ValueError, TypeError, OverflowError):
+                    LOGGER.error("alert_report_invalid_history")
             await asyncio.sleep(settings.schedule_worker_interval_seconds)
 
     try:
@@ -1307,6 +1330,10 @@ async def run_sender_worker(settings: Settings) -> None:
     engine = create_engine(settings.database_url.get_secret_value())
     factory = create_session_factory(engine)
     await _assert_territory_runtime_ready(factory)
+    if settings.alert_reports_enabled:
+        from time_tl.infrastructure.db.alert_history import assert_alert_history_ready
+
+        await assert_alert_history_ready(factory)
     codec = FernetLessonLinkCodec(
         settings.lesson_link_fernet_key.get_secret_value().encode("ascii")
     )
@@ -1338,6 +1365,7 @@ async def run_sender_worker(settings: Settings) -> None:
         ),
         weather_notifications_enabled=settings.weather_notifications_enabled,
         calendar_reminders_enabled=settings.calendar_reminders_enabled,
+        alert_reports_enabled=settings.alert_reports_enabled,
         weather_authority_guard=(
             weather_authority_guard(weather_authority, admission_settings)
             if weather_authority

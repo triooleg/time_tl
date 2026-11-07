@@ -222,16 +222,25 @@ def event_supported(
     )
 
 
+def _notification_locality(name: str) -> str:
+    compact = " ".join(name.split())
+    locality, separator, community = compact.rpartition(" та ")
+    if separator and locality and community.endswith(" територіальна громада"):
+        compact = locality
+    return compact.removeprefix("м. ").replace(" територіальна громада", " громада")
+
+
+
 def render_weather_notification(payload: Mapping[str, Any]) -> str:
     value = validate_weather_notification_payload(payload)
-    lines = ["🌤 Прогноз погоди", f"📍 {escape(value['locality'])}"]
+    lines = ["🌤 Прогноз погоди", f"📍 {escape(_notification_locality(value['locality']))}", ""]
     if value["kind"] == "WEATHER_DAILY":
         summary = value["summary"]
         slot = forecast_slot(summary["forecast_date"], value["expires_at"])
         if slot is not None:
             lines[0] = DAILY_FORECAST_TITLES[slot]
         lines += [
-            date.fromisoformat(summary["forecast_date"]).strftime("%d.%m.%Y"),
+            date.fromisoformat(summary["forecast_date"]).strftime("📅 %d.%m.%Y"),
             f"🌡 {summary['temperature_min_c']:+g}…{summary['temperature_max_c']:+g}°C",
         ]
     else:
@@ -258,12 +267,6 @@ def render_weather_notification(payload: Mapping[str, Any]) -> str:
             if event["initial"]:
                 prefix = "\u041e\u0447\u0456\u043a\u0443\u0454\u0442\u044c\u0441\u044f"
             lines.append(f"{prefix}: {labels[event['event_type']]} · {at}{amount}")
-    lines += [
-        "Прогнозна рекомендація, не фактичне спостереження та не офіційне попередження.",
-        "Джерело: MET Norway (CC BY 4.0), нормалізовано Time TL.",
-        "https://api.met.no/",
-        "https://creativecommons.org/licenses/by/4.0/",
-    ]
     text = "\n".join(lines)
     if len(text) > 3500:
         raise ValueError("weather_notification_too_large")

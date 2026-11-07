@@ -34,7 +34,7 @@ BASE = ProductionReleaseManifest(
     config_revision=15,
     provider="alerts.in.ua/full-territory",
     catalog_sha256=contracts.PRODUCTION_RELEASE_MANIFEST["catalog_sha256"],
-    migration_head="0014_calendar_reminders",
+    migration_head="0015_alert_history",
     homework_enabled=True,
     replicas=1,
     territory_selection="manual-oblast-raion-hromada",
@@ -379,7 +379,7 @@ def test_signed_fallback_is_head12_and_all_seven_capabilities_off(packet, role):
         dynamic_coverage=False,
     )
     authority = module.verify_weather_scope(role, cfg, production_manifest=BASE, loader=packet.load)
-    assert authority.migration_head == "0014_calendar_reminders"
+    assert authority.migration_head == "0015_alert_history"
     assert all(not authority.enabled(name) for name in module.CAPABILITIES)
     with pytest.raises(RuntimeContractError):
         module.verify_weather_scope(role, settings(role), loader=packet.load)
@@ -420,7 +420,7 @@ class Session:
             "transport": "live",
             "allowlist": [],
         }
-        self.heads = ["0014_calendar_reminders"]
+        self.heads = ["0015_alert_history"]
         self.catalog = ("unit-exact-catalog", "a" * 64)
         self.points = [
             (

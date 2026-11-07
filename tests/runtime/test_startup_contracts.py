@@ -120,7 +120,7 @@ def production_release_manifest() -> ProductionReleaseManifest:
         config_revision=5,
         provider="alerts.in.ua/full-territory",
         catalog_sha256=region_registry_full.EXPECTED_SHA256,
-        migration_head="0014_calendar_reminders",
+        migration_head="0015_alert_history",
         homework_enabled=True,
         replicas=1,
         territory_selection="manual-oblast-raion-hromada",
@@ -666,7 +666,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
             PRODUCTION_RELEASE_MANIFEST["catalog_sha256"],
         )
         self.assertEqual(
-            "0014_calendar_reminders",
+            "0015_alert_history",
             PRODUCTION_RELEASE_MANIFEST["migration_head"],
         )
         self.assertIs(True, PRODUCTION_RELEASE_MANIFEST["homework_enabled"])
@@ -750,7 +750,7 @@ class RuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 "time_tl.runtime.production_release._read_atomic_runtime_facts",
                 AsyncMock(
                     return_value=(
-                        ["0014_calendar_reminders"],
+                        ["0015_alert_history"],
                         {"active_revision": 5},
                         active,
                     )

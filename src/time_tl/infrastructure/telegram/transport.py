@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from time_tl.bot.safety import TelegramAllowlistGuard
 
@@ -14,6 +14,7 @@ class TelegramMessage:
     chat_id: int
     text: str
     join_url: str | None = None
+    parse_mode: Literal["HTML"] | None = None
 
 
 class TelegramTransport(Protocol):
@@ -55,6 +56,7 @@ class AiogramTelegramTransport:
                 text=message.text,
                 reply_markup=reply_markup,
                 disable_web_page_preview=True,
+                **({"parse_mode": message.parse_mode} if message.parse_mode is not None else {}),
             )
         except Exception as exc:
             # Classify without importing aiogram at module import time.  Never

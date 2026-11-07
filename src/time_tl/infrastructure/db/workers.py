@@ -121,6 +121,7 @@ def _delivery_deadline(row: OutboxMessage) -> datetime | None:
         "CALENDAR_REMINDER": "starts_at",
         "ALERT_STARTED": "valid_until",
         "ALL_CLEAR_CONFIRMED": "valid_until",
+        "ALERT_DAILY_SUMMARY": "valid_until",
         "LESSON_REMINDER": "starts_at",
         "RETURN_TO_ACTIVE_LESSON": "valid_until",
     }.get(row.event_type)
@@ -496,6 +497,7 @@ class PostgresSenderRepository:
         weather_notifications_enabled: bool = False,
         weather_authority_guard: MapAuthorityGuard | None = None,
         calendar_reminders_enabled: bool = False,
+        alert_reports_enabled: bool = False,
         power_stale_after_seconds: int = 1800,
     ) -> None:
         if stale_after_seconds < 1:
@@ -517,6 +519,9 @@ class PostgresSenderRepository:
         self._expected_staging_allowlist = expected_staging_allowlist
         self._clock = clock or (lambda: datetime.now(UTC))
         self._calendar_reminders_enabled = calendar_reminders_enabled
+        if type(alert_reports_enabled) is not bool:
+            raise ValueError("invalid_alert_report_delivery_configuration")
+        self._alert_reports_enabled = alert_reports_enabled
         if type(power_enabled) is not bool or power_stale_after_seconds < 1:
             raise ValueError("invalid power delivery configuration")
         self._power_enabled = power_enabled
@@ -769,6 +774,7 @@ class PostgresSenderRepository:
                         weather_notifications_enabled=self._weather_notifications_enabled,
                         weather_authority_guard=self._weather_authority_guard,
                         calendar_reminders_enabled=self._calendar_reminders_enabled,
+                        alert_reports_enabled=self._alert_reports_enabled,
                     ):
                         supported = (
                             row.event_type
@@ -778,6 +784,7 @@ class PostgresSenderRepository:
                                 "ALERT_STARTED",
                                 "ALL_CLEAR_CONFIRMED",
                                 "CALENDAR_REMINDER",
+                                "ALERT_DAILY_SUMMARY",
                             }
                             | POWER_EVENT_TYPES
                             | POWER_MAP_EVENT_TYPES
@@ -790,6 +797,7 @@ class PostgresSenderRepository:
                                 "RETURN_TO_ACTIVE_LESSON",
                                 "ALERT_STARTED",
                                 "ALL_CLEAR_CONFIRMED",
+                                "ALERT_DAILY_SUMMARY",
                             }
                             | WEATHER_EVENT_TYPES
                         )
@@ -1067,9 +1075,17 @@ class PostgresSenderRepository:
         weather_authority_guard: MapAuthorityGuard | None = None,
         weather_fences: list[WeatherDeliveryFence] | None = None,
         calendar_reminders_enabled: bool = False,
+        alert_reports_enabled: bool = False,
     ) -> bool:
         if authorization_at.tzinfo is None:
             raise ValueError("authorization time must be timezone-aware")
+        if row.event_type == "ALERT_DAILY_SUMMARY":
+            from .alert_history import daily_report_deliverable
+
+            return alert_reports_enabled and await daily_report_deliverable(
+                session, row, authorization_at,
+                lock=lock_policy_rows, expected_recipient=expected_recipient,
+            )
         if row.event_type == "CALENDAR_REMINDER":
             from .calendar_reminders import calendar_reminder_deliverable
 
@@ -1351,6 +1367,7 @@ class PostgresSenderRepository:
                     weather_authority_guard=self._weather_authority_guard,
                     weather_fences=weather_fences,
                     calendar_reminders_enabled=self._calendar_reminders_enabled,
+                    alert_reports_enabled=self._alert_reports_enabled,
                 ):
                     if await self._should_defer_alert_event(
                         session,
@@ -1435,6 +1452,7 @@ class PostgresSenderRepository:
                     "CALENDAR_REMINDER",
                     "ALERT_STARTED",
                     "ALL_CLEAR_CONFIRMED",
+                    "ALERT_DAILY_SUMMARY",
                     "LESSON_REMINDER",
                     "RETURN_TO_ACTIVE_LESSON",
                 }:

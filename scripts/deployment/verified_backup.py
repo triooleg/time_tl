@@ -98,6 +98,10 @@ SCHEMA_TABLES[WEATHER_SCHEMA] = SCHEMA_TABLES[POWER_SCHEMA] | {
 }
 REMINDER_SCHEMA = "0014_calendar_reminders"
 SCHEMA_TABLES[REMINDER_SCHEMA] = SCHEMA_TABLES[WEATHER_SCHEMA]
+ALERT_HISTORY_SCHEMA = "0015_alert_history"
+SCHEMA_TABLES[ALERT_HISTORY_SCHEMA] = SCHEMA_TABLES[REMINDER_SCHEMA] | {
+    "alert_history_cursors", "alert_history_periods", "alert_history_segments",
+}
 # TLBK1 AAD is a legacy FORMAT label, not an assertion about restored schema.
 # Keep it byte-identical so all retained copies use the existing original key.
 # The authenticated dump's actual head and exact named tables are validated below.
@@ -186,11 +190,26 @@ REMINDER_SCHEMA_INSPECTOR = (
     )
     .replace("WEATHER_SCHEMA_VALIDATED", "REMINDER_SCHEMA_VALIDATED")
 )
+ALERT_HISTORY_SCHEMA_INSPECTOR = (
+    REMINDER_SCHEMA_INSPECTOR.replace(
+        "if heads != ['0014_calendar_reminders']: raise ValueError()",
+        "if heads != ['0015_alert_history']: raise ValueError()",
+    )
+    .replace(
+        "reminders.validate_schema(bind)",
+        "reminders.validate_schema(bind)\n"
+        "     history=importlib.import_module('migrations.versions.0015_alert_history')\n"
+        "     if history.down_revision != reminders.revision: raise ValueError()\n"
+        "     history.validate_schema(bind)",
+    )
+    .replace("REMINDER_SCHEMA_VALIDATED", "ALERT_HISTORY_SCHEMA_VALIDATED")
+)
 RESTORE_INSPECTORS = {
     PERSONAL_SCHEMA: (PERSONAL_SCHEMA_INSPECTOR, b"CAL29_SCHEMA_VALIDATED\n"),
     POWER_SCHEMA: (POWER_SCHEMA_INSPECTOR, b"POWER_SCHEMA_VALIDATED\n"),
     WEATHER_SCHEMA: (WEATHER_SCHEMA_INSPECTOR, b"WEATHER_SCHEMA_VALIDATED\n"),
     REMINDER_SCHEMA: (REMINDER_SCHEMA_INSPECTOR, b"REMINDER_SCHEMA_VALIDATED\n"),
+    ALERT_HISTORY_SCHEMA: (ALERT_HISTORY_SCHEMA_INSPECTOR, b"ALERT_HISTORY_SCHEMA_VALIDATED\n"),
 }
 CRYPTO = r"""
 import os,sys,base64

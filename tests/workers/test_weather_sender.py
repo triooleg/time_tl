@@ -99,7 +99,9 @@ async def test_real_sender_delivers_strict_weather_via_existing_fake_transport(s
         == 1
     )
     assert len(transport.sent) == 1 and transport.sent[0].chat_id == ACTOR
-    assert "MET Norway" in transport.sent[0].text and "CC BY 4.0" in transport.sent[0].text
+    assert "MET Norway" not in transport.sent[0].text
+    assert "https://" not in transport.sent[0].text
+    assert transport.sent[0].parse_mode == "HTML"
     assert store.row.delivered_at == store.delivery.delivered_at == NOW
     assert store.row.claimed_at is None
 
