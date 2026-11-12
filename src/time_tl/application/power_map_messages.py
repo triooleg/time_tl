@@ -11,7 +11,7 @@ from time_tl.domain.power_outages.map_reminders import (
     reminder_due,
     usable_map_day,
 )
-from time_tl.domain.power_outages.models import PowerScheduleView, PowerState, aware
+from time_tl.domain.power_outages.models import PowerProvider, PowerScheduleView, PowerState, aware
 from time_tl.domain.power_outages.normalization import KYIV
 
 
@@ -152,3 +152,13 @@ def render_map_schedule_change(
         "Аварійні відключення можуть відбуватися поза графіком."
     )
     return _bounded("\n\n".join(lines))
+
+
+def render_map_emergency(provider: PowerProvider, group: str, active: bool) -> str:
+    if active:
+        title = "🚨 Запроваджено аварійні відключення"
+        note = "Погодинний графік може не діяти. Час відновлення невідомий."
+    else:
+        title = "✅ Аварійні обмеження завершилися"
+        note = "Знову доступний погодинний графік. Фактичне відновлення світла не підтверджено."
+    return _bounded(f"{title}\n{provider.label} · група {group}\n{note}")

@@ -158,9 +158,11 @@ async def test_delete_account_is_isolated_type_aware_and_removes_all_outbox_stat
     assert private_keys == {
         "power_api_user_pref:" + str(target.id),
         "power_api_reminder_state:" + str(target.id),
+        "power_api_emergency_state:" + str(target.id),
     }
     assert "power_api_user_pref:" + str(other.id) not in private_keys
     assert "power_api_reminder_state:" + str(other.id) not in private_keys
+    assert "power_api_emergency_state:" + str(other.id) not in private_keys
     user_sql = compiled(deletes[2])
     assert target.id in user_sql.params.values()
     assert other.id not in user_sql.params.values()

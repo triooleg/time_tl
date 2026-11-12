@@ -171,6 +171,7 @@ class AsyncPostgresAccountRepository:
                             (
                                 "power_api_user_pref:" + str(user.id),
                                 "power_api_reminder_state:" + str(user.id),
+                                "power_api_emergency_state:" + str(user.id),
                             )
                         )
                     )

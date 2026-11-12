@@ -18,6 +18,7 @@ from time_tl.domain.power_outages.models import (
     PowerDaySchedule,
     PowerInterval,
     PowerProvider,
+    PowerPublicationStatus,
     PowerScheduleView,
     PowerSourceKind,
     PowerState,
@@ -764,3 +765,131 @@ async def test_stored_conservative_restoration_survives_new_next_outage_informat
     assert "Час наступного відключення поки не підтверджено" in render_map_outbox(
         event.event_type, queued.payload, clock
     )
+
+
+def emergency_context(now, publication, *, checked=None, sub=None):
+    lower, upper = day_bounds(DAY)
+    day = PowerDaySchedule(
+        PROVIDER,
+        "1.1",
+        DAY,
+        ScheduleKind.CONFIRMED_DAY,
+        (PowerInterval("1.1", lower, upper, PowerState.UNKNOWN),),
+        publication_status=publication,
+    )
+    selected = replace(view(), schedule=day)
+    ctx = context(sub=sub, checked=checked or now)
+    ctx.map_view.data.fetched_at = now
+    return replace(ctx, emergency_view=selected)
+
+
+@pytest.mark.asyncio
+async def test_emergency_outbox_requires_confirmed_fresh_transition_and_dedupes(monkeypatch):
+    store = Store()
+    planner = PostgresPowerMapNotificationRepository(store)
+    start = emergency_context(NOW, PowerPublicationStatus.EMERGENCY)
+    bind_context(monkeypatch, start)
+    await planner._plan_user(IDENTIFIER, NOW)
+    await planner._plan_user(IDENTIFIER, NOW + timedelta(seconds=1))
+    (started,) = [
+        item for item in store.outbox.values() if item.event_type in module.EMERGENCY_EVENTS
+    ]
+    assert started.event_type == module.EMERGENCY_STARTED
+    assert "Запроваджено" in render_map_outbox(started.event_type, started.payload, NOW)
+    assert await map_delivery_policy(Session(store), started, NOW) == "AUTHORIZED"
+
+    later = NOW + timedelta(minutes=5)
+    unavailable = emergency_context(later, PowerPublicationStatus.UNKNOWN)
+    bind_context(monkeypatch, unavailable)
+    assert await map_delivery_policy(Session(store), started, later) == "REJECTED"
+    await planner._plan_user(IDENTIFIER, later)
+    assert not any(item.event_type == module.EMERGENCY_ENDED for item in store.outbox.values())
+
+    planned = replace(context(checked=later), emergency_view=view())
+    planned.map_view.data.fetched_at = later
+    bind_context(monkeypatch, planned)
+    await planner._plan_user(IDENTIFIER, later)
+    await planner._plan_user(IDENTIFIER, later + timedelta(seconds=1))
+    (ended,) = [item for item in store.outbox.values() if item.event_type == module.EMERGENCY_ENDED]
+    assert "Фактичне відновлення світла не підтверджено" in render_map_outbox(
+        ended.event_type, ended.payload, later
+    )
+    assert await map_delivery_policy(Session(store), ended, later) == "AUTHORIZED"
+    expired = later + timedelta(minutes=10)
+    assert await map_delivery_policy(Session(store), ended, expired) == "REJECTED"
+
+
+@pytest.mark.asyncio
+async def test_emergency_never_uses_stale_snapshot_or_disabled_notice(monkeypatch):
+    store = Store()
+    planner = PostgresPowerMapNotificationRepository(store)
+    stale = emergency_context(
+        NOW, PowerPublicationStatus.EMERGENCY, checked=NOW - timedelta(minutes=31)
+    )
+    bind_context(monkeypatch, stale)
+    await planner._plan_user(IDENTIFIER, NOW)
+    sub = replace(stale.subscription, outage_notifications_enabled=False)
+    bind_context(monkeypatch, emergency_context(NOW, PowerPublicationStatus.EMERGENCY, sub=sub))
+    await planner._plan_user(IDENTIFIER, NOW)
+    assert not any(item.event_type in module.EMERGENCY_EVENTS for item in store.outbox.values())
+
+
+@pytest.mark.asyncio
+async def test_emergency_uses_exact_group_when_only_subscribed_group_was_cached():
+    store = metadata_store()
+    session = MetadataSession(store)
+    cache = store.rows[(RuntimeSetting, REGION_PREFIX + "dnipropetrovska-oblast")]
+    previous = RegionMap.from_wire(cache.value["payload"])
+    row_wire = next(item for item in previous.to_wire()["rows"] if item["queue"] == "1.1")
+    row_wire.update(
+        today=[],
+        today_status="EmergencyShutdowns",
+        tomorrow=[],
+        tomorrow_status="WaitingForSchedule",
+        tomorrow_checked_at=None,
+    )
+    data = RegionMap(previous.area, (row_wire,), NOW)
+    cache.value = {
+        **cache.value,
+        "payload": data.to_wire(),
+        "content_hash": data.semantic_hash,
+        "source_status": data.status.value,
+        "error_code": data.error_code,
+    }
+
+    ctx = await module._context(session, IDENTIFIER, NOW, 1800, lock=True)
+    assert ctx is not None and ctx.views[1].schedule is None
+    event = await module._plan_emergency(session, ctx, NOW)
+    assert event is not None and event[0] == module.EMERGENCY_STARTED
+    fences = []
+    assert (
+        await map_delivery_policy(
+            session,
+            row(event[2], event[0]),
+            NOW,
+            lock=True,
+            expected_recipient=DeliveryRecipient(CHAT),
+            fences=fences,
+        )
+        == "AUTHORIZED"
+    )
+    assert len(fences) == 1 and fences[0].valid_at(NOW)
+
+
+@pytest.mark.asyncio
+async def test_editing_lead_time_does_not_repeat_emergency_start(monkeypatch):
+    store = Store()
+    planner = PostgresPowerMapNotificationRepository(store)
+    active = emergency_context(
+        NOW, PowerPublicationStatus.EMERGENCY, checked=NOW - timedelta(minutes=11)
+    )
+    bind_context(monkeypatch, active)
+    await planner._plan_user(IDENTIFIER, NOW)
+    later = NOW + timedelta(minutes=5)
+    sub = replace(active.subscription, revision=3, outage_lead_minutes=15)
+    bind_context(monkeypatch, emergency_context(later, PowerPublicationStatus.EMERGENCY, sub=sub))
+    await planner._plan_user(IDENTIFIER, later)
+    (started,) = [
+        item for item in store.outbox.values() if item.event_type == module.EMERGENCY_STARTED
+    ]
+    assert await map_delivery_policy(Session(store), started, later) == "REJECTED"

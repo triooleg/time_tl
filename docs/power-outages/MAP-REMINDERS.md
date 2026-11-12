@@ -70,3 +70,23 @@ isolated Linux/PostgreSQL planning/dispatch races and restart checks,
 independent safety review, then a separately scoped allowlisted notification
 check before permanent rollout. Current production delivery is not enabled by
 this document.
+## Emergency restrictions
+
+The Alerts Energy operator schedule API documents `EmergencyShutdowns` for
+individual groups. Time TL uses today's row for the subscribed operator and
+group from the existing five-minute collection cycle. The planner and the
+sender read the local PostgreSQL cache. A separate API request is unnecessary.
+[Alerts Energy operator schedule API](https://alerts.energy/developers/api/operators/source-registry-areas-slug-shutdowns)
+
+A fresh emergency observation queues a start notice if outage notifications are
+enabled. A newer, valid published plan for that group queues an end notice if
+restoration notifications are enabled. The end notice describes the return of
+the published schedule and makes no claim about the supply at an address.
+Missing rows, unknown restrictions, stale checks, and fetch failures cannot
+clear an active emergency.
+
+The planner records the observed state in PostgreSQL. Repeated observations,
+restarts, and edits to reminder lead times do not reissue a start for the same
+ongoing restriction. The sender revalidates the cache, subscription, and
+recipient before dispatch. Notifications expire after ten minutes or at local
+midnight, whichever comes first.

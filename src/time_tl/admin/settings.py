@@ -45,7 +45,12 @@ def reject_sensitive_generic_settings(keys: Any) -> None:
     for key in keys:
         normalized = str(key).lower()
         if normalized.startswith(
-            ("power_api_user_pref:", "power_api_reminder_state:", "weather_")
+            (
+                "power_api_user_pref:",
+                "power_api_reminder_state:",
+                "power_api_emergency_state:",
+                "weather_",
+            )
         ) or any(part in normalized for part in _SENSITIVE_SETTING_PARTS):
             raise ValueError("sensitive values require the owner configuration store")
 

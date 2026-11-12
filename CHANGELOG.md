@@ -4,6 +4,11 @@ Time TL records user-visible changes and fixes by package version. The
 [operations timeline](docs/operations/TIMELINE.md) records build identities,
 deployments and their verification.
 
+## 0.2.5.post1 — 2026-11-12
+
+- Notify opted-in users when fresh cached Alerts Energy data shows emergency
+  restrictions starting or a valid schedule returning for their operator and group.
+
 ## Unreleased
 
 ## 0.2.5 - 2026-11-07

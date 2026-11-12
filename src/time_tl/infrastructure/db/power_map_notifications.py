@@ -20,6 +20,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from time_tl.application.power_map_messages import (
+    render_map_emergency,
     render_map_reminder,
     render_map_schedule_change,
 )
@@ -43,6 +44,7 @@ from time_tl.domain.power_outages.models import (
     ScheduleKind,
     SourceStatus,
     aware,
+    validate_group,
 )
 from time_tl.domain.power_outages.normalization import KYIV, day_bounds
 from time_tl.infrastructure.power_outages.alerts_energy_api_normalizer import KNOWN_BINDINGS
@@ -53,7 +55,11 @@ from .power_map import REGION_PREFIX, PostgresPowerMapRepository, PowerMapView
 from .power_map_preferences import PREFIX, decode, preference_key
 
 CHANGED = "POWER_MAP_SCHEDULE_CHANGED"
-EVENT_TYPES = frozenset({OUTAGE, RESTORATION, CHANGED})
+EMERGENCY_STARTED = "POWER_MAP_EMERGENCY_STARTED"
+EMERGENCY_ENDED = "POWER_MAP_EMERGENCY_ENDED"
+EMERGENCY_EVENTS = frozenset({EMERGENCY_STARTED, EMERGENCY_ENDED})
+EVENT_TYPES = frozenset({OUTAGE, RESTORATION, CHANGED}) | EMERGENCY_EVENTS
+EMERGENCY_STATE_PREFIX = "power_api_emergency_state:"
 STATE_PREFIX = "power_api_reminder_state:"
 _CREDENTIAL_KEY = "power_alerts_energy_api_credentials"
 _COMMON = {
@@ -127,6 +133,8 @@ def _read_day(value: object) -> PowerDaySchedule:
 
 def _payload(payload: object, event_type: str) -> dict[str, Any]:
     extra = {"day"} if event_type == CHANGED else {"event"}
+    if event_type in EMERGENCY_EVENTS:
+        extra = {"transition_at"}
     if (
         type(payload) is not dict
         or event_type not in EVENT_TYPES
@@ -146,6 +154,12 @@ def _payload(payload: object, event_type: str) -> dict[str, Any]:
     if provider not in KNOWN_BINDINGS:
         raise ValueError("unsupported_map_notification_provider")
     _stamp(payload["valid_until"])
+    if event_type in EMERGENCY_EVENTS:
+        validate_group(payload["group"])
+        transition = _stamp(payload["transition_at"])
+        if not transition < _stamp(payload["valid_until"]) <= transition + timedelta(minutes=10):
+            raise ValueError("invalid_map_emergency_deadline")
+        return payload
     if event_type == CHANGED:
         day = _read_day(payload["day"])
         identity = (day.provider.value, day.group_id)
@@ -170,6 +184,10 @@ def render_map_outbox(event_type: str, payload: dict[str, object], now: datetime
     )
     if aware(now) >= _stamp(value["valid_until"]):
         raise ValueError("map_notification_expired")
+    if event_type in EMERGENCY_EVENTS:
+        return render_map_emergency(
+            PowerProvider(value["provider"]), value["group"], event_type == EMERGENCY_STARTED
+        )
     if event_type != CHANGED:
         return render_map_reminder(MapPowerReminder.from_wire(value["event"]), now)
     day = _read_day(value["day"])
@@ -219,6 +237,7 @@ class _Context:
     map_view: PowerMapView
     credential_revision: int
     ttl: int
+    emergency_view: PowerScheduleView | None = None
 
     def deadlines(self, dates: set[date]) -> tuple[datetime, ...]:
         data = self.map_view.data
@@ -286,7 +305,15 @@ async def _context(
             for offset in (-1, 0, 1)
         ]
     )
-    return _Context(user, subscription, views, view, credential[0], ttl)
+    emergency_view = await reader.read_schedule(
+        subscription.provider,
+        subscription.group_id,
+        today,
+        schedule_type=ScheduleKind.CONFIRMED_DAY,
+        now=now,
+        display_only=True,
+    )
+    return _Context(user, subscription, views, view, credential[0], ttl, emergency_view)
 
 
 @dataclass(frozen=True)
@@ -357,10 +384,97 @@ def _identity_payload(context: _Context, valid_until: datetime) -> dict[str, Any
 def _event_allowed(sub: PowerSubscription, event_type: str) -> bool:
     return sub.enabled and (
         event_type == CHANGED
-        or event_type == OUTAGE
+        or event_type in {OUTAGE, EMERGENCY_STARTED}
         and sub.outage_notifications_enabled
-        or event_type == RESTORATION
+        or event_type in {RESTORATION, EMERGENCY_ENDED}
         and sub.restoration_notifications_enabled
+    )
+
+
+def _emergency_observation(context: _Context, now: datetime) -> tuple[bool, datetime] | None:
+    day = aware(now).astimezone(KYIV).date()
+    data = context.map_view.data
+    if data is None:
+        return None
+    view = context.emergency_view
+    if view is None or view.source_status is not SourceStatus.FRESH:
+        return None
+    schedule = view.schedule
+    if (
+        schedule is None
+        or schedule.local_date != day
+        or schedule.publication_status
+        not in {PowerPublicationStatus.EMERGENCY, PowerPublicationStatus.PLANNED}
+    ):
+        return None
+    supplier = KNOWN_BINDINGS[context.subscription.provider][1]
+    checked = data.record_checked_at(supplier, context.subscription.group_id, day=day)
+    if checked is None or any(
+        not 0 <= (aware(now) - aware(stamp)).total_seconds() <= context.ttl
+        for stamp in (data.fetched_at, checked)
+    ):
+        return None
+    return schedule.publication_status is PowerPublicationStatus.EMERGENCY, aware(checked)
+
+
+def _emergency_identity(context: _Context) -> list[str]:
+    sub = context.subscription
+    return [sub.provider.value, sub.group_id]
+
+
+def _read_emergency_state(
+    row: RuntimeSetting | None, context: _Context
+) -> tuple[bool, datetime, datetime] | None:
+    if row is None:
+        return None
+    value = row.value
+    if type(value) is not dict or value.get("identity") != _emergency_identity(context):
+        return None
+    if type(value.get("active")) is not bool:
+        raise ValueError("invalid_map_emergency_state")
+    return value["active"], _stamp(value["checked_at"]), _stamp(value["transition_at"])
+
+
+async def _plan_emergency(
+    session: AsyncSession, context: _Context, now: datetime
+) -> tuple[str, str, dict[str, Any]] | None:
+    observed = _emergency_observation(context, now)
+    if observed is None:
+        return None
+    active, checked = observed
+    key = EMERGENCY_STATE_PREFIX + str(context.user.id)
+    row = await session.get(RuntimeSetting, key, with_for_update=True)
+    previous = _read_emergency_state(row, context)
+    if previous is not None and checked <= previous[1]:
+        return None
+    changed = active if previous is None else active != previous[0]
+    transition = now if changed or previous is None else previous[2]
+    value = {
+        "identity": _emergency_identity(context),
+        "active": active,
+        "checked_at": checked.isoformat(),
+        "transition_at": transition.isoformat(),
+    }
+    if row is None:
+        session.add(RuntimeSetting(key=key, value=value, updated_by="power-map-reminders"))
+    else:
+        row.value, row.updated_at = value, now
+    kind = EMERGENCY_STARTED if active else EMERGENCY_ENDED
+    deadline = min(now + timedelta(minutes=10), day_bounds(now.astimezone(KYIV).date())[1])
+    if not changed or deadline <= now or not _event_allowed(context.subscription, kind):
+        return None
+    payload = _identity_payload(context, deadline)
+    payload["transition_at"] = transition.isoformat()
+    return (
+        kind,
+        _hash(
+            [
+                context.subscription.provider.value,
+                context.subscription.group_id,
+                transition.isoformat(),
+            ]
+        ),
+        payload,
     )
 
 
@@ -446,7 +560,25 @@ async def map_delivery_policy(
             return "REJECTED"
         if lock and expected_recipient is None:
             return "REJECTED"
-        if row.event_type == CHANGED:
+        if row.event_type in EMERGENCY_EVENTS:
+            current = _emergency_observation(context, clock)
+            state = _read_emergency_state(
+                await session.get(RuntimeSetting, EMERGENCY_STATE_PREFIX + str(identifier)), context
+            )
+            active = row.event_type == EMERGENCY_STARTED
+            transition = _stamp(value["transition_at"])
+            if (
+                current is None
+                or state is None
+                or current[0] != active
+                or state[0] != active
+                or state[2] != transition
+                or clock < transition
+                or current[1] < state[1]
+            ):
+                return "REJECTED"
+            dates = {clock.astimezone(KYIV).date()}
+        elif row.event_type == CHANGED:
             day = _read_day(value["day"])
             today = clock.astimezone(KYIV).date()
             if day.local_date not in {today, today + timedelta(days=1)}:
@@ -719,6 +851,12 @@ class PostgresPowerMapNotificationRepository:
                         payload,
                     )
                 )
+            try:
+                emergency = await _plan_emergency(session, context, now)
+            except (ValueError, TypeError, KeyError, RecursionError, OverflowError):
+                emergency = None
+            if emergency is not None:
+                candidates.append(emergency)
             inserted = 0
             for kind, key, payload in candidates:
                 # Validate before persisting so malformed data cannot enter a
