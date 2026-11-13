@@ -290,6 +290,15 @@ class PostgresAlertRepository:
                             continue
                         key = f"{scope.id}:{transition.kind.value}:{transition.event_id}"
                         valid_until = update.fetched_at + timedelta(minutes=2)
+                        level_payload = {}
+                        if transition.kind is TransitionKind.ALERT_STARTED:
+                            levels = {
+                                item.episode.alert_level for item in snapshot.active_episodes
+                            }
+                            if "red" in levels:
+                                level_payload = {"alert_level": "red"}
+                            elif levels == {"yellow"}:
+                                level_payload = {"alert_level": "yellow"}
                         statement = (
                             insert(OutboxMessage)
                             .values(
@@ -305,6 +314,7 @@ class PostgresAlertRepository:
                                     "scope_binding": scope_binding,
                                     "transition_revision": update.fetch_revision,
                                     "valid_until": valid_until.isoformat(),
+                                    **level_payload,
                                     **(
                                         timing
                                         if transition.kind is TransitionKind.ALL_CLEAR_CONFIRMED

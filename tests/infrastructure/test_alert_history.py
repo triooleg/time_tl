@@ -288,8 +288,8 @@ class AlertHistoryPostgresTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         repository = PostgresAlertRepository(self.factory, history_enabled=True)
-        parent = DomainEpisode("14", "air_raid", "parent-episode")
-        child = DomainEpisode("31", "air_raid", "child-episode")
+        parent = DomainEpisode("14", "air_raid", "parent-episode", "yellow")
+        child = DomainEpisode("31", "air_raid", "child-episode", "red")
         for revision, episodes in enumerate(((), (parent, child), (parent,), (), (), ()), start=1):
             now = at + timedelta(seconds=30 * (revision - 1))
             update = OfficialAlertSnapshot(
@@ -317,7 +317,10 @@ class AlertHistoryPostgresTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 sorted(row.event_type for row in rows), ["ALERT_STARTED", "ALL_CLEAR_CONFIRMED"]
             )
+            started = next(row for row in rows if row.event_type == "ALERT_STARTED")
+            self.assertEqual(started.payload["alert_level"], "red")
             clear = next(row for row in rows if row.event_type == "ALL_CLEAR_CONFIRMED")
+            self.assertNotIn("alert_level", clear.payload)
             self.assertEqual(clear.payload["duration_seconds"], 90)
             self.assertTrue(clear.payload["duration_is_approximate"])
             periods = (await session.scalars(select(AlertHistoryPeriod))).all()

@@ -72,6 +72,7 @@ class AlertEpisode:
     location_uid: str
     alert_type: str
     episode_id: str
+    alert_level: str | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if not self.location_uid or not self.alert_type or not self.episode_id:

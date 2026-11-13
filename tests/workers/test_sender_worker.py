@@ -77,6 +77,29 @@ def record(attempts=0, event_type="LESSON_REMINDER"):
 class SenderWorkerTests(unittest.IsolatedAsyncioTestCase):
     NOW = datetime(2026, 9, 21, 6, tzinfo=UTC)
 
+    async def test_alert_start_displays_only_supported_provider_levels(self):
+        for level, expected in (
+            ("red", "🔴 Рівень на момент оголошення: червоний"),
+            ("yellow", "Рівень на момент оголошення: жовтий"),
+            (None, None),
+            ("unknown", None),
+        ):
+            with self.subTest(level=level):
+                alert = record(event_type="ALERT_STARTED")
+                alert.payload["valid_until"] = "2026-09-21T06:02:00+00:00"
+                if level is not None:
+                    alert.payload["alert_level"] = level
+                transport = Transport()
+                delivered = await SenderWorker(
+                    repository=Repo((alert,)), transport=transport
+                ).run_once(self.NOW, sleep=asyncio.sleep)
+                self.assertEqual(delivered, 1)
+                text = transport.sent[0].text
+                if expected is None:
+                    self.assertNotIn("Рівень", text)
+                else:
+                    self.assertIn(expected, text)
+
     async def test_delivers_and_rate_limits_batch_without_body_logging(self):
         repo = Repo(
             (

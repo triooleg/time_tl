@@ -534,7 +534,7 @@ class AlertsInUaAdapter:
 
             if alert_type == "air_raid":
                 # Both documented red and yellow levels represent an active air raid.
-                parsed.append(AlertEpisode(location_uid, alert_type, str(alert_id)))
+                parsed.append(AlertEpisode(location_uid, alert_type, str(alert_id), alert_level))
             canonical_alert = {
                 key: item[key] for key in self._CANONICAL_ALERT_FIELDS if key in item
             }

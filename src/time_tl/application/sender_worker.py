@@ -228,6 +228,11 @@ class SenderWorker:
                 "🚨 ПОВІТРЯНА ТРИВОГА\n\n"
                 f"📍 Територія: {region_name}"
             )
+            level = payload.get("alert_level")
+            if level == "red":
+                text += "\n🔴 Рівень на момент оголошення: червоний"
+            elif level == "yellow":
+                text += "\n🟠 Рівень на момент оголошення: жовтий (попередня загроза)"
         elif record.event_type == "ALL_CLEAR_CONFIRMED":
             from time_tl.application.alert_messages import completed_alert_duration
 
