@@ -686,7 +686,9 @@ async def map_delivery_policy(
             if (observed is None or state is None or clock < transition
                     or observed[0] != value["status"] or state["status"] != value["status"]
                     or _stamp(state["transition_at"]) != transition
-                    or observed[1] < _stamp(state["checked_at"])):
+                    or observed[1] < _stamp(state["checked_at"])
+                    or aware(context.map_view.data.fetched_at)
+                    < _stamp(state.get("fetched_at", state["checked_at"]))):
                 return "REJECTED"
             dates = {day}
         elif row.event_type in EMERGENCY_EVENTS:
