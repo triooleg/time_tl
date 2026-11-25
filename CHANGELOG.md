@@ -4,12 +4,21 @@ Time TL records user-visible changes and fixes by package version. The
 [operations timeline](docs/operations/TIMELINE.md) records build identities,
 deployments and their verification.
 
+## Unreleased
+
+## 0.2.5.post3 — 2026-11-25
+
+- Notify opted-in users when the cached outage schedule status changes for their operator, group and day.
+- Show the published schedule for the requested day when the provider omits its publication timestamp and the cache was checked recently.
+
+## 0.2.5.post2
+
+- Show the alerts.in.ua level on alert-start messages when the provider supplies a recognized level.
+
 ## 0.2.5.post1 — 2026-11-12
 
 - Notify opted-in users when fresh cached Alerts Energy data shows emergency
   restrictions starting or a valid schedule returning for their operator and group.
-
-## Unreleased
 
 ## 0.2.5 - 2026-11-07
 
