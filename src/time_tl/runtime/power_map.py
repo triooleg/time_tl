@@ -87,7 +87,10 @@ class PowerMapScheduleReader:
             return result(SourceStatus.STALE, view.error_code or "MAP_LAST_FETCH_FAILED")
         if not 0 <= (aware(now) - aware(data.fetched_at)).total_seconds() <= self._ttl:
             return result(SourceStatus.STALE, "STALE_MAP_FETCH")
-        record_status = data.record_status(supplier, group_id, now, day=day)
+        record_status = data.record_status(
+            supplier, group_id, now, day=day,
+            require_publication_timestamp=not display_only,
+        )
         if record_status is not SourceStatus.FRESH:
             return result(record_status, "MAP_RECORD_UNAVAILABLE_OR_STALE")
         checked = data.record_checked_at(supplier, group_id, day=day)

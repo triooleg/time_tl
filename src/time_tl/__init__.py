@@ -1,3 +1,3 @@
 """Time TL application package."""
 
-__version__ = "0.2.5.post2"
+__version__ = "0.2.5.post3"

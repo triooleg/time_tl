@@ -163,13 +163,14 @@ def _checked(row: Mapping[str, object], fetched: datetime, day: date | None = No
 
 
 def _record_status(row: Mapping[str, object], fetched: datetime, now: datetime,
-                   ttl: int, day: date | None = None) -> SourceStatus:
+                   ttl: int, day: date | None = None, *,
+                   require_publication_timestamp: bool = True) -> SourceStatus:
     if day is not None and type(day) is not date:
         raise ValueError("invalid_power_map_read_date")
     if day is not None and day.isoformat() not in {row["today_date"], row["tomorrow_date"]}:
         return SourceStatus.UNAVAILABLE
     checked = _checked(row, fetched, day)
-    if row["updated"] is None or checked is None or not 0 <= (
+    if (require_publication_timestamp and row["updated"] is None) or checked is None or not 0 <= (
         aware(now) - aware(fetched)
     ).total_seconds() <= ttl or not 0 <= (aware(now) - checked).total_seconds() <= ttl:
         return SourceStatus.STALE
@@ -274,12 +275,14 @@ class RegionMap:
         return None
 
     def record_status(self, initiator: str, queue: str, now: datetime, *,
-                      day: date | None = None) -> SourceStatus:
+                      day: date | None = None,
+                      require_publication_timestamp: bool = True) -> SourceStatus:
         aware(now)
         for row in self.rows:
             if row["initiator"] == initiator and row["queue"] == queue:
                 return _record_status(row, aware(self.fetched_at), now,
-                                      self.stale_after_seconds, day)
+                                      self.stale_after_seconds, day,
+                                      require_publication_timestamp=require_publication_timestamp)
         return SourceStatus.UNAVAILABLE
 
     def to_wire(self) -> dict[str, Any]:

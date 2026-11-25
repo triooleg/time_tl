@@ -88,6 +88,34 @@ async def test_other_operator_staleness_does_not_hide_selected_healthy_operator(
     assert (await read(repository, PowerProvider.CEK)).source_status is SourceStatus.STALE
 
 
+async def test_display_uses_fresh_day_check_when_publication_time_is_missing():
+    row = rows()[0]
+    row["updated"] = None
+    repository = Repository([row])
+    value = await PowerMapScheduleReader(repository).read_schedule(
+        PowerProvider.DTEK, "1.1", DAY, schedule_type=ScheduleKind.CONFIRMED_DAY,
+        now=NOW, display_only=True,
+    )
+    assert value.source_status is SourceStatus.FRESH
+    assert value.schedule.publication_status is PowerPublicationStatus.PLANNED
+    assert value.schedule.local_date == DAY
+    assert repository.view.data.record_status(DTEK, "1.1", NOW, day=DAY) is SourceStatus.STALE
+    assert (await read(repository)).schedule is None
+
+
+async def test_display_missing_publication_still_rejects_stale_day_check():
+    row = rows()[0]
+    row["updated"] = None
+    row["today_checked_at"] = (NOW - timedelta(hours=1)).isoformat()
+    repository = Repository([row])
+    value = await PowerMapScheduleReader(repository).read_schedule(
+        PowerProvider.DTEK, "1.1", DAY, schedule_type=ScheduleKind.CONFIRMED_DAY,
+        now=NOW, display_only=True,
+    )
+    assert value.source_status is SourceStatus.STALE
+    assert value.schedule is None
+
+
 async def test_cek_projection_never_uses_dtek_rows():
     repository = Repository(rows(DTEK) + rows(CEK))
     value = await read(repository, PowerProvider.CEK)

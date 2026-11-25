@@ -154,6 +154,30 @@ def render_map_schedule_change(
     return _bounded("\n\n".join(lines))
 
 
+def render_map_status(provider: PowerProvider, group: str, day: date, status: str) -> str:
+    messages = {
+        "ScheduleApplies": (
+            "📅 Погодинний графік діє", "Відключення заплановано за опублікованим графіком."
+        ),
+        "NoShutdowns": (
+            "✅ Планових відключень немає", "На цю дату для вашої групи планових відключень не передбачено."
+        ),
+        "WaitingForSchedule": (
+            "⏳ Очікуємо графік", "Графік для вашої групи поки не опубліковано."
+        ),
+        "EmergencyShutdowns": (
+            "🚨 Діють аварійні відключення", "Погодинний графік може не діяти. Час відновлення невідомий."
+        ),
+    }
+    if type(day) is not date or status not in messages:
+        raise ValueError("invalid_map_status_message")
+    title, note = messages[status]
+    return _bounded(
+        f"{title}\n{provider.label} · група {group}\n📅 {day:%d.%m.%Y}\n\n{note}\n\n"
+        "Фактична наявність світла може відрізнятися."
+    )
+
+
 def render_map_emergency(provider: PowerProvider, group: str, active: bool) -> str:
     if active:
         title = "🚨 Запроваджено аварійні відключення"

@@ -893,3 +893,160 @@ async def test_editing_lead_time_does_not_repeat_emergency_start(monkeypatch):
         item for item in store.outbox.values() if item.event_type == module.EMERGENCY_STARTED
     ]
     assert await map_delivery_policy(Session(store), started, later) == "REJECTED"
+
+
+async def status_context(status, now=NOW, *, tomorrow_status="WaitingForSchedule",
+                         context_loader=module._context):
+    store = metadata_store()
+    cached = store.rows[(RuntimeSetting, REGION_PREFIX + "dnipropetrovska-oblast")]
+    previous = RegionMap.from_wire(cached.value["payload"])
+    rows = previous.to_wire()["rows"]
+    for item in rows:
+        item["updated"] = now.isoformat()
+        for prefix, selected in (("today", status), ("tomorrow", tomorrow_status)):
+            item[prefix + "_status"] = selected
+            item[prefix + "_checked_at"] = now.isoformat()
+            item[prefix] = [0] * 24 if selected == "NoShutdowns" else (
+                [1] + [0] * 23 if selected == "ScheduleApplies" else [])
+    data = RegionMap(previous.area, tuple(rows), now)
+    cached.value = {**cached.value, "payload": data.to_wire(), "content_hash": data.semantic_hash,
+                    "source_status": data.status.value,
+                    "error_code": data.error_code}
+    return await context_loader(MetadataSession(store), IDENTIFIER, now, 1800, lock=True)
+
+
+async def test_status_transitions_dedupe_refresh_preferences_and_restart():
+    store = Store()
+    session = Session(store)
+    initial = await status_context("ScheduleApplies")
+    assert await module._plan_status_changes(session, initial, NOW) == []
+    later = NOW + timedelta(minutes=5)
+    waiting = await status_context("WaitingForSchedule", later)
+    (event,) = await module._plan_status_changes(session, waiting, later)
+    assert event[0] == module.STATUS_CHANGED
+    assert event[2]["status"] == "WaitingForSchedule"
+    assert event[2]["status_day"] == DAY.isoformat()
+    assert "не опубліковано" in render_map_outbox(event[0], event[2], later)
+    refreshed = await status_context("WaitingForSchedule", later + timedelta(minutes=5))
+    refreshed = replace(refreshed, subscription=replace(refreshed.subscription, revision=3))
+    assert await module._plan_status_changes(Session(store), refreshed, later + timedelta(minutes=5)) == []
+
+
+@pytest.mark.parametrize("status", ["ScheduleApplies", "NoShutdowns", "WaitingForSchedule", "EmergencyShutdowns"])
+async def test_each_status_final_policy_rechecks_group_day_and_transition(monkeypatch, status):
+    store = Store()
+    session = Session(store)
+    initial_status = "NoShutdowns" if status == "ScheduleApplies" else "ScheduleApplies"
+    await module._plan_status_changes(session, await status_context(initial_status), NOW)
+    later = NOW + timedelta(minutes=5)
+    current = await status_context(status, later)
+    (event,) = await module._plan_status_changes(session, current, later)
+    bind_context(monkeypatch, current)
+    queued = row(event[2], event[0])
+    assert await map_delivery_policy(session, queued, later) == "AUTHORIZED"
+    bind_context(monkeypatch, await status_context(initial_status, later + timedelta(minutes=5)))
+    assert await map_delivery_policy(session, queued, later + timedelta(minutes=5)) == "REJECTED"
+
+
+async def test_status_uses_newer_check_and_never_failed_stale_or_unknown_data():
+    store = Store()
+    session = Session(store)
+    initial = await status_context("ScheduleApplies")
+    await module._plan_status_changes(session, initial, NOW)
+    later = NOW + timedelta(minutes=5)
+    waiting = await status_context("WaitingForSchedule", later)
+    failed = replace(waiting, map_view=replace(waiting.map_view, last_fetch_succeeded=False))
+    assert await module._plan_status_changes(session, failed, later) == []
+    assert await module._plan_status_changes(session, waiting, later + timedelta(hours=1)) == []
+    old = await status_context("WaitingForSchedule", NOW)
+    assert await module._plan_status_changes(session, old, later) == []
+    (event,) = await module._plan_status_changes(session, waiting, later)
+    assert event[2]["status"] == "WaitingForSchedule"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_status_change_accepts_equal_source_check_only_from_newer_fetch(legacy):
+    store = Store()
+    session = Session(store)
+    await module._plan_status_changes(session, await status_context("ScheduleApplies"), NOW)
+    if legacy:
+        stored = store.rows[(RuntimeSetting, module.STATUS_STATE_PREFIX + str(IDENTIFIER))]
+        for item in stored.value["days"].values():
+            item.pop("fetched_at")
+    later = NOW + timedelta(minutes=5)
+    current = await status_context("WaitingForSchedule", later)
+    wire = current.map_view.data.to_wire()
+    for item in wire["rows"]:
+        item["today_checked_at"] = NOW.isoformat()
+        item["tomorrow_checked_at"] = NOW.isoformat()
+    data = RegionMap.from_wire(wire)
+    current = replace(current, map_view=replace(current.map_view, data=data))
+    (event,) = await module._plan_status_changes(session, current, later)
+    assert event[2]["status"] == "WaitingForSchedule"
+    assert await module._plan_status_changes(session, current, later + timedelta(seconds=1)) == []
+    regressed = await status_context("ScheduleApplies", later + timedelta(minutes=5))
+    wire = regressed.map_view.data.to_wire()
+    for item in wire["rows"]:
+        item["today_checked_at"] = (NOW - timedelta(seconds=1)).isoformat()
+    regressed = replace(regressed, map_view=replace(regressed.map_view, data=RegionMap.from_wire(wire)))
+    assert await module._plan_status_changes(session, regressed, later + timedelta(minutes=5)) == []
+
+
+async def test_tomorrow_status_publication_and_emergency_dedupe(monkeypatch):
+    store = Store()
+    planner = PostgresPowerMapNotificationRepository(store)
+    bind_context(monkeypatch, await status_context("ScheduleApplies"))
+    await planner._plan_user(IDENTIFIER, NOW)
+    later = NOW + timedelta(minutes=5)
+    current = await status_context("EmergencyShutdowns", later, tomorrow_status="ScheduleApplies")
+    bind_context(monkeypatch, current)
+    await planner._plan_user(IDENTIFIER, later)
+    events = [item for item in store.outbox.values() if item.event_type == module.STATUS_CHANGED]
+    assert {(item.payload["status_day"], item.payload["status"]) for item in events} == {
+        (DAY.isoformat(), "EmergencyShutdowns"),
+        ((DAY + timedelta(days=1)).isoformat(), "ScheduleApplies"),
+    }
+    assert not any(item.event_type == module.EMERGENCY_STARTED for item in store.outbox.values())
+    await planner._plan_user(IDENTIFIER, later + timedelta(seconds=1))
+    assert len([item for item in store.outbox.values() if item.event_type == module.STATUS_CHANGED]) == 2
+
+
+async def test_unknown_restriction_cannot_announce_schedule_resumption():
+    store = Store()
+    session = Session(store)
+    await module._plan_status_changes(session, await status_context("EmergencyShutdowns"), NOW)
+    later = NOW + timedelta(minutes=5)
+    current = await status_context("ScheduleApplies", later)
+    data = current.map_view.data
+    wires = data.to_wire()["rows"]
+    for item in wires:
+        item["today_announcements"] = [{"kind": "UNKNOWN_RESTRICTION", "state": "active",
+                                        "scope": "supplier"}]
+    blocked = RegionMap(data.area, tuple(wires), later)
+    current = replace(current, map_view=replace(current.map_view, data=blocked))
+    assert await module._plan_status_changes(session, current, later) == []
+
+
+@pytest.mark.parametrize("field,value", [("status", "unknown"), ("status_day", "2026-11-4"),
+                                        ("group", "unknown"), ("transition_at", "bad")])
+async def test_status_payload_rejects_unvalidated_fields(field, value):
+    session = Session(Store())
+    await module._plan_status_changes(session, await status_context("ScheduleApplies"), NOW)
+    later = NOW + timedelta(minutes=5)
+    (event,) = await module._plan_status_changes(session, await status_context("NoShutdowns", later), later)
+    payload = {**event[2], field: value}
+    with pytest.raises(ValueError):
+        render_map_outbox(event[0], payload, later)
+
+
+async def test_status_end_date_and_expiry_cannot_be_reauthorized(monkeypatch):
+    store = Store()
+    session = Session(store)
+    await module._plan_status_changes(session, await status_context("ScheduleApplies"), NOW)
+    later = NOW + timedelta(minutes=5)
+    current = await status_context("NoShutdowns", later)
+    (event,) = await module._plan_status_changes(session, current, later)
+    bind_context(monkeypatch, current)
+    assert await map_delivery_policy(session, row(event[2], event[0]), later + timedelta(minutes=10)) == "REJECTED"
+    with pytest.raises(ValueError, match="expired"):
+        render_map_outbox(event[0], event[2], later + timedelta(minutes=10))
